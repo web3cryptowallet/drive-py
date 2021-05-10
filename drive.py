@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import os
 from os.path import isfile, isdir, islink, join
@@ -36,11 +36,7 @@ def md5(fname):
 
     return hash_md5.hexdigest(), size
 
-manager = Manager()
-RES = manager.list(range(2))
-SIZES = manager.list(range(2))
-
-def hash_files(RES, i, src, fmap):
+def hash_files(RES, SIZES, i, src, fmap):
     total_size = 0
 #    print "hash_files", i
     for f in fmap:
@@ -48,7 +44,7 @@ def hash_files(RES, i, src, fmap):
 #            print "HASH:", src, f
             fmap[f]['md5'], fmap[f]['size'] = md5(join(src, f))
             total_size += fmap[f]['size']
-            print "MD5:", fmap[f]['md5'], src, f, fmap[f]['size']
+            print("MD5:", fmap[f]['md5'], src, f, fmap[f]['size'])
 
     RES[i] = fmap
     SIZES[i] = total_size
@@ -56,7 +52,7 @@ def hash_files(RES, i, src, fmap):
     return fmap
 
 def hash_files_thread_start(i, src, fmap):
-    p = Process(target=hash_files, args=(RES, i, src, fmap))
+    p = Process(target=hash_files, args=(RES, SIZES, i, src, fmap))
     p.start()
     return p
 
@@ -168,8 +164,8 @@ def process():
         process_root(SRC_PATHS[i], DST_PATHS[i])
 
 if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print 'Usage: drive.py <src> <dst> <logdir>'
+    if len(sys.argv) < 4:
+        print('Usage: drive.py <src> <dst> <logdir>')
         exit(1)
 
     src = sys.argv[1]
@@ -179,13 +175,18 @@ if __name__ == '__main__':
     if not isdir(logdir):
         os.makedirs(logdir)
 
+    global RES, SIZES
+    manager = Manager()
+    RES = manager.list(range(2))
+    SIZES = manager.list(range(2))
+
     add_path(src, dst)
 
     llog = LiveLog(join(logdir, "llog-proc.sh"))
     llogdiff = LiveLog(join(logdir, "llog-diff.sh"))
     llogfiles = LiveLog(join(logdir, "llog-llogfiles.sh"))
 
-    print 'SRC_PATHS =', SRC_PATHS
-    print 'DST_PATHS =', DST_PATHS
+    print('SRC_PATHS =', SRC_PATHS)
+    print('DST_PATHS =', DST_PATHS)
     process()
 
