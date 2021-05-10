@@ -30,8 +30,7 @@ npm i -g livecomment
 ```
 2. Start LiveComment web server
 ```bash
-cd log-test0/
-livecomment
+livecomment --path log-test0
 ```
 3. Open http://localhost:3070/
 ```bash
