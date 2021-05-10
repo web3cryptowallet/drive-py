@@ -23,7 +23,7 @@ Try this demo example
 ./drive.py "test0/t0" "test0/t1" "log-test0"
 ```
 
-### See log files in *log-test0/* in your browser 
+### View log files in browser 
 1. Install LiveComment
 ```bash
 npm i -g livecomment
@@ -40,7 +40,7 @@ open http://localhost:3070/
 
 ![log-test0](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/llog-demo.jpg)
 
-### See log files in *log-test0/* in your shell
+### Dump log files to shell
 ```bash
 $ cd log-test0/
 
