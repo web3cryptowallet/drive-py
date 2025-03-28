@@ -26,4 +26,7 @@ class LiveLog:
 
         self.file.write(s + '\n')
 
+    def flush(self):
+        self.file.flush()
+
 
