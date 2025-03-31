@@ -144,7 +144,14 @@ def process_dir(src, dst):
         elif isdir(join(src, f)):
             type = 'dir'
             src_total_dirs += 1
-        smap[f] = {"eq": 'missed', "type": type}
+
+        # Set eq, type
+        if dst:
+            smap[f] = {"eq": 'missed', "type": type}
+        else:
+            # force ok
+            smap[f] = {"eq": 'ok', "type": type}
+
 
     if dst:
         dmap = {}
