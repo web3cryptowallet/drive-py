@@ -200,21 +200,24 @@ def process_dir(src, dst):
         for f in smap:
             if smap[f]["eq"] != 'ok':
         #            print "src=", f, smap[f]["eq"], smap[f]["type"]
-                llogdiff.put("src= "+ f + ' ' + smap[f]["eq"] + ' ' + smap[f]["type"] + ' ' + str(smap[f].get("md5")))
+                llogdiff.put("src= "+ f + ' ' + smap[f]["eq"] + ' ' + smap[f]["type"] + ' ' + str(smap[f].get("md5") + ' ' + str(smap[f].get('size'))))
 
 
         for f in dmap:
             if dmap[f]["eq"] != 'ok':
         #            print "drc=", f, smap[f]["eq"], smap[f]["type"]
-                llogdiff.put("dst= " + f + ' ' + dmap[f]["eq"] + ' ' + dmap[f]["type"] + ' ' + str(dmap[f].get("md5")))
+                llogdiff.put("dst= " + f + ' ' + dmap[f]["eq"] + ' ' + dmap[f]["type"] + ' ' + str(dmap[f].get("md5") + ' ' + str(dmap[f].get('size'))))
 
     llogdiff.end()
 
     for f in smap:
         if smap[f]["eq"] == 'ok' and smap[f]["type"] == 'dir':
+            dst_new = None
             if dst:
-                dst = join(dst, f)
-            process_dir(join(src, f), dst)
+                if dmap[f]["type"] == 'missed':
+                    continue
+                dst_new = join(dst, f)
+            process_dir(join(src, f), dst_new)
 
 def load_log_parse_line(ctx, line):
     parts = line.split(maxsplit=3)  # Split into 4 parts (hashtype, hash, file, size)
