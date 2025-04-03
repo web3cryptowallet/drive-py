@@ -11,17 +11,40 @@ class LiveLogBasic:
     def open_new(self):
         self._fs = open(self._filename, 'w', encoding='utf-8')
 
+#    def get_path(self):
+#        return self._stack.
+
     def begin(self, path):
+        # Check many: list or strings
+        if isinstance(path, list):
+            if len(path) == 0:
+                return
+            self._path = path.pop()
+            many = True
+        else:
+            self._path = path
+            many = False
+
         self._stack.append(self._path)
-        self._path = path
         self._fs.write(f"# {self._path}[\n")
+        
+        if many:
+            self.begin(path)
 
     def end(self):
+        # todo: end_subs many
+        
         self._fs.write(f"# {self._path}]\n")
         self._path = ""
 
         if self._stack:
             self._path = self._stack.pop()
+
+    def begin_subs(self, path):
+        self.begin(path.split('/'))
+
+    def end_subs(self, path):
+        self.end(path.split('/'))
 
     def put(self, s):
         self._fs.write(f"{s}\n")
@@ -95,7 +118,10 @@ class LiveLog(LiveLogBasic):
         self._filename = filename
 
     def log(self, path, s):
-        vstrings = path.split('/')
+        if isinstance(path, str):
+            vstrings = path.split('/')
+        else:
+            vstrings = path
         self._tree.log(vstrings, s)
 
     def replace(self, path, s):
@@ -106,7 +132,8 @@ class LiveLog(LiveLogBasic):
 
     def flush(self):
         # Clear and reopen file
-        self._fs.close()
+        if hasattr(self, '_fs'):
+            self._fs.close()
         self._fs = open(self._filename, 'w', encoding='utf-8')
         self.flush_node(self._tree)
         self._fs.flush()
@@ -168,7 +195,7 @@ class LiveLog(LiveLogBasic):
                     self.log(path, '\n'.join(current_text))
 
         except FileNotFoundError:
-            pass  # File doesn't exist yet, that's okay 
+            print(f"Can't open file {self._filename}")
 
 def test():
     # Create a new log file

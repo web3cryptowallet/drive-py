@@ -12,6 +12,8 @@ from livelog2 import LiveLog as LiveLog2
 SRC_PATHS=[]
 DST_PATHS=[]
 
+NO_FILE_TREE=False
+
 def add_path(src, dst):
     SRC_PATHS.append(src)
     if dst:
@@ -110,7 +112,7 @@ def process():
     llog.put('dst_size_unit: ' + human_readable_size(dst_total_size))
     llog.end()
 
-    print(f'Processed {src_total_files} files {src_total_dirs} dirs {human_readable_size(dst_total_size)} size')
+    print(f'Processed {src_total_files} files {src_total_dirs} dirs {human_readable_size(src_total_size)} size')
 
 
 def process_dir(src, dst):
@@ -323,10 +325,23 @@ def process_compare(files, logdir):
     llog.begin('Duplicate')
 
     for key, hash in compared["hashes"].items():
+        hash = sorted(hash)
         if len(hash) > 1:
+            filename0 = next(iter(hash), None)
+#            filename0 = os.path.dirname(filename0)
+
+            if not NO_FILE_TREE:
+                llog.begin(filename0)
+#                llog.begin_subs(filename0) # todo
+                
             llog.put(f"DUP {key}")
+
             for filename in hash:
                 llog.put(filename)
+
+            if not NO_FILE_TREE:
+                llog.end(filename0)
+#                llog.end_subs(filename0) # todo
 
     llog.end()
     llog.begin('Modified')
@@ -363,7 +378,7 @@ def load_log(ctx, filename):
 
     print(f"Loaded hashes {len(ctx['hashes'])} files {len(ctx['files'])}")
     #print("->", ctx)
-    pp.pprint(ctx)
+#    pp.pprint(ctx)
 
 
 # PROCESS COMPARE ]
@@ -381,6 +396,8 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--file', action='append', help='Log file path')
     parser.add_argument('-e', '--exclude', help='Exclude dir for scanning (with -f)')
 
+    parser.add_argument('-n', '--notree', help='No files tree')
+
     parser.add_argument('logdir', help='Log directory path')
 
     try:
@@ -395,8 +412,13 @@ if __name__ == '__main__':
 
     print("PWD", os.getcwd())
 
+    # Option -n --notree
+#    if args.notree:
+    NO_FILE_TREE = args.notree
+
     # MKDIR LOGDIR [
 
+    # Option ..<logdir>
     logdir = args.logdir
     
     if not isdir(logdir):

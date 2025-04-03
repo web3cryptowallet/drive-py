@@ -1,0 +1,17 @@
+# Python source files
+.DS_Store
+*.py[cod]
+__pycache__/
+.idea/
+.vscode/
+*.swp
+*.swo
+git-rename.sh
+test.log
+
+logs
+logs-*/
+cmp-*/
+log-*/
+llog-*/
+livelog-drv
