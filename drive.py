@@ -201,14 +201,15 @@ def process_dir(src, dst):
 
         for f in smap:
             if smap[f]["eq"] != 'ok':
-        #            print "src=", f, smap[f]["eq"], smap[f]["type"]
-                llogdiff.put("src= "+ f + ' ' + smap[f]["eq"] + ' ' + smap[f]["type"] + ' ' + str(smap[f].get("md5") + ' ' + str(smap[f].get('size'))))
+#                print("src=", f, smap[f]["eq"], smap[f]["type"])
+#                print("md5,size", "A"+str(smap[f].get("md5")), smap[f].get("size"))
+                llogdiff.put("src= "+ f + ' ' + smap[f]["eq"] + ' ' + smap[f]["type"] + ' ' + str(smap[f].get("md5")) + ' ' + str(smap[f].get('size')))
 
 
         for f in dmap:
             if dmap[f]["eq"] != 'ok':
         #            print "drc=", f, smap[f]["eq"], smap[f]["type"]
-                llogdiff.put("dst= " + f + ' ' + dmap[f]["eq"] + ' ' + dmap[f]["type"] + ' ' + str(dmap[f].get("md5") + ' ' + str(dmap[f].get('size'))))
+                llogdiff.put("dst= " + f + ' ' + dmap[f]["eq"] + ' ' + dmap[f]["type"] + ' ' + str(dmap[f].get("md5")) + ' ' + str(dmap[f].get('size')))
 
     llogdiff.end()
 
@@ -385,10 +386,11 @@ def load_log(ctx, filename):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-    description="Compare directories. Usage examples:\n"
-                "  drive.py -s <src>.. <logdir> # scan dirs only\n"
-                "  drive.py -s <src>.. -d <dst>.. <logdir> # compare dirs"
-                "  drive.py -f <log>.. -e <dir>.. <logdir> # compare logs"
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    description=('''Compare directories. Usage examples:
+  drive.py -s <src>.. <logdir> # scan dirs only
+  drive.py -s <src>.. -d <dst>.. <logdir> # compare dirs
+  drive.py -f <log>.. -e <dir>.. <logdir> # compare logs''')
     )
     parser.add_argument('-s', '--src', action='append', help='Source directory path')
     parser.add_argument('-d', '--dst', action='append', help='Destination directory path')
