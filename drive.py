@@ -3,6 +3,9 @@
 import os
 from os.path import isfile, isdir, islink, join
 from multiprocessing import Process, Manager, Value, Pool
+from threading import Thread
+from queue import Queue
+from threading import Semaphore
 import hashlib
 import argparse
 
@@ -41,7 +44,7 @@ def md5(fname):
 
     return hash_md5.hexdigest(), size
 
-def hash_files(RES, SIZES, i, src, fmap):
+def hash_files1(RES, SIZES, i, src, fmap):
     total_size = 0
 #    print "hash_files", i
     for f in fmap:
@@ -56,10 +59,102 @@ def hash_files(RES, SIZES, i, src, fmap):
 
     return fmap
 
+THREADS=1
+
+def process_file(args):
+    try:
+        f, src = args
+        md5_hash, size = md5(join(src, f))
+        print("MD5:", md5_hash, src, f, size)
+        return f, md5_hash, size
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)  # Exit the program with a status code (1 indicates an error)
+
+def hash_files(RES, SIZES, i, src, fmap):
+    # Create arguments list for files only
+    file_args = [(f, src) for f in fmap.keys() if fmap[f]['type'] == 'file']
+    
+    total_size = 0
+    results = []
+    
+    # Process files in batches
+    def process_batch(batch):
+        threads = []
+        batch_results = []
+        
+        def thread_worker(args):
+            result = process_file(args)
+            batch_results.append(result)
+
+        try:
+            # Create and start threads for this batch
+            for args in batch:
+                t = Thread(target=thread_worker, args=(args,))
+                threads.append(t)
+                t.start()
+
+            # Wait for all threads in this batch to complete
+            for t in threads:
+                t.join()
+
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)  # Exit the program with a status code (1 indicates an error)
+
+        return batch_results
+
+    # Process files in batches of size THREADS
+    for j in range(0, len(file_args), THREADS):
+        batch = file_args[j:j + THREADS]
+        results.extend(process_batch(batch))
+
+    # Update fmap with results and calculate total size
+    for f, md5_hash, size in results:
+        fmap[f]['md5'] = md5_hash
+        fmap[f]['size'] = size
+        total_size += size
+
+    RES[i] = fmap
+    SIZES[i] = total_size
+
+    return fmap
+    
+def hash_filesX(RES, SIZES, i, src, fmap):
+    # Create arguments list for files only
+    file_args = [(f, src) for f in fmap.keys() if fmap[f]['type'] == 'file']
+    
+    total_size = 0
+
+    # Create thread pool
+    with Pool(processes=args.threads) as pool:
+        # Map process_file function to all files
+        results = pool.map(process_file, file_args)
+        
+        # Update fmap with results and calculate total size
+        for f, md5_hash, size in results:
+            fmap[f]['md5'] = md5_hash
+            fmap[f]['size'] = size
+            total_size += size
+
+
+    RES[i] = fmap
+    SIZES[i] = total_size
+
+    return fmap
+
+
+#def hash_files_thread_start(i, src, fmap):
+#    p = Process(target=hash_files, args=(RES, SIZES, i, src, fmap))
+#    p.start()
+#    return p
+
 def hash_files_thread_start(i, src, fmap):
-    p = Process(target=hash_files, args=(RES, SIZES, i, src, fmap))
-    p.start()
-    return p
+    # Replace Process with Thread
+    t = Thread(target=hash_files, args=(RES, SIZES, i, src, fmap))
+    t.start()
+    return t
+
 
 def llog_files(src, fmap):
     for f in fmap:
@@ -222,29 +317,58 @@ def process_dir(src, dst):
                 dst_new = join(dst, f)
             process_dir(join(src, f), dst_new)
 
-def load_log_parse_line(ctx, line):
-    parts = line.split(maxsplit=3)  # Split into 4 parts (hashtype, hash, file, size)
-    if len(parts) == 4:
-        hashtype, hash_value, file, size = parts
-        id_ = f"{hashtype}:{hash_value}:{size}"  # Construct ID
-        file = file.strip('"')  # Remove surrounding quotes
+#import shlex
 
-        hashes = ctx["hashes"]
-        files = ctx["files"]
+def parse_line_llog(line):
+    p1 = line.find(' ')
+    p2 = line.find(' ', p1 + 1)
 
-        # Add to hashes dictionary
-        if id_ not in hashes:
-            hashes[id_] = set()
-        hashes[id_].add(file)
+    hashtype = line[:p1]
+    hashvalue = line[p1 + 1:p2]
 
-        # Add to files dictionary
-        if file not in files:
-            files[file] = set()
-        files[file].add(id_)
+    if line[p2 + 1] == '"':
+        p3 = line.rfind('" ')
+        filepath = line[p2 + 2:p3]
+        size = int(line[p3 + 2:])
     else:
+        p3 = line.rfind(' ')
+        filepath = line[p2 + 1:p3]
+        size = int(line[p3 + 1:])
+
+    return hashtype, hashvalue, filepath, size
+
+def load_log_parse_line(ctx, line):
+#    parts = line.split(maxsplit=3)  # Split into 4 parts (hashtype, hash, file, size)
+#    hashtype, hash_value, file, size 
+    try:
+        parts = parse_line_llog(line)
+#        parts = shlex.split(line)
+        if len(parts) == 4:
+            hashtype, hash_value, file, size = parts
+            id_ = f"{hashtype}:{hash_value}:{size}"  # Construct ID
+            file = file.strip('"')  # Remove surrounding quotes
+
+            hashes = ctx["hashes"]
+            files = ctx["files"]
+
+            # Add to hashes dictionary
+            if id_ not in hashes:
+                hashes[id_] = set()
+            hashes[id_].add(file)
+
+            # Add to files dictionary
+            if file not in files:
+                files[file] = set()
+            files[file].add(id_)
+        else:
+            # Error
+            msg = f"Can't parse line: {line}"
+            print(f"\033[91mError: {msg}\033[0m")
+    except ValueError:
         # Error
-        msg = "Can't parse line: {line}"
+        msg = f"Can't parse line: {line}"
         print(f"\033[91mError: {msg}\033[0m")
+
 
 # PROCESS COMPARE [
 
@@ -374,7 +498,7 @@ def load_log(ctx, filename):
         print("#", node.name, "count", len(node._ss))
 #        print(node.text)
         for line in node._ss:
-            print(line)
+#            print(line)
             load_log_parse_line(ctx, line)
 
     print(f"Loaded hashes {len(ctx['hashes'])} files {len(ctx['files'])}")
@@ -400,6 +524,8 @@ if __name__ == '__main__':
 
     parser.add_argument('-n', '--notree', help='No files tree')
 
+    parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads for file hashing')
+
     parser.add_argument('logdir', help='Log directory path')
 
     try:
@@ -417,6 +543,8 @@ if __name__ == '__main__':
     # Option -n --notree
 #    if args.notree:
     NO_FILE_TREE = args.notree
+
+    THREADS = args.threads
 
     # MKDIR LOGDIR [
 

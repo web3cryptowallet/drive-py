@@ -15,3 +15,5 @@ cmp-*/
 log-*/
 llog-*/
 livelog-drv
+
+.venv
