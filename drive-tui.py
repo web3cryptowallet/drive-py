@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!python3
 
 import os
 from os.path import isfile, isdir, islink, join
@@ -53,6 +53,7 @@ class Node:
     parent: "Node | None" = None
     children: dict[str, "Node"] = field(default_factory=dict)
     info: dict | None = None
+    size: int = 0
 
 
 class VirtualFS:
@@ -67,25 +68,31 @@ class VirtualFS:
 
         total_dirs = 0
         total_files = 0
+        total_size = 0
 
         for path, hashes in files.items():
-#            parts = path.split("/")
             parts = path.lstrip("/").split("/")
-            cur = self.root
 
             total_files += 1
 
             if total_files % 100000 == 0:
                 print(f'{total_files}/{len(files)} files')
 
+            hashinfo = next(iter(hashes))
+            md5, size = hashinfo.rsplit(":", 1)
+
+            size = int(size)
+
+            cur = self.root
+
             for part in parts[:-1]:
                 if part not in cur.children:
                     cur.children[part] = Node(part, True, parent=cur)
                     total_dirs += 1
+                cur.children[part].size += size
                 cur = cur.children[part]
 
-            hashinfo = next(iter(hashes))
-            md5, size = hashinfo.rsplit(":", 1)
+            total_size += size
 
             cur.children[parts[-1]] = Node(
                 name=parts[-1],
@@ -95,10 +102,10 @@ class VirtualFS:
                     "path": path,
                     "hashinfo": hashinfo, 
                     "hash": md5,
-                    "size": int(size),
                 },
+                size = size,
             )
-        print(f"VFS: built {total_dirs} dirs and {total_files} files")
+        print(f"VFS: built {total_dirs} dirs and {total_files} files {format_size(total_size, 0)}")
 
     def pwd(self):
         node = self.cwd
@@ -144,6 +151,9 @@ class VirtualFS:
 
         if node.is_dir:
             self.cwd = node
+
+    def get_cwd(self):
+        return self.cwd
 
     def get(self, name):
         if name == "..":
@@ -225,6 +235,60 @@ def format_size(size, type):
 
     return f"{round(size)} PB"
 
+from textual.scroll_view import ScrollView
+from textual.strip import Strip
+from rich.text import Text
+from textual.geometry import Size
+from rich.console import Console
+
+# _console = Console(width=1, record=True)
+
+
+# class VirtualList(ScrollView):
+#     def __init__(self, rows=None, **kwargs):
+#         super().__init__(**kwargs)
+#         self.rows = rows or []
+#         self.cursor = 0
+
+
+#     def set_rows(self, rows):
+#         self.rows = rows
+#         self.virtual_size = Size(self.size.width, max(1, len(rows)))
+#         self.refresh(layout=True)
+
+#     def render_line(self, y: int) -> Strip:
+#         row = y + self.scroll_offset.y
+
+#         if row >= len(self.rows):
+#             return Strip.blank(self.size.width)
+
+#         text = self.rows[row]
+#         if isinstance(text, dict):
+#             text = text["text"]
+
+#         rich_text = Text(str(text), no_wrap=True)
+
+#         if row == self.cursor:
+#             rich_text.stylize("reverse")
+
+#         options = _console.options.update(width=self.size.width)
+#         segments = list(_console.render(rich_text, options))
+#         return Strip(segments)
+
+#     def action_cursor_down(self):
+#         if self.cursor < len(self.rows) - 1:
+#             self.cursor += 1
+#             self.scroll_to(y=self.cursor, animate=False)
+#             self.refresh()
+
+#     def action_cursor_up(self):
+#         if self.cursor > 0:
+#             self.cursor -= 1
+#             self.scroll_to(y=self.cursor, animate=False)
+#             self.refresh()
+
+from textual.widgets import DataTable
+
 class DemoApp(App):
     CSS = """
     Horizontal {
@@ -242,6 +306,9 @@ class DemoApp(App):
     }
 
     #quick {
+        height: 100%;
+        width: 55%;
+        border: solid blue;
         padding: 1;
     }
     """
@@ -266,14 +333,23 @@ class DemoApp(App):
 
         with Horizontal():
             yield ListView(id="files")
-            with VerticalScroll(id="quick_scroll"):
-                yield Static(id="quick")
+            yield DataTable(id="quick")
+#            yield VirtualList(id="quick")
+#            yield ListView(id="quick")
+#            with VerticalScroll(id="quick_scroll"):
+#                yield Static(id="quick")
 
         yield Footer()
 
     def on_mount(self):
         self.vfs = VFS
         self.nav_stack = []  # Track directory history for mc-style restoration
+
+#        files = self.query_one("#files", DataTable)
+#        files.add_columns("Name", "Size", "Dup")
+
+        quick = self.query_one("#quick", DataTable)
+        quick.add_column("Info")
         self.refresh_list()
 
     def go_back(self):
@@ -297,7 +373,12 @@ class DemoApp(App):
             grid.add_column(justify="right")
 
             if is_dir:
-                grid.add_row(f"📁 {name}", "", "")
+                if name == '..':
+                    node = self.vfs.get_cwd()
+                else:
+                    node = self.vfs.get(name)
+                size = format_size(node.size, 0)
+                grid.add_row(f"📁 {name}", "", size)
             else:
                 node = self.vfs.get(name)
 
@@ -305,7 +386,7 @@ class DemoApp(App):
                 if isinstance(file_hash, set):
                     file_hash = next(iter(file_hash))
 
-                size = format_size(node.info.get("size"), 1)
+                size = format_size(node.size, 1)
 
                 dup_count = len(self.vfs.data['hashes'].get(file_hash, []))
 
@@ -324,7 +405,8 @@ class DemoApp(App):
 
         lv.extend(items)
 
-        self.query_one("#quick").update(self.vfs.pwd())
+#        self.query_one("#quick").update(self.vfs.pwd())
+        self.set_quick_text(self.vfs.pwd())
 
         def apply_selection():
             lv.focus()
@@ -335,10 +417,15 @@ class DemoApp(App):
         #self.query_one("#quick_scroll", VerticalScroll).scroll_home(animate=False)
 
     def on_list_view_selected(self, event: ListView.Selected):
+        if event.list_view.id == "quick":
+#            path = getattr(event.item, "file_path", None)
+            return
+
         name = event.item.file_name
 
         if name == "..":
-            self.query_one("#quick").update(self.vfs.pwd())
+#            self.query_one("#quick").update(self.vfs.pwd())
+            self.set_quick_text(self.vfs.pwd())
             self.go_back()
             return
 
@@ -367,24 +454,92 @@ class DemoApp(App):
             other_dups = [p for p in all_dups if p != current_path]
             
             # 3. Format as a clean bulleted list
-            dups_formatted = "\n".join(f"  • {p}" for p in sorted(other_dups)) if other_dups else "  None"
+#            dups_formatted = "\n".join(f"  • {p}" for p in sorted(other_dups)) if other_dups else "  None"
 
-            self.query_one("#quick").update(
-                f"""Path : {current_path}
+#             self.query_one("#quick").update(
+#                 f"""Path : {current_path}
 
-Name: {node.name}
+# Name: {node.name}
 
-Size: {format_size(node.info.get('size'), 0)}
+# Size: {format_size(node.size, 0)}
 
-{file_hash}
+# {file_hash}
 
-Other Duplicates ({len(other_dups)}):
-{dups_formatted}
-"""
-            )
+# Other Duplicates ({len(other_dups)}):
+# {dups_formatted}
+# """
+#            )
 
 
-#Size : {node.info.get('size', 'N/A')} bytes
+            # quick = self.query_one("#quick", ListView)
+            # quick.clear()
+
+            # quick.append(ListItem(Label(f"Path: {current_path}")))
+            # quick.append(ListItem(Label(f"Name: {node.name}")))
+            # quick.append(ListItem(Label(f"Size: {format_size(node.size, 0)}")))
+            # quick.append(ListItem(Label(file_hash)))
+            # quick.append(ListItem(Label("")))
+            # quick.append(ListItem(Label(f"Other Duplicates ({len(other_dups)}):")))
+
+            # for path in other_dups:
+            #     item = ListItem(Label(path))
+            #     item.file_path = path
+            #     quick.append(item)
+
+            rows = [
+                f"Path: {current_path}",
+                f"Name: {node.name}",
+                f"Size: {format_size(node.size, 0)}",
+                file_hash,
+                "",
+                f"Other Duplicates ({len(other_dups)}):",
+            ]
+
+            rows.extend((path, path) for path in other_dups)
+
+            self.set_quick_rows(rows)
+
+    # def set_quick_text(self, text: str):
+    #     quick = self.query_one("#quick", ListView)
+    #     quick.clear()
+    #     quick.append(ListItem(Label(text)))
+
+    def set_quick_text(self, text: str):
+        self.set_quick_rows([text])
+
+    def set_quick_rows(self, rows):
+        quick = self.query_one("#quick", DataTable)
+
+        quick.clear()
+
+        for row in rows:
+            if isinstance(row, tuple):
+                quick.add_row(row[0])
+            elif isinstance(row, dict):
+                quick.add_row(row["text"])
+            else:
+                quick.add_row(str(row))
+
+#    def set_quick_rows(self, rows):
+#        quick = self.query_one("#quick", VirtualList)
+#        quick.set_rows(rows)
+
+    # def set_quick_rows(self, rows):
+    #     quick = self.query_one("#quick", VirtualList)
+    #     quick.clear()
+
+    #     items = []
+    #     for row in rows:
+    #         if isinstance(row, tuple):
+    #             text, path = row
+    #         else:
+    #             text, path = row, None
+
+    #         item = ListItem(Label(text))
+    #         item.file_path = path
+    #         items.append(item)
+
+    #     quick.extend(items)
 
     def action_back(self):
         self.go_back()
@@ -454,6 +609,10 @@ if __name__ == '__main__':
     data = db
 
     VFS = VirtualFS(data)
+
+    # cleanup
+    del data["files"]
+#    del data["hashes"]
 
     DemoApp().run()
 
