@@ -97,6 +97,14 @@ sudo apt install xclip
 
 ```
 
+## FAQ
+
+### Why is the config in Livecomment format instead of JSON?
+
+> Why is the config in Livecomment format instead of JSON?
+
+Livecomment is an extensible format that can store multiple types of data. It supports both traditional Linux-style configuration formats (such as `fstab`-style mappings and plain text) as well as structured data like JSON, allowing different configuration styles to coexist in a single format.
+
 ## License
 MIT
 

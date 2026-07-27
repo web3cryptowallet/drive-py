@@ -55,6 +55,62 @@ class Node:
     info: dict | None = None
     size: int = 0
 
+def check_disabled_prefixes(prefix):
+    for prefix in disabled_prefixes:
+        if path.startswith(prefix):
+            return True
+    return False
+
+def normalize_path(path):
+    parts = path.replace("//", "/").lstrip("/").rstrip("/").split("/")
+
+    path = "/".join(parts)
+
+    return (path, parts) 
+
+# UPDATE PREFIX [
+
+def path_update_prefix(path):
+    for prefix in prefixes:
+        new_prefix = prefixes[prefix]['local']
+        new_prefix = prefixes[prefix]['alias']
+        if path.startswith(prefix):
+            path = new_prefix + path[len(prefix):]
+            break
+    return path
+
+aliases = {}
+
+def get_real_path(path):
+    _, parts = normalize_path(path)
+    alias = aliases.get(parts[0])
+    if alias:
+        parts[0] = alias
+        path = '/'.join(parts)
+
+    return path
+
+# UPDATE PREFIX ]
+
+import os
+import stat
+
+def get_stat_info(dup):
+    try:
+        p = get_real_path(dup)
+        st = os.stat(p)
+        return {
+            "exists": True,
+            "is_dir": stat.S_ISDIR(st.st_mode),
+            "is_file": stat.S_ISREG(st.st_mode),
+            "created": st.st_ctime,
+            "modified": st.st_mtime,
+            "size": st.st_size,
+        }
+    except FileNotFoundError:
+        return {
+            "exists": False,
+        }
 
 class VirtualFS:
     def __init__(self, data):
@@ -71,8 +127,18 @@ class VirtualFS:
         total_size = 0
 
         for path, hashes in files.items():
-            parts = path.lstrip("/").split("/")
 
+#            # CHECK DISABLED [
+#
+#            if (check_disabled_prefixes(prefix)):
+#                continue
+#
+#            # CHECK DISABLED ]
+
+            path = path_update_prefix(path)
+
+            path, parts = normalize_path(path)
+            
             total_files += 1
 
             if total_files % 100000 == 0:
@@ -160,6 +226,28 @@ class VirtualFS:
             return self.cwd.parent
         return self.cwd.children[name]
 
+
+    def get_full_info(self, node):
+        # 1. Get all paths sharing this hash (defaults to empty set if not found)
+        file_hash = node.info['hashinfo']
+        all_dups = self.data['hashes'].get(file_hash, set())
+        
+        # 2. Filter out the current file's path
+        current_path = node.info['path']
+
+        dups = [p for p in map(lambda x: path_update_prefix('/' + normalize_path(x)[0]), all_dups) if p != current_path]
+
+        dups_states = []
+
+        for dup in dups:
+            dups_states.append(get_stat_info(dup))
+
+        info = get_stat_info(current_path)
+        info["dups"] = dups
+        info["dups_states"] = dups_states
+
+        return info
+
 # VIRTUAL FS ]
 # VIRTUAL FS TEST [
 
@@ -241,55 +329,12 @@ from rich.text import Text
 from textual.geometry import Size
 from rich.console import Console
 
-# _console = Console(width=1, record=True)
-
-
-# class VirtualList(ScrollView):
-#     def __init__(self, rows=None, **kwargs):
-#         super().__init__(**kwargs)
-#         self.rows = rows or []
-#         self.cursor = 0
-
-
-#     def set_rows(self, rows):
-#         self.rows = rows
-#         self.virtual_size = Size(self.size.width, max(1, len(rows)))
-#         self.refresh(layout=True)
-
-#     def render_line(self, y: int) -> Strip:
-#         row = y + self.scroll_offset.y
-
-#         if row >= len(self.rows):
-#             return Strip.blank(self.size.width)
-
-#         text = self.rows[row]
-#         if isinstance(text, dict):
-#             text = text["text"]
-
-#         rich_text = Text(str(text), no_wrap=True)
-
-#         if row == self.cursor:
-#             rich_text.stylize("reverse")
-
-#         options = _console.options.update(width=self.size.width)
-#         segments = list(_console.render(rich_text, options))
-#         return Strip(segments)
-
-#     def action_cursor_down(self):
-#         if self.cursor < len(self.rows) - 1:
-#             self.cursor += 1
-#             self.scroll_to(y=self.cursor, animate=False)
-#             self.refresh()
-
-#     def action_cursor_up(self):
-#         if self.cursor > 0:
-#             self.cursor -= 1
-#             self.scroll_to(y=self.cursor, animate=False)
-#             self.refresh()
-
 from textual.widgets import DataTable
 
 class DemoApp(App):
+    TITLE = "DriveDB"
+    SUB_TITLE = "File Manager"
+
     CSS = """
     Horizontal {
         height: 1fr;
@@ -334,10 +379,6 @@ class DemoApp(App):
         with Horizontal():
             yield ListView(id="files")
             yield DataTable(id="quick")
-#            yield VirtualList(id="quick")
-#            yield ListView(id="quick")
-#            with VerticalScroll(id="quick_scroll"):
-#                yield Static(id="quick")
 
         yield Footer()
 
@@ -446,63 +487,52 @@ class DemoApp(App):
             if isinstance(file_hash, set):
                 file_hash = next(iter(file_hash))
 
-            # 1. Get all paths sharing this hash (defaults to empty set if not found)
-            all_dups = self.vfs.data['hashes'].get(file_hash, set())
+            info = self.vfs.get_full_info(node)
+
+            other_dups = info["dups"]
+            dups_states = info["dups_states"]
             
-            # 2. Filter out the current file's path
             current_path = node.info['path']
-            other_dups = [p for p in all_dups if p != current_path]
-            
-            # 3. Format as a clean bulleted list
-#            dups_formatted = "\n".join(f"  • {p}" for p in sorted(other_dups)) if other_dups else "  None"
 
-#             self.query_one("#quick").update(
-#                 f"""Path : {current_path}
+            indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red] "
 
-# Name: {node.name}
+            if info["exists"]:
+                pass
 
-# Size: {format_size(node.size, 0)}
+            other_dups = [
+                f"{'[green]●[/green]' if state['exists'] else '[red]●[/red]'} {dup}"
+                for dup, state in zip(info["dups"], dups_states)
+            ]
 
-# {file_hash}
+            size_now = info.get("size", -1)
+            size_suffix = ""
+            if size_now > 0:
+                if node.size != size_now:
+                    size_suffix = f'[red]{size_now}[/red]'
 
-# Other Duplicates ({len(other_dups)}):
-# {dups_formatted}
-# """
-#            )
-
-
-            # quick = self.query_one("#quick", ListView)
-            # quick.clear()
-
-            # quick.append(ListItem(Label(f"Path: {current_path}")))
-            # quick.append(ListItem(Label(f"Name: {node.name}")))
-            # quick.append(ListItem(Label(f"Size: {format_size(node.size, 0)}")))
-            # quick.append(ListItem(Label(file_hash)))
-            # quick.append(ListItem(Label("")))
-            # quick.append(ListItem(Label(f"Other Duplicates ({len(other_dups)}):")))
-
-            # for path in other_dups:
-            #     item = ListItem(Label(path))
-            #     item.file_path = path
-            #     quick.append(item)
+            is_dir_s = "DIR" if info.get("is_dir", False) else ""
+            is_file_s = "FILE" if info.get("is_file", False) else ""
 
             rows = [
-                f"Path: {current_path}",
+                f"{current_path}",
+                f"{indicator} {is_dir_s}{is_file_s}",
                 f"Name: {node.name}",
-                f"Size: {format_size(node.size, 0)}",
+                f"Size: {format_size(node.size, 0)} {size_suffix}",
+                f"Created: {info.get("created", "")}",
+                f"Modified: {info.get("modified", "")}",
                 file_hash,
                 "",
                 f"Other Duplicates ({len(other_dups)}):",
             ]
+            # "is_dir": stat.S_ISDIR(st.st_mode),
+            # "is_file": stat.S_ISREG(st.st_mode),
+            # "created": st.st_ctime,
+            # "modified": st.st_mtime,
+            # "size": st.st_size,
 
             rows.extend((path, path) for path in other_dups)
 
             self.set_quick_rows(rows)
-
-    # def set_quick_text(self, text: str):
-    #     quick = self.query_one("#quick", ListView)
-    #     quick.clear()
-    #     quick.append(ListItem(Label(text)))
 
     def set_quick_text(self, text: str):
         self.set_quick_rows([text])
@@ -519,27 +549,6 @@ class DemoApp(App):
                 quick.add_row(row["text"])
             else:
                 quick.add_row(str(row))
-
-#    def set_quick_rows(self, rows):
-#        quick = self.query_one("#quick", VirtualList)
-#        quick.set_rows(rows)
-
-    # def set_quick_rows(self, rows):
-    #     quick = self.query_one("#quick", VirtualList)
-    #     quick.clear()
-
-    #     items = []
-    #     for row in rows:
-    #         if isinstance(row, tuple):
-    #             text, path = row
-    #         else:
-    #             text, path = row, None
-
-    #         item = ListItem(Label(text))
-    #         item.file_path = path
-    #         items.append(item)
-
-    #     quick.extend(items)
 
     def action_back(self):
         self.go_back()
@@ -568,6 +577,11 @@ def load_db(scan_dirs):
 
 # LOAD DB ]
 
+import shlex
+
+disabled_prefixes = {}
+prefixes = {}
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -585,7 +599,59 @@ if __name__ == '__main__':
 #    if not args.file:
 #        if not args.src:
 #            parser.error('Need source path (-s)')
+    
+    # READ CONFIG [
+    
+    log2 = LiveLog2("config.sh")
+    log2.load()
 
+    # CONFIG MAP DRIVES
+
+    try:
+        map_drives = log2._tree._items["MAP DRIVES"]
+
+        for line in map_drives._ss:
+            parts  = shlex.split(line)
+
+            if len(parts) < 2:
+                continue
+
+            alias = None
+
+            if len(parts) >= 2:
+                prefix = parts[0]
+                local = os.path.expanduser(parts[1])
+                alias = parts[0]
+            if len(parts) >= 3:
+                alias = parts[2]
+
+            aliases[alias] = local
+
+            if local == '0':
+                disabled_prefixes[prefix] = prefix
+            else:
+                prefixes[prefix] = {'local': local, 'alias': alias}
+
+            print(prefix, local, alias)
+            #print(line)
+    except:
+        print("Can't read MAP DRIVE from config.sh")
+        pass
+
+    try:
+        # CONFIG SETTINGS JSON
+        settings_json = log2._tree._items["SETTINGS JSON"]
+
+        for node in llog2._tree._items_index:
+            print("#", node.name, "count", len(node._ss))
+    #        print(node.text)
+            for line in node._ss:
+                pass
+    except:
+        print("Can't read SETTINGS JSON from config.sh")
+        pass
+
+    # READ CONFIG ]
     # LOAD LLOG DB [
 
     scan_dirs = ['.']
@@ -613,6 +679,7 @@ if __name__ == '__main__':
     # cleanup
     del data["files"]
 #    del data["hashes"]
+
 
     DemoApp().run()
 

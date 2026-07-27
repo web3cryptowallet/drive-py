@@ -17,3 +17,6 @@ llog-*/
 livelog-drv
 
 .venv
+
+config.sh
+

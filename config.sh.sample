@@ -1,0 +1,15 @@
+# MAP DRIVES [
+# format:
+# <from> <local> [alias] #
+# if local == 0 then disable
+
+"/Volumes/1T" "~/media/1T" 1T
+"/mnt/c" 0 
+"test0/t0" "test0-t0" t0
+
+# MAP DRIVES ]
+# SETTINGS JSON [
+{
+    ...
+}
+# SETTINGS JSON ]
