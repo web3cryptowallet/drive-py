@@ -1,0 +1,17 @@
+/* theme.css */
+
+.theme-blue #actions {
+    cursor-background: blue;
+    fixed-cursor-background: blue;
+}
+
+.theme-green #actions {
+    cursor-background: green;
+    fixed-cursor-background: green;
+}
+
+.theme-red #actions {
+    cursor-background: red;
+    fixed-cursor-background: red;
+}
+

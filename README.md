@@ -97,6 +97,21 @@ sudo apt install xclip
 
 ```
 
+Run with in-memory db for small amount of files
+```
+python drive-tui.py
+```
+
+Build SQLite cache for big disks
+```
+python drive-tui.py -c sqlite -b
+```
+Run with SQLite cache
+```
+python drive-tui.py -c sqlite
+```
+
+
 ## FAQ
 
 ### Why is the config in Livecomment format instead of JSON?

@@ -20,6 +20,11 @@ from livelog2 import LiveLog as LiveLog2
 
 from drive import load_log
 
+from vfs import VirtualFS, Node
+from vfs import prefixes, disabled_prefixes, aliases # MapDrive
+from vfs import format_size
+from vfs import DriveActionsList
+
 def load_llogs(files):
 
     start = perf_counter()
@@ -41,242 +46,6 @@ def load_llogs(files):
 
     return right
 
-# VIRTUAL FS [
-
-from dataclasses import dataclass, field
-
-
-@dataclass
-class Node:
-    name: str
-    is_dir: bool
-    parent: "Node | None" = None
-    children: dict[str, "Node"] = field(default_factory=dict)
-    info: dict | None = None
-    size: int = 0
-
-def check_disabled_prefixes(prefix):
-    for prefix in disabled_prefixes:
-        if path.startswith(prefix):
-            return True
-    return False
-
-def normalize_path(path):
-    parts = path.replace("//", "/").lstrip("/").rstrip("/").split("/")
-
-    path = "/".join(parts)
-
-    return (path, parts) 
-
-# UPDATE PREFIX [
-
-def path_update_prefix(path):
-    for prefix in prefixes:
-        new_prefix = prefixes[prefix]['local']
-        new_prefix = prefixes[prefix]['alias']
-        if path.startswith(prefix):
-            path = new_prefix + path[len(prefix):]
-            break
-    return path
-
-aliases = {}
-
-def get_real_path(path):
-    _, parts = normalize_path(path)
-    alias = aliases.get(parts[0])
-    if alias:
-        parts[0] = alias
-        path = '/'.join(parts)
-
-    return path
-
-# UPDATE PREFIX ]
-
-import os
-import stat
-
-def get_stat_info(dup):
-    try:
-        p = get_real_path(dup)
-        st = os.stat(p)
-        return {
-            "exists": True,
-            "is_dir": stat.S_ISDIR(st.st_mode),
-            "is_file": stat.S_ISREG(st.st_mode),
-            "created": st.st_ctime,
-            "modified": st.st_mtime,
-            "size": st.st_size,
-        }
-    except FileNotFoundError:
-        return {
-            "exists": False,
-        }
-
-class VirtualFS:
-    def __init__(self, data):
-        self.root = Node("", True)
-        self.data = data
-        self.cwd = self.root
-        self._build(data["files"])
-
-    def _build(self, files):
-        print("VFS: Building..")
-
-        total_dirs = 0
-        total_files = 0
-        total_size = 0
-
-        for path, hashes in files.items():
-
-#            # CHECK DISABLED [
-#
-#            if (check_disabled_prefixes(prefix)):
-#                continue
-#
-#            # CHECK DISABLED ]
-
-            path = path_update_prefix(path)
-
-            path, parts = normalize_path(path)
-            
-            total_files += 1
-
-            if total_files % 100000 == 0:
-                print(f'{total_files}/{len(files)} files')
-
-            hashinfo = next(iter(hashes))
-            md5, size = hashinfo.rsplit(":", 1)
-
-            size = int(size)
-
-            cur = self.root
-
-            for part in parts[:-1]:
-                if part not in cur.children:
-                    cur.children[part] = Node(part, True, parent=cur)
-                    total_dirs += 1
-                cur.children[part].size += size
-                cur = cur.children[part]
-
-            total_size += size
-
-            cur.children[parts[-1]] = Node(
-                name=parts[-1],
-                is_dir=False,
-                parent=cur,
-                info={
-                    "path": path,
-                    "hashinfo": hashinfo, 
-                    "hash": md5,
-                },
-                size = size,
-            )
-        print(f"VFS: built {total_dirs} dirs and {total_files} files {format_size(total_size, 0)}")
-
-    def pwd(self):
-        node = self.cwd
-        parts = []
-        while node.parent:
-            parts.append(node.name)
-            node = node.parent
-        return "/" + "/".join(reversed(parts))
-
-    def listdir(self):
-        result = []
-
-        if self.cwd.parent:
-            result.append(("..", True))
-
-        dirs = []
-        files = []
-
-        for node in self.cwd.children.values():
-            if node.is_dir:
-                dirs.append(node)
-            else:
-                files.append(node)
-
-        dirs.sort(key=lambda n: n.name)
-        files.sort(key=lambda n: n.name)
-
-        for n in dirs:
-            result.append((n.name, True))
-
-        for n in files:
-            result.append((n.name, False))
-
-        return result
-
-    def enter(self, name):
-        if name == "..":
-            if self.cwd.parent:
-                self.cwd = self.cwd.parent
-            return
-
-        node = self.cwd.children[name]
-
-        if node.is_dir:
-            self.cwd = node
-
-    def get_cwd(self):
-        return self.cwd
-
-    def get(self, name):
-        if name == "..":
-            return self.cwd.parent
-        return self.cwd.children[name]
-
-
-    def get_full_info(self, node):
-        # 1. Get all paths sharing this hash (defaults to empty set if not found)
-        file_hash = node.info['hashinfo']
-        all_dups = self.data['hashes'].get(file_hash, set())
-        
-        # 2. Filter out the current file's path
-        current_path = node.info['path']
-
-        dups = [p for p in map(lambda x: path_update_prefix('/' + normalize_path(x)[0]), all_dups) if p != current_path]
-
-        dups_states = []
-
-        for dup in dups:
-            dups_states.append(get_stat_info(dup))
-
-        info = get_stat_info(current_path)
-        info["dups"] = dups
-        info["dups_states"] = dups_states
-
-        return info
-
-# VIRTUAL FS ]
-# VIRTUAL FS TEST [
-
-def test_vfs():
-    data = {
-        "files": {
-            "test0/t0/fileA": {"MD5:c6f057b86584942e415435ffb1fa93d4:3"},
-            "test0/t0/fileB": {"MD5:d41d8cd98f00b204e9800998ecf8427e:0"},
-            "test0/t1/fileA": {"MD5:202cb962ac59075b964b07152d234b70:3"},
-            "test0/t1/fileB": {"MD5:d41d8cd98f00b204e9800998ecf8427e:0"},
-            "test0/t1/fileC": {"MD5:d41d8cd98f00b204e9800998ecf8427e:0"},
-        }
-    }
-
-    vfs = VirtualFS(data)
-
-    print(vfs.pwd())
-    print(vfs.listdir())
-
-    vfs.enter("test0")
-    print(vfs.listdir())
-
-    vfs.enter("t1")
-    print(vfs.listdir())
-
-    file = vfs.get("fileC")
-    print(file.info)
-
-# VIRTUAL FS TEST ]
 # DEMO APP [
 
 from textual.app import App, ComposeResult
@@ -305,24 +74,6 @@ import pyperclip
 def copy_text(text):
     pyperclip.copy(text)
 
-def format_size(size, type):
-    if size is None:
-        return "N/A"
-
-    if type == 0:
-        units = ["bytes", "KB", "MB", "GB", "TB"]
-    else:
-        units = ["", "KB", "MB", "GB", "TB"]
-
-    size = float(size)
-
-    for unit in units:
-        if size < 1024:
-            return f"{round(size)} {unit}"
-        size /= 1024
-
-    return f"{round(size)} PB"
-
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from rich.text import Text
@@ -331,9 +82,93 @@ from rich.console import Console
 
 from textual.widgets import DataTable
 
+from textual.screen import ModalScreen
+from textual.containers import Vertical
+from textual.widgets import Button, Label
+
+# DRIVE ACTIONS VIEW [
+
+driveActions = DriveActionsList()
+
+class ActionsScreen(ModalScreen):
+#    CSS = open("theme.css").read()
+
+    CSS = """
+    ActionsScreen Vertical {
+        width: 80;
+        height: 80%;
+    }
+
+    #actions {
+        height: 1fr;
+    }
+
+    ActionsScreen Horizontal {
+        height: auto;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("x", "clear", "clear"),
+    ]
+
+    def compose(self):
+        with Vertical():
+            yield Label("Queued actions")
+            yield DataTable(id="actions")
+
+            with Horizontal():
+                yield Button("Close", id="close")
+                yield Button("Clear", id="clear")
+                yield Button("Export .sh", id="export")
+                yield Button("Apply", id="apply")
+
+    def on_mount(self):
+        table = self.query_one("#actions", DataTable)
+        #table.add_columns("Action")
+        table.add_columns("Operation", "Path")
+        table.cursor_type = "row"
+        self.refresh_actions()
+
+    def refresh_actions(self):
+        table = self.query_one("#actions", DataTable)
+        table.clear()
+
+        #for action in driveActions.actions:
+        #    table.add_row(str(action))
+
+        for op, *args in driveActions.actions:
+            table.add_row(op, " ".join(map(str, args)))
+
+    def action_close(self):
+        self.dismiss()
+
+    def action_clear(self):
+        driveActions.clear()
+        self.refresh_actions()
+
+    def on_button_pressed(self, event: Button.Pressed):
+        match event.button.id:
+            case "close":
+                self.dismiss()
+
+            case "clear":
+                self.action_clear()
+
+            case "export":
+                self.app.notify("Export .sh")
+
+            case "apply":
+                self.app.notify("Apply")
+
+# DRIVE ACTIONS VIEW ]
+
 class DemoApp(App):
     TITLE = "DriveDB"
     SUB_TITLE = "File Manager"
+
+#    CSS = open("theme.css").read()
 
     CSS = """
     Horizontal {
@@ -360,6 +195,13 @@ class DemoApp(App):
 
     BINDINGS = [
 #        ("ctrl+x", "test", "Test"),
+        ("delete", "remove_file", "Remove file"),
+        ("shift+delete", "remove_all", "Remove file and all clones"),
+        ("a", "show_actions", "View Actions"),
+#    ("delete", "remove_file", "Remove file"),
+#    ("shift+delete", "remove_all", "Remove file and all clones"),
+#    ("a", "actions", "Actions"),
+#        ("ctrl+z", "undo", "Undo"),
         ("ctrl+x", "copy_text", "Copy"),
         ("escape", "back", "Parent"),
         ("q", "quit", "Quit"),
@@ -368,10 +210,6 @@ class DemoApp(App):
 
 #    def action_test(self):
 #        self.notify("CTRL-X WORKS")
-
-    def action_copy_text(self):
-        text = self.query_one("#quick", Static).render()
-        copy_text(str(text))
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -382,7 +220,75 @@ class DemoApp(App):
 
         yield Footer()
 
+    # ACTIONS [
+
+    def action_copy_text(self):
+        text = self.query_one("#quick", Static).render()
+        copy_text(str(text))
+
+    # DIVE ACTIONS
+
+    def action_remove_file(self):
+        file = self.get_current_file()
+        if file is None:
+            return
+        driveActions.append(["remove", file])
+        self.notify(f"Remove {file}", timeout=0.5)
+
+    def action_remove_all(self):
+        file = self.get_current_file()
+
+        if file is None:
+            return
+
+#        file.get
+        driveActions.append(["remove", file])
+
+        node = self.vfs.get_from_path(file)
+
+        info = self.vfs.get_full_info(node)
+
+        for dup in info["dups"]:
+            driveActions.append(["remove", dup])
+
+        self.notify(f"Remove all {file}")
+
+    def action_show_actions(self):
+        self.push_screen(ActionsScreen())
+
+    # ACTIONS ]
+
+    def get_current_file(self):
+        focused = self.focused
+
+        try:
+            if focused and focused.id == "files":
+                filesView = focused  # ListView
+                index = filesView.index
+                files = self.vfs.listdir()
+                file = files[index] # need vfs.get_full_path(index)
+                f = self.vfs.pwd() + '/' + file[0]
+                return f
+            elif focused and focused.id == "quick":
+                quickView = focused  # DataTable
+                index = quickView.cursor_row - self.quickData["line_dups"]
+                info = self.quickData["info"]
+                if index >= 0:
+                    dups = info["dups"]
+#                    dups_states = info["dups_states"]
+                    return dups[index]
+            else:
+                index = None
+
+        except:
+            self.notify(f"BUG!")
+
+        return None
+
+
     def on_mount(self):
+#        self.add_class("theme-blue")
+
         self.vfs = VFS
         self.nav_stack = []  # Track directory history for mc-style restoration
 
@@ -392,6 +298,7 @@ class DemoApp(App):
         quick = self.query_one("#quick", DataTable)
         quick.add_column("Info")
         self.refresh_list()
+
 
     def go_back(self):
         """Restores previous selection and scroll position like mc."""
@@ -429,7 +336,7 @@ class DemoApp(App):
 
                 size = format_size(node.size, 1)
 
-                dup_count = len(self.vfs.data['hashes'].get(file_hash, []))
+                dup_count = len(self.vfs.get_hash_dups(file_hash))
 
                 grid.add_row(
                     f"📄 {name}",
@@ -478,6 +385,13 @@ class DemoApp(App):
 
         node = self.vfs.get(name)
 
+        self.quickData = { # common for files and quick - need review
+            "name": name,
+            "node": node,
+            "info": None,
+            "line_dups": 0,
+        }
+
         if node.is_dir:
             self.nav_stack.append(name)
             self.vfs.enter(name)
@@ -513,16 +427,21 @@ class DemoApp(App):
             is_dir_s = "DIR" if info.get("is_dir", False) else ""
             is_file_s = "FILE" if info.get("is_file", False) else ""
 
+            self.quickData["info"] = info
+            self.quickData["line_dups"] = 9
+
+#            rows.extend((path, path) for path in other_dups)
+
             rows = [
-                f"{current_path}",
-                f"{indicator} {is_dir_s}{is_file_s}",
-                f"Name: {node.name}",
-                f"Size: {format_size(node.size, 0)} {size_suffix}",
-                f"Created: {info.get("created", "")}",
-                f"Modified: {info.get("modified", "")}",
-                file_hash,
-                "",
-                f"Other Duplicates ({len(other_dups)}):",
+                f"{current_path}",                                  # line 0
+                f"{indicator} {is_dir_s}{is_file_s}",               # line 1
+                f"Name: {node.name}",                               # line 2
+                f"Size: {format_size(node.size, 0)} {size_suffix}", # line 3
+                f"Created: {info.get("created", "")}",              # line 4
+                f"Modified: {info.get("modified", "")}",            # line 5
+                file_hash,                                          # line 6
+                "",                                                 # line 7
+                f"Other Duplicates ({len(other_dups)}):",           # line 8
             ]
             # "is_dir": stat.S_ISDIR(st.st_mode),
             # "is_file": stat.S_ISREG(st.st_mode),
@@ -579,8 +498,6 @@ def load_db(scan_dirs):
 
 import shlex
 
-disabled_prefixes = {}
-prefixes = {}
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -589,6 +506,8 @@ if __name__ == '__main__':
     drive-tui.py -d <path> # scan dirs for llog data files''')
     )
     parser.add_argument('-d', '--db', action='append', help='LLOG DB data path')
+    parser.add_argument('-c', '--cache', help='Cache DB type: sqlite or redis')
+    parser.add_argument('-b', '--build', action="store_true", help='Build cache from LLOG DB')
 
     try:
         args = parser.parse_args()
@@ -642,11 +561,12 @@ if __name__ == '__main__':
         # CONFIG SETTINGS JSON
         settings_json = log2._tree._items["SETTINGS JSON"]
 
-        for node in llog2._tree._items_index:
-            print("#", node.name, "count", len(node._ss))
-    #        print(node.text)
-            for line in node._ss:
-                pass
+        settings = json.loads(settings_json.text)
+
+        DB=settings["db"]
+
+        print(f"Config DB: {DB}")
+
     except:
         print("Can't read SETTINGS JSON from config.sh")
         pass
@@ -654,27 +574,40 @@ if __name__ == '__main__':
     # READ CONFIG ]
     # LOAD LLOG DB [
 
-    scan_dirs = ['.']
+    rebuild_db = False
+    db_type="memory"
+#    db_type="sqlite"
+#    db_type="redis"
+#    rebuild_db = True
 
-    if args.db:
-        scan_dirs = args.db
+    if args.cache:
+        db_type = args.cache
 
-    files = load_db(scan_dirs)
+    if args.build:
+        rebuild_db = True
 
-    db = load_llogs(files)
+    db = None
+
+    if db_type == "memory" or rebuild_db:
+        scan_dirs = ['.']
+
+        if args.db:
+            scan_dirs = args.db
+
+        files = load_db(scan_dirs)
+
+        db = load_llogs(files)
 
 
-#    pprint(db)
-#    print(json.dumps(db["hashes"], indent=4))
+    #    pprint(db)
+    #    print(json.dumps(db["hashes"], indent=4))
 
-    print(f"Total loaded {len(db['hashes'])} hashes and {len(db['files'])} files")
-    print("DONE!")
+        print(f"Total loaded {len(db['hashes'])} hashes and {len(db['files'])} files")
+        print("DONE!")
 
     # LOAD LLOG DB ]
 
-    data = db
-
-    VFS = VirtualFS(data)
+    VFS = VirtualFS(db, db_type, rebuild_db)
 
     # cleanup
     del data["files"]

@@ -192,7 +192,7 @@ class LiveLog(LiveLogBasic):
                 # Add any remaining text
                 if current_text:
                     path = node_stack.copy()
-                    self.log(path, '\n'.join(current_text))
+                    self._tree.log(path, current_text)
 
         except FileNotFoundError:
             print(f"Can't open file {self._filename}")
