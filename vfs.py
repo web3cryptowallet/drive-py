@@ -562,11 +562,16 @@ class SQLiteDBAdapter(BaseDBAdapter):
                     batch
                 )
 
+#            print(f"sqlite: {len(dirs)} dirs")
+            n=50_000
+
             # Insert accumulated directories in batches of 100k
             dir_items = list(dirs.values())
-            for start_idx in range(0, len(dir_items), 100_000):
-                dir_batch = dir_items[start_idx : start_idx + 100_000]
-                
+            for start_idx in range(0, len(dir_items), n):
+                dir_batch = dir_items[start_idx : start_idx + n]
+
+                print(f'sqlite: {start_idx}/{len(dir_items)} dirs created')
+
                 for d in dir_batch:
                     # Stringify json only once
                     if not isinstance(d["info"], str):
@@ -587,9 +592,12 @@ class SQLiteDBAdapter(BaseDBAdapter):
                     for p in paths:
                         yield {"hash_id": h, "path": p}
 
+            index = 0
             with self.conn:
                 for batch in batched(generate_hashes(), 100_000):
-                    print(f"sqlite: hashes {len(batch)}")
+                    index += len(batch)
+                    print(f"sqlite: batch {index} - {len(hashes)} hashes")
+
                     if not batch:
                         continue
                     self.conn.executemany(

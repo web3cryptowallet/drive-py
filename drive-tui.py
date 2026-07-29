@@ -610,8 +610,8 @@ if __name__ == '__main__':
     VFS = VirtualFS(db, db_type, rebuild_db)
 
     # cleanup
-    del data["files"]
-#    del data["hashes"]
+    del db["files"]
+    del db["hashes"]
 
 
     DemoApp().run()
