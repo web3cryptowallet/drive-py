@@ -7,7 +7,7 @@ Multithreaded disk file comparison tool for verification and MD5 checksum report
 - **drive.py** — CLI disk analyzer.
 - **drive-tui.py** — TUI for the disk database.
 
-![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
+![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-2.png)
 ![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
 
 
