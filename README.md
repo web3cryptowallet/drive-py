@@ -158,9 +158,9 @@ Twitter [@web3wallet](https://twitter.com/web3wallet)
 ## Contribute
 Just add an issue and push pull request
 
-##
+## Contact
 
-victor.space@protonmail.com
+[web3future@protonmail.com](mailto:web3future@protonmail.com)
 
 ## Sponsorship
 
@@ -198,9 +198,5 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 - [livecomment](https://github.com/d08ble/livecomment) project
 - [bitchatX21](https://github.com/goldenwebb/bitchatX21) a better version of Bitchat for iOS
-
-## Contact
-
-[web3future@protonmail.com](mailto:web3future@protonmail.com)
 
 *AI-Independet code. Created through human work*
