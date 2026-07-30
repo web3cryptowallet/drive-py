@@ -1,6 +1,6 @@
 # drive.py
 
-drive.py v1.0
+drive.py v0.9
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
