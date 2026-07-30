@@ -8,8 +8,21 @@
 "test0/t0" "test0-t0" t0
 
 # MAP DRIVES ]
+# ---- INFO ---- [
+
+Configuration options for the SETTINGS JSON section.
+
+Database backend.
+
+Supported values:
+
+    "db": "memory"   # In-memory database (fastest, not persistent)
+    "db": "sqlite"   # SQLite database stored on disk
+    "db": "redis"    # Redis database (todo)
+
+# ---- INFO ---- ]
 # SETTINGS JSON [
 {
-    ...
+    "db": "sqlite"
 }
 # SETTINGS JSON ]

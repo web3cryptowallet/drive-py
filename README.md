@@ -1,29 +1,80 @@
 # drive.py
 
-Multithread disk files comparasion tool for verification and md5sum report in livecomment format
+Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
-## Prerequirements
-* python3
-* NodeJS for web viewer
+- **drive.py** — CLI disk analyzer.
+- **drive-tui.py** — TUI for the disk database.
+
+![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
+![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
+
+
+## Prerequisites
+- Python 3
+- virtualenv (required for the TUI)
+- Node.js (required for the web viewer)
 
 ## Usage
 ```bash
-$ ./drive.py <src> <dst> <logdir>
+usage: drive.py [-h] [-s SRC] [-d DST] [-f FILE] [-e EXCLUDE] [-n NOTREE] [-t THREADS] logdir
+
+Compare directories. Usage examples:
+  drive.py -s <src>.. <logdir> # scan dirs only
+  drive.py -s <src>.. -d <dst>.. <logdir> # compare dirs
+  drive.py -f <log>.. -e <dir>.. <logdir> # compare logs
+
+positional arguments:
+  logdir                Log directory path
+
+options:
+  -h, --help            show this help message and exit
+  -s SRC, --src SRC     Source directory path
+  -d DST, --dst DST     Destination directory path
+  -f FILE, --file FILE  Log file path
+  -e EXCLUDE, --exclude EXCLUDE
+                        Exclude dir for scanning (with -f)
+  -n NOTREE, --notree NOTREE
+                        No files tree
+  -t THREADS, --threads THREADS
+                        Number of threads for file hashing
 ```
 
-src - source directory
+## Run demo: Build demo report
 
-dst - destination directory
-
-logdir - log directory
-
-## Demo example
-Try this demo example
+Just try this demo:
 ```bash
-./drive.py "test0/t0" "test0/t1" "log-test0"
+./drive.py -s test0/t0 -d test0/t1 log-test0
 ```
 
-### View log files in browser 
+## TUI
+```
+sudo apt install python3-venv
+
+python3 -m venv .venv
+
+pip install textual
+pip install pyperclip
+
+sudo apt install xclip
+
+```
+
+Run with in-memory db for small amount of files
+```
+python drive-tui.py
+```
+
+Build SQLite cache for big disks
+```
+python drive-tui.py -c sqlite -b
+```
+Run with SQLite cache
+```
+python drive-tui.py -c sqlite
+```
+
+## Run demo: View demo log files in your browser 
+
 1. Install LiveComment
 ```bash
 npm i -g livecomment
@@ -84,33 +135,7 @@ dst_size:3
 
 ## TODO
 
-### TUI
-```
-sudo apt install python3-venv
-
-python3 -m venv .venv
-
-pip install textual
-pip install pyperclip
-
-sudo apt install xclip
-
-```
-
-Run with in-memory db for small amount of files
-```
-python drive-tui.py
-```
-
-Build SQLite cache for big disks
-```
-python drive-tui.py -c sqlite -b
-```
-Run with SQLite cache
-```
-python drive-tui.py -c sqlite
-```
-
+- TODO: Redis test
 
 ## FAQ
 
@@ -131,8 +156,49 @@ Twitter [@web3wallet](https://twitter.com/web3wallet)
 ## Contribute
 Just add an issue and push pull request
 
-## See also
-[livecomment-cli](https://github.com/web3cryptowallet/livecomment-cli) project
+##
+
+victor.space@protonmail.com
+
+## Sponsorship
+
+If you appreciate this project, please star it on GitHub and/or sponsor on GitHub or donate crypto below.
+
+Looking for sponsors to help fund development.
+
+BTC 💰
+18Bth1u3pSJzPrCf21tx1F6iSzA2fgKdfU
+
+SOL Solana 💰
+9gLVQr97baX3KrG9DyaUDd5FwXaiLcDuU6CK5RCNMnWu
+
+ETH Ethereum 💰
+0x072c709a8Ad95Fc182e0E2EEF834C3d944122f0b
+
+USDT Ethereum 💰
+0x072c709a8Ad95Fc182e0E2EEF834C3d944122f0b
+
+DOGE Dogecoin 💰
+DJP8425i4sGT4tSEXwEDRPJb4vJBGroJs6
+
+LTC Litecoin 💰
+ltc1q69gg9udgqnky60n7mfzfaj0w7lu80ujx6fysly
+
+TRX Tron 💰
+TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 
+## License
 
+[MIT](https://github.com/web3cryptowallet/drive-py/blob/master/LICENSE)
+
+## Recomended projects
+
+- [livecomment](https://github.com/d08ble/livecomment) project
+- [bitchatX21](https://github.com/goldenwebb/bitchatX21) a better version of Bitchat for iOS
+
+## Contact
+
+[web3future@protonmail.com](mailto:web3future@protonmail.com)
+
+*AI-Independet code. Created through human work*

@@ -165,8 +165,8 @@ class ActionsScreen(ModalScreen):
 # DRIVE ACTIONS VIEW ]
 
 class DemoApp(App):
-    TITLE = "DriveDB"
-    SUB_TITLE = "File Manager"
+    TITLE = "drive.py"
+    SUB_TITLE = "file manager"
 
 #    CSS = open("theme.css").read()
 
@@ -353,9 +353,6 @@ class DemoApp(App):
 
         lv.extend(items)
 
-#        self.query_one("#quick").update(self.vfs.pwd())
-        self.set_quick_text(self.vfs.pwd())
-
         def apply_selection():
             lv.focus()
             lv.index = target_index
@@ -363,6 +360,49 @@ class DemoApp(App):
 
         self.call_after_refresh(apply_selection)
         #self.query_one("#quick_scroll", VerticalScroll).scroll_home(animate=False)
+
+        # UPDATE QUICK VIEW [
+        
+        dir = self.vfs.pwd()
+
+        if dir != '/':
+            # DEFAULT
+            self.set_quick_text(dir)
+        else:
+            # ADD LEGEND
+
+            rows = [
+                f"{dir}",                                           # line 0
+                f"",                                                # line 1
+                f"Legend:",                                         # line 2
+                f"[green]●[/green] Avaible",
+                f"[red]●[/red] Not found",
+                f"[yellow]●[/yellow] Maybe it's available. It was available last time",
+                f"[red]R[/red] In remove queue",
+                f"[red]D[/red] Deleted",
+                f"",
+                f"Help / Shortcuts:",
+                f"[yellow]Enter[/yellow]: Open directory or view file info",
+                f"[yellow]Esc[/yellow]: Go back up to the parent directory",
+                f"[yellow]Ctrl + X[/yellow]: Copy info panel text to clipboard",
+                f"[yellow]q[/yellow]: Quit the application",
+                f"",
+                f"File Removal (Queue):",
+                f"[yellow]Del[/yellow]: Queue the selected file for removal",
+                f"[yellow]Shift + Del[/yellow]: Queue file and all duplicates for removal",
+                f"",
+                f"Action Queue:",
+                f"[yellow]a[/yellow]: Open the Actions screen to review operations",
+                f"[yellow]x[/yellow]: Clear the entire queue (inside Actions)",
+                f"[yellow]e[/yellow]: export to apply/drive*.sh",
+                f"[yellow]Ctrl+Enter[/yellow]: Apply",
+            ]
+
+            self.set_quick_rows(rows)
+
+
+
+        # UPDATE QUICK VIEW ]
 
     def on_list_view_selected(self, event: ListView.Selected):
         if event.list_view.id == "quick":
@@ -610,8 +650,9 @@ if __name__ == '__main__':
     VFS = VirtualFS(db, db_type, rebuild_db)
 
     # cleanup
-    del db["files"]
-    del db["hashes"]
+    if db:
+        del db["files"]
+        del db["hashes"]
 
 
     DemoApp().run()
