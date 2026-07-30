@@ -1,5 +1,7 @@
 # drive.py
 
+drive.py v1.0
+
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
 - **drive.py** — CLI disk analyzer.
