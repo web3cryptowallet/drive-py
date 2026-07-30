@@ -192,7 +192,7 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 ## License
 
-[MIT](https://github.com/web3cryptowallet/drive-py/blob/master/LICENSE)
+[MIT](https://github.com/web3cryptowallet/drive-py/blob/main/LICENSE)
 
 ## Recomended projects
 
