@@ -2,6 +2,8 @@
 
 drive.py v0.91
 
+v0.91 - added actions generation
+
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
 - **drive.py** — CLI disk analyzer.
@@ -193,6 +195,10 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 ## License
 
 [MIT](https://github.com/web3cryptowallet/drive-py/blob/main/LICENSE)
+
+## Version History
+
+v0.91 - added actions generation
 
 ## Recomended projects
 
