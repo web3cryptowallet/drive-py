@@ -22,8 +22,10 @@ from drive import load_log
 
 from vfs import VirtualFS, Node
 from vfs import prefixes, disabled_prefixes, aliases # MapDrive
-from vfs import format_size
+from vfs import format_size, normalize_path
 from vfs import DriveActionsList
+
+# DRIVE DB [
 
 def load_llogs(files):
 
@@ -46,6 +48,7 @@ def load_llogs(files):
 
     return right
 
+# DRIVE DB ]
 # DEMO APP [
 
 from textual.app import App, ComposeResult
@@ -111,6 +114,7 @@ class ActionsScreen(ModalScreen):
     BINDINGS = [
         ("escape", "close", "Close"),
         ("x", "clear", "clear"),
+        ("e", "export", "export"),
     ]
 
     def compose(self):
@@ -148,6 +152,10 @@ class ActionsScreen(ModalScreen):
         driveActions.clear()
         self.refresh_actions()
 
+    def action_export(self):
+        filename = export_sh()
+        self.app.notify(f"Export to {filename}")
+
     def on_button_pressed(self, event: Button.Pressed):
         match event.button.id:
             case "close":
@@ -157,11 +165,85 @@ class ActionsScreen(ModalScreen):
                 self.action_clear()
 
             case "export":
-                self.app.notify("Export .sh")
+                self.action_export()
 
             case "apply":
                 self.app.notify("Apply")
 
+# FILE UTIL [
+
+from pathlib import Path
+import stat
+
+def unique_filename(filename: str) -> str:
+    path = Path(filename)
+
+    if not path.exists():
+        return str(path)
+
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+
+    i = 1
+    while True:
+        new_path = parent / f"{stem}{i:04d}{suffix}"
+        if not new_path.exists():
+            return str(new_path)
+        i += 1
+
+def export_sh():
+    # create actions dir
+    actionsdir = 'actions'
+    if not isdir(actionsdir):
+        os.makedirs(actionsdir)
+
+    # generate new filename
+    filename = actionsdir + '/action.sh'
+    filename = unique_filename(filename)
+    file = open(filename, "w")
+
+    # write functions
+    file.write("""
+    file_exists() {
+        [ -e "$1" ]
+    }
+
+    remove () {
+        if file_exists $1; then
+            echo "found $1"
+            if [ "$REMOVE" -eq 1 ]; then
+                echo "remove $1"
+                rm -rf $1
+            fi
+        fi
+    }
+    REMOVE=0
+    if [ "$1" = "-r" ]; then
+        REMOVE=1
+    fi
+    echo Run with -r to remove 
+""")
+
+
+    # flush actions
+    for action in driveActions.actions:
+        p, parts = normalize_path(action[1])
+        local = aliases.get(parts[0])
+        if local:
+            parts[0] = local
+            p = '/'.join(parts) 
+        file.write(f'{action[0]} "{p}"')
+        file.write("\n")
+
+    file.close()
+
+    st = os.stat(filename)
+    os.chmod(filename, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    return filename
+
+# FILE UTIL ]
 # DRIVE ACTIONS VIEW ]
 
 class DemoApp(App):

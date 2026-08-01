@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 disabled_prefixes = {}
 prefixes = {}
-aliases = {}
+aliases = {}  # alias : local
 
 def check_disabled_prefixes(prefix):
     for prefix in disabled_prefixes:
