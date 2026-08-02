@@ -109,152 +109,6 @@ def get_stat_info(dup):
 
 # VIRTUAL FS
 
-# class VirtualFS:
-#     def __init__(self, data):
-#         self.root = Node("", True)
-#         self.data = data
-#         self.cwd = self.root
-#         self._build(data["files"])
-
-#     def _build(self, files):
-#         print("VFS: Building..")
-
-#         total_dirs = 0
-#         total_files = 0
-#         total_size = 0
-
-#         for path, hashes in files.items():
-
-# #            # CHECK DISABLED [
-# #
-# #            if (check_disabled_prefixes(prefix)):
-# #                continue
-# #
-# #            # CHECK DISABLED ]
-
-#             path = path_update_prefix(path)
-
-#             path, parts = normalize_path(path)
-            
-#             total_files += 1
-
-#             if total_files % 100000 == 0:
-#                 print(f'{total_files}/{len(files)} files')
-
-#             hashinfo = next(iter(hashes))
-#             md5, size = hashinfo.rsplit(":", 1)
-
-#             size = int(size)
-
-#             cur = self.root
-
-#             for part in parts[:-1]:
-#                 if part not in cur.children:
-#                     cur.children[part] = Node(part, True, parent=cur)
-#                     total_dirs += 1
-#                 cur.children[part].size += size
-#                 cur = cur.children[part]
-
-#             total_size += size
-
-#             cur.children[parts[-1]] = Node(
-#                 name=parts[-1],
-#                 is_dir=False,
-#                 parent=cur,
-#                 info={
-#                     "path": path,
-#                     "hashinfo": hashinfo, 
-#                     "hash": md5,
-#                 },
-#                 size = size,
-#             )
-#         print(f"VFS: built {total_dirs} dirs and {total_files} files {format_size(total_size, 0)}")
-
-#     def pwd(self):
-#         node = self.cwd
-#         parts = []
-#         while node.parent:
-#             parts.append(node.name)
-#             node = node.parent
-#         return "/" + "/".join(reversed(parts))
-
-#     def listdir(self):
-#         result = []
-
-#         if self.cwd.parent:
-#             result.append(("..", True))
-
-#         dirs = []
-#         files = []
-
-#         for node in self.cwd.children.values():
-#             if node.is_dir:
-#                 dirs.append(node)
-#             else:
-#                 files.append(node)
-
-#         dirs.sort(key=lambda n: n.name)
-#         files.sort(key=lambda n: n.name)
-
-#         for n in dirs:
-#             result.append((n.name, True))
-
-#         for n in files:
-#             result.append((n.name, False))
-
-#         return result
-
-#     def enter(self, name):
-#         if name == "..":
-#             if self.cwd.parent:
-#                 self.cwd = self.cwd.parent
-#             return
-
-#         node = self.cwd.children[name]
-
-#         if node.is_dir:
-#             self.cwd = node
-
-#     def get_cwd(self):
-#         return self.cwd
-
-
-#     def get(self, name):
-#         if name == "..":
-#             return self.cwd.parent
-#         return self.cwd.children[name]
-
-
-#     def get_full_info(self, node):
-
-#         # for directory
-#         if node.is_dir:
-#             current_path = self.pwd() + '/' + node.name
-#             info = get_stat_info(current_path)
-#             info["dups"] = []
-#             info["dups_states"] = []
-#             return info
-        
-#         # 1. Get all paths sharing this hash (defaults to empty set if not found)
-#         file_hash = node.info['hashinfo']
-#         all_dups = self.data['hashes'].get(file_hash, set())
-        
-#         # 2. Filter out the current file's path
-#         current_path = node.info['path']
-
-#         dups = [p for p in map(lambda x: path_update_prefix('/' + normalize_path(x)[0]), all_dups) if p != current_path]
-
-#         dups_states = []
-
-#         for dup in dups:
-#             dups_states.append(get_stat_info(dup))
-
-#         info = get_stat_info(current_path)
-#         info["dups"] = dups
-#         info["dups_states"] = dups_states
-
-#         return info
-
 import json
 import sqlite3
 from abc import ABC, abstractmethod
@@ -771,7 +625,7 @@ class VirtualFS:
         if node and node.is_dir:
             self.cwd = node
 
-    def get_cwd(self):
+    def get_cwd(self) -> VFSNode:
         return self.cwd
 
     def get(self, name):
@@ -780,6 +634,12 @@ class VirtualFS:
         return self.db.get_child(self.cwd, name)
 
     def get_full_info(self, node):
+        if node.is_dir:
+            current_path = node.id
+            info = get_stat_info(current_path)
+
+            return info
+        
         file_hash = node.info.get('hashinfo')
         
         # Fetch duplicates from the database instead of memory
@@ -819,9 +679,10 @@ class VirtualFS:
     
     def get_from_path(self, fullpath):
         path, parts = normalize_path(fullpath)
-        node = self.root
+        node = self.db.get_root()
         for p in parts:
-            node = node.children.get(p)
+            node = self.db.get_child(node, p)
+#            node = node.children.get(p)
             if node is None:
                 break
         return node

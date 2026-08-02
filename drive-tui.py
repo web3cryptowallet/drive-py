@@ -210,11 +210,11 @@ def export_sh():
     }
 
     remove () {
-        if file_exists $1; then
+        if file_exists "$1"; then
             echo "found $1"
             if [ "$REMOVE" -eq 1 ]; then
                 echo "remove $1"
-                rm -rf $1
+                rm -rf "$1"
             fi
         fi
     }
@@ -233,7 +233,7 @@ def export_sh():
         if local:
             parts[0] = local
             p = '/'.join(parts) 
-        file.write(f'{action[0]} "{p}"')
+        file.write(f"{action[0]} {shlex.quote(p)}")
         file.write("\n")
 
     file.close()
@@ -450,6 +450,22 @@ class DemoApp(App):
         if dir != '/':
             # DEFAULT
             self.set_quick_text(dir)
+
+            node = self.vfs.get_cwd()
+            info = self.vfs.get_full_info(node)
+
+            indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
+
+            rows = [
+                f"{dir}",                                           # line 1
+                f"{indicator} ",                                    # line 2
+                f"Size: {format_size(node.size, 0)}",               # line 3
+                f"Created: {info.get("created", "")}",              # line 4
+                f"Modified: {info.get("modified", "")}",            # line 5
+            ]
+            
+            self.set_quick_rows(rows)
+
         else:
             # ADD LEGEND
 
@@ -530,15 +546,15 @@ class DemoApp(App):
             
             current_path = node.info['path']
 
-            indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red] "
+            indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
 
             if info["exists"]:
                 pass
 
-            other_dups = [
-                f"{'[green]●[/green]' if state['exists'] else '[red]●[/red]'} {dup}"
-                for dup, state in zip(info["dups"], dups_states)
-            ]
+            # other_dups = [
+            #     f"{'[green]●[/green]' if state['exists'] else '[red]●[/red]'} {dup}"
+            #     for dup, state in zip(info["dups"], dups_states)
+            # ]
 
             size_now = info.get("size", -1)
             size_suffix = ""
@@ -549,10 +565,22 @@ class DemoApp(App):
             is_dir_s = "DIR" if info.get("is_dir", False) else ""
             is_file_s = "FILE" if info.get("is_file", False) else ""
 
+            # DUPS [
+
+            pairs = sorted(
+                zip(info["dups"], dups_states),
+                key=lambda x: x[0].lower()  # case-insensitive sort by name
+            )
+
+            other_dups = [
+                f"{'[green]●[/green]' if state['exists'] else '[red]●[/red]'} {dup}"
+                for dup, state in pairs
+            ]
+
+            # DUPS ]
+
             self.quickData["info"] = info
             self.quickData["line_dups"] = 9
-
-#            rows.extend((path, path) for path in other_dups)
 
             rows = [
                 f"{current_path}",                                  # line 0

@@ -140,6 +140,11 @@ dst_size:3
 ## TODO
 
 - TODO: Redis test
+- TODO: files: Page up/down keys navigation
+- TODO: actionsview: Delete key - remove from actlions list
+- TODO: actionsview: show file status in list
+- TODO: actionsview: highlight dir
+- TODO: info: show dir status
 
 ## FAQ
 
