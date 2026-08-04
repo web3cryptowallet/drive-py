@@ -11,6 +11,8 @@ import argparse
 from time import perf_counter
 import json
 from pprint import pprint
+from pathlib import Path
+import shlex
 
 from textual.app import App
 from textual.widgets import Header, Footer, Button
@@ -408,9 +410,18 @@ class DemoApp(App):
                 else:
                     node = self.vfs.get(name)
                 size = format_size(node.size, 0)
-                grid.add_row(f"📁 {name}", "", size)
+
+                info = self.vfs.get_full_info(node, True)
+
+                indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
+
+                grid.add_row(f"{indicator} 📁 {name}", "", size)
+#                grid.add_row(f"📁 {name}", "", f"{size}{indicator}")
+#                grid.add_row(f"{indicator}", f"📁 {name}", "", f"{size}")
             else:
                 node = self.vfs.get(name)
+
+                info = self.vfs.get_full_info(node, True)
 
                 file_hash = node.info['hashinfo']
                 if isinstance(file_hash, set):
@@ -420,11 +431,26 @@ class DemoApp(App):
 
                 dup_count = len(self.vfs.get_hash_dups(file_hash))
 
+                indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
+
                 grid.add_row(
-                    f"📄 {name}",
+                    f"{indicator} 📄 {name}",
                     size,
                     f"({dup_count})"
                 )
+
+                # grid.add_row(
+                #     f"📄 {name}",
+                #     size,
+                #     f"({dup_count}){indicator}"
+                # )
+
+                # grid.add_row(
+                #     f"{indicator}",
+                #     f"📄 {name}",
+                #     size,
+                #     f"({dup_count})"
+                # )
 
             item = ListItem(Static(grid))
             item.file_name = name
@@ -628,8 +654,6 @@ class DemoApp(App):
 # DEMO APP ]
 # FIND LLOG FILES [
 
-from pathlib import Path
-
 def find_llog_files(root: str) -> list[Path]:
     """Return all llog-files.sh files under root."""
     return list(Path(root).rglob("llog-llogfiles.sh"))
@@ -646,7 +670,6 @@ def load_db(scan_dirs):
 
 # LOAD DB ]
 
-import shlex
 
 
 if __name__ == '__main__':

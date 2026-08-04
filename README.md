@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.91
+drive.py v0.92
 
-v0.91 - added actions generation
+v0.92 - added a file indicator to the file list
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -144,7 +144,7 @@ dst_size:3
 - TODO: actionsview: Delete key - remove from actlions list
 - TODO: actionsview: show file status in list
 - TODO: actionsview: highlight dir
-- TODO: info: show dir status
+- TODO: info: show dir status - n files
 
 ## FAQ
 
@@ -204,6 +204,7 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 ## Version History
 
 v0.91 - added actions generation
+v0.92 - added a file indicator to the file list
 
 ## Recomended projects
 

@@ -633,25 +633,31 @@ class VirtualFS:
             return self.db.get_parent(self.cwd)
         return self.db.get_child(self.cwd, name)
 
-    def get_full_info(self, node):
+    def get_full_info(self, node, only_stat=False):
         if node.is_dir:
             current_path = node.id
             info = get_stat_info(current_path)
 
             return info
-        
+
+        current_path = node.info.get('path')
+        info = get_stat_info(current_path)
+
+        if only_stat:
+            return info
+
+        # ADD DUPS
+
         file_hash = node.info.get('hashinfo')
         
         # Fetch duplicates from the database instead of memory
         all_dups = self.db.get_hash_dups(file_hash)
         
-        current_path = node.info.get('path')
         dups = [p for p in map(lambda x: path_update_prefix('/' + normalize_path(x)[0]), all_dups) if p != current_path]
         
         # Assumes get_stat_info exists in global scope
         dups_states = [get_stat_info(dup) for dup in dups]
         
-        info = get_stat_info(current_path)
         info["dups"] = dups
         info["dups_states"] = dups_states
 
