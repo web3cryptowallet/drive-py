@@ -38,24 +38,38 @@ def get_real_path(path):
 # MAP DRIVES ]
 # UTIL [
 
+# def format_size(size, type):
+#     if size is None:
+#         return "N/A"
+
+#     if type == 0:
+#         units = ["bytes", "KB", "MB", "GB", "TB"]
+#     else:
+#         units = ["", "KB", "MB", "GB", "TB"]
+
+#     size = float(size)
+
+#     for unit in units:
+#         if size < 1024:
+#             return f"{round(size)} {unit}"
+#         size /= 1024
+
+#     return f"{round(size)} PB"
+
 def format_size(size, type):
     if size is None:
         return "N/A"
 
-    if type == 0:
-        units = ["bytes", "KB", "MB", "GB", "TB"]
-    else:
-        units = ["", "KB", "MB", "GB", "TB"]
+    units = ["bytes", "KB", "MB", "GB", "TB"] if type == 0 else ["", "KB", "MB", "GB", "TB"]
 
     size = float(size)
 
     for unit in units:
         if size < 1024:
-            return f"{round(size)} {unit}"
+            return f"{round(size):3d} {unit}"
         size /= 1024
 
-    return f"{round(size)} PB"
-
+    return f"{round(size):3d} PB"
 
 def normalize_path(path):
     parts = path.replace("//", "/").lstrip("/").rstrip("/").split("/")
@@ -125,11 +139,12 @@ except ImportError:
 
 class VFSNode:
     """Standardized node abstraction returned by all DB adapters."""
-    def __init__(self, id, name, is_dir, size=0, parent_id=None, info=None):
+    def __init__(self, id, name, is_dir, size=0, total_files=0, parent_id=None, info=None):
         self.id = id
         self.name = name
         self.is_dir = is_dir
         self.size = size
+        self.total_files = total_files
         self.parent_id = parent_id
         self.info = info or {}
 
@@ -191,6 +206,8 @@ class BaseDBAdapter(ABC):
             }
 
             nodes[""]["size"] += size
+
+            # BUILD DIRS [
             
             # Create missing intermediate directories & accumulate sizes
             current_id = ""
@@ -200,12 +217,20 @@ class BaseDBAdapter(ABC):
                 
                 if current_id not in nodes:
                     nodes[current_id] = {
-                        "id": current_id, "name": part, "is_dir": True,
-                        "size": 0, "parent_id": parent_dir_id, "info": {}
+                        "id": current_id, 
+                        "name": part, 
+                        "is_dir": True,
+                        "size": 0, 
+                        "total_files": 0,
+                        "parent_id": parent_dir_id, 
+                        "info": {}
                     }
                     total_dirs += 1
                 nodes[current_id]["size"] += size
-                
+                nodes[current_id]["total_files"] += 1
+
+            # BUILD DIRS ]
+
         # Assumes format_size exists in global scope
         try:
             sz_fmt = format_size(total_size, 0)

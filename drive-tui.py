@@ -415,7 +415,9 @@ class DemoApp(App):
 
                 indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
 
-                grid.add_row(f"{indicator} 📁 {name}", "", size)
+                total_files = f"({node.total_files})"
+
+                grid.add_row(f"{indicator} 📁 {name}", total_files, size)
 #                grid.add_row(f"📁 {name}", "", f"{size}{indicator}")
 #                grid.add_row(f"{indicator}", f"📁 {name}", "", f"{size}")
             else:
