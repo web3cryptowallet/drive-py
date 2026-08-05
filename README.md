@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.93
+drive.py v0.94
 
-v0.93 - info: show dir status - n files
+v0.94 - BUGFIX: Shift+Del: Remove directories recursively
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -77,6 +77,10 @@ Run with SQLite cache
 python drive-tui.py -c sqlite
 ```
 
+```
+pip install textual-image pillow
+```
+
 ## Run demo: View demo log files in your browser 
 
 1. Install LiveComment
@@ -142,10 +146,9 @@ dst_size:3
 - TODO: Redis test
 - TODO: files: Page up/down keys navigation (DataTable)
 - TODO: actionsview: Delete key - remove from actlions list
-- TODO: actionsview: show file status in list
 - TODO: actionsview: highlight dir
-- BUGFIX: actionsview wrong file to remove
 - TODO: Shift-Delete: Select files to remove (DataTable, space select, multiple options)
+
 
 ## FAQ
 
@@ -207,7 +210,11 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 v0.91 - added actions generation
 v0.92 - added a file indicator to the file list
 v0.93 - info: show dir status - n files
-
+v0.94 - info: show dir status - n files
+v0.95
+- BUGFIX: Shift+Del: Remove directories recursively
+- TODO: ActionsView: Show the file status in the list
+- BUGFIX: ActionsView: Wrong file is removed
 
 ## Recomended projects
 

@@ -611,16 +611,19 @@ class VirtualFS:
             node = parent
         return "/" + "/".join(reversed(parts))
 
-    def listdir(self):
+    def listdir(self, node = None):
+        if node is None:
+            node = self.cwd
+
         result = []
 
-        if self.db.get_parent(self.cwd):
+        if self.db.get_parent(node):
             result.append(("..", True))
 
         dirs = []
         files = []
 
-        children = self.db.get_children(self.cwd)
+        children = self.db.get_children(node)
 
         for node in children:
             if node.is_dir:
@@ -653,7 +656,7 @@ class VirtualFS:
     def get_cwd(self) -> VFSNode:
         return self.cwd
 
-    def get(self, name):
+    def get(self, name) -> VFSNode:
         if name == "..":
             return self.db.get_parent(self.cwd)
         return self.db.get_child(self.cwd, name)
@@ -682,7 +685,17 @@ class VirtualFS:
         
         # Assumes get_stat_info exists in global scope
         dups_states = [get_stat_info(dup) for dup in dups]
-        
+
+        # pairs = sorted(
+        #         zip(dups, dups_states),
+        #         key=lambda x: x[0].lower()  # case-insensitive sort by name
+        # )
+        # dups, dups_states = map(list, zip(*pairs)) if pairs else ([], [])
+
+        order = sorted(range(len(dups)), key=lambda i: dups[i].lower())
+        dups = [dups[i] for i in order]
+        dups_states = [dups_states[i] for i in order]
+
         info["dups"] = dups
         info["dups_states"] = dups_states
 

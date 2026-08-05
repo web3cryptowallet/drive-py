@@ -24,7 +24,7 @@ from drive import load_log
 
 from vfs import VirtualFS, Node
 from vfs import prefixes, disabled_prefixes, aliases # MapDrive
-from vfs import format_size, normalize_path
+from vfs import format_size, normalize_path, get_stat_info
 from vfs import DriveActionsList
 
 # DRIVE DB [
@@ -121,7 +121,7 @@ class ActionsScreen(ModalScreen):
 
     def compose(self):
         with Vertical():
-            yield Label("Queued actions")
+            yield Label("Actions", id="title")
             yield DataTable(id="actions")
 
             with Horizontal():
@@ -141,11 +141,18 @@ class ActionsScreen(ModalScreen):
         table = self.query_one("#actions", DataTable)
         table.clear()
 
+        self.query_one("#title", Label).update(f"Actions {len(driveActions.actions)}")
+
         #for action in driveActions.actions:
         #    table.add_row(str(action))
 
         for op, *args in driveActions.actions:
-            table.add_row(op, " ".join(map(str, args)))
+            current_path = args[0]
+
+            info = get_stat_info(current_path)
+
+            indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
+            table.add_row(op, f"{indicator} "  + " ".join(map(str, args)))
 
     def action_close(self):
         self.dismiss()
@@ -302,7 +309,20 @@ class DemoApp(App):
             yield ListView(id="files")
             yield DataTable(id="quick")
 
+#        from textual.app import App, ComposeResult
+#        from textual_image.widget import Image
+#        yield Image("assets/console-1.png")
+
+
         yield Footer()
+
+    def show_image(self, filename):
+        from PIL import Image
+
+#        img = Image.open("assets/console-1.png")
+        img = Image.open(filename)
+        img.show()
+
 
     # ACTIONS [
 
@@ -312,6 +332,8 @@ class DemoApp(App):
 
     # DIVE ACTIONS
 
+    # ACTION REMOVE FILE [
+
     def action_remove_file(self):
         file = self.get_current_file()
         if file is None:
@@ -319,23 +341,57 @@ class DemoApp(App):
         driveActions.append(["remove", file])
         self.notify(f"Remove {file}", timeout=0.5)
 
+    # ACTION REMOVE FILE ]
+    # ACTION REMOVE ALL FILES [
+
+    total_removed_files = 0
+    total_removed_dirs = 0
+
     def action_remove_all(self):
         file = self.get_current_file()
 
         if file is None:
             return
 
-#        file.get
+        if os.path.basename(file) == '..':
+            return
+
+        self.total_removed_files = 0
+        self.total_removed_dirs = 0
+
+        self.remove_all_files(file)
+
+        self.notify(f"Remove {self.total_removed_dirs} dirs {self.total_removed_files} files {file}")
+
+    # Remove 100,000 files max
+    def remove_all_files(self, file):
+        if self.total_removed_files >= 100_000:
+            return
+        
         driveActions.append(["remove", file])
 
         node = self.vfs.get_from_path(file)
 
-        info = self.vfs.get_full_info(node)
+        if node.is_dir:
+            self.total_removed_dirs += 1
 
-        for dup in info["dups"]:
-            driveActions.append(["remove", dup])
+            files = self.vfs.listdir(node)
 
-        self.notify(f"Remove all {file}")
+            for name, is_dir in files:
+                if name == '..':
+                    continue
+                path = file + '/' + name
+                self.remove_all_files(path)
+        else:
+            self.total_removed_files += 1
+
+            info = self.vfs.get_full_info(node)
+
+            for dup in info["dups"]:
+                driveActions.append(["remove", dup])
+                self.total_removed_files += 1
+
+    # ACTION REMOVE ALL FILES ]
 
     def action_show_actions(self):
         self.push_screen(ActionsScreen())
@@ -570,7 +626,7 @@ class DemoApp(App):
             info = self.vfs.get_full_info(node)
 
             other_dups = info["dups"]
-            dups_states = info["dups_states"]
+            #dups_states = info["dups_states"]
             
             current_path = node.info['path']
 
@@ -595,14 +651,9 @@ class DemoApp(App):
 
             # DUPS [
 
-            pairs = sorted(
-                zip(info["dups"], dups_states),
-                key=lambda x: x[0].lower()  # case-insensitive sort by name
-            )
-
             other_dups = [
                 f"{'[green]●[/green]' if state['exists'] else '[red]●[/red]'} {dup}"
-                for dup, state in pairs
+                for dup, state in zip(info["dups"], info["dups_states"])
             ]
 
             # DUPS ]
@@ -647,7 +698,13 @@ class DemoApp(App):
             else:
                 quick.add_row(str(row))
 
+#    processing = False
+
     def action_back(self):
+#        if self.processing:
+#            self.processing = 0
+#            return
+
         self.go_back()
 
 
