@@ -78,36 +78,57 @@ def hash_files(RES, SIZES, i, src, fmap):
     total_size = 0
     results = []
     
-    # Process files in batches
-    def process_batch(batch):
-        threads = []
-        batch_results = []
+    # # Process files in batches
+    # def process_batch(batch):
+    #     threads = []
+    #     batch_results = []
         
-        def thread_worker(args):
-            result = process_file(args)
-            batch_results.append(result)
+    #     def thread_worker(args):
+    #         result = process_file(args)
+    #         batch_results.append(result)
+
+    #     try:
+    #         # Create and start threads for this batch
+    #         for args in batch:
+    #             t = Thread(target=thread_worker, args=(args,))
+    #             threads.append(t)
+    #             t.start()
+
+    #         # Wait for all threads in this batch to complete
+    #         for t in threads:
+    #             t.join()
+
+    #     except Exception as e:
+    #         print(f"Error: {e}")
+    #         sys.exit(1)  # Exit the program with a status code (1 indicates an error)
+
+    #     return batch_results
+
+    # # Process files in batches of size THREADS
+    # for j in range(0, len(file_args), THREADS):
+    #     batch = file_args[j:j + THREADS]
+    #     results.extend(process_batch(batch))
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import sys
+
+    def process_all(file_args):
+        results = []
 
         try:
-            # Create and start threads for this batch
-            for args in batch:
-                t = Thread(target=thread_worker, args=(args,))
-                threads.append(t)
-                t.start()
+            with ThreadPoolExecutor(max_workers=THREADS) as executor:
+                futures = [executor.submit(process_file, args) for args in file_args]
 
-            # Wait for all threads in this batch to complete
-            for t in threads:
-                t.join()
+                for future in as_completed(futures):
+                    results.append(future.result())
 
         except Exception as e:
             print(f"Error: {e}")
-            sys.exit(1)  # Exit the program with a status code (1 indicates an error)
+            sys.exit(1)
 
-        return batch_results
+        return results
 
-    # Process files in batches of size THREADS
-    for j in range(0, len(file_args), THREADS):
-        batch = file_args[j:j + THREADS]
-        results.extend(process_batch(batch))
+    results.extend(process_all(file_args))
 
     # Update fmap with results and calculate total size
     for f, md5_hash, size in results:
@@ -182,6 +203,7 @@ def human_readable_size(size_in_bytes):
 def process_root(src, dst):
     process_dir(src, dst)
 
+import time
 
 def process():
     llog.begin('pwd')
@@ -189,10 +211,18 @@ def process():
     llog.end()
     llog.begin('process')
     llogfiles.begin('files')
+    
+    start = time.perf_counter()
 
     for i in range(0, len(SRC_PATHS)):
         dst = DST_PATHS[i] if DST_PATHS and i < len(DST_PATHS) else None
         process_root(SRC_PATHS[i], dst)
+
+    elapsed = time.perf_counter() - start
+
+    total_seconds = int(elapsed)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
 
     llogfiles.end()
     llog.end()
@@ -205,9 +235,11 @@ def process():
     llog.put('dst_dirs: ' + str(dst_total_dirs))
     llog.put('dst_size: ' + str(dst_total_size))
     llog.put('dst_size_unit: ' + human_readable_size(dst_total_size))
+    llog.put(f'duration: {hours:02}:{minutes:02}:{seconds:02}')
+    
     llog.end()
 
-    print(f'Processed {src_total_files} files {src_total_dirs} dirs {human_readable_size(src_total_size)} size')
+    print(f'Processed {src_total_files} files {src_total_dirs} dirs {human_readable_size(src_total_size)} size in {hours:02}:{minutes:02}:{seconds:02}')
 
 
 def process_dir(src, dst):
