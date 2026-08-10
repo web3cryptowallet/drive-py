@@ -207,14 +207,23 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 ## Version History
 
-v0.91 - added actions generation
-v0.92 - added a file indicator to the file list
-v0.93 - info: show dir status - n files
-v0.94 - info: show dir status - n files
+v0.91
+ - added actions generation
+ 
+v0.92
+ - added a file indicator to the file list
+
+v0.93
+ - info: show dir status - n files
+
+v0.94
+ - info: show dir status - n files
+
 v0.95
 - BUGFIX: Shift+Del: Remove directories recursively
 - TODO: ActionsView: Show the file status in the list
 - BUGFIX: ActionsView: Wrong file is removed
+
 v0.96
  - BUGFIX: vfs: sqlite: fix cloned files changes 
 
