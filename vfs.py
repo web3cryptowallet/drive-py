@@ -354,11 +354,14 @@ class SQLiteDBAdapter(BaseDBAdapter):
         
         # Track duplicate counts for file IDs to append #0, #1, etc.
         seen_counts = {}
-        
+
         # Convert to list to support start_index slicing
         file_items = list(files.items())
         
         def generate_nodes(start_index, n=100_000):
+            clone_count = 0
+            changed_count = 0
+        
             batch = []
             end_index = min(start_index + n, len(file_items))
             for i in range(start_index, end_index):
@@ -369,24 +372,43 @@ class SQLiteDBAdapter(BaseDBAdapter):
                 
                 base_file_id = "/" + "/".join(parts)
                 name = parts[-1]
-                
-                # Handle duplicates by appending #<index> to name and id
-                if base_file_id in seen_counts:
-                    dup_index = seen_counts[base_file_id]
-                    seen_counts[base_file_id] += 1
-                    file_id = f"{base_file_id}#{dup_index}"
-                    name = f"{name}#{dup_index}"
-                else:
-                    seen_counts[base_file_id] = 0
-                    file_id = base_file_id
-                
+
                 hashinfo = next(iter(hashes))
                 md5, size_str = hashinfo.rsplit(":", 1)
                 size = int(size_str)
+
+                # CHECK FILE CHANGES [
+
+                file_id = base_file_id
+
+                # Handle duplicates by appending #<index> to name and id
+                if base_file_id in seen_counts:
+                    clone_count += 1
+
+                    # Check if file changed
+                    dup_index, hashinfo1 = seen_counts[base_file_id]
+                    if hashinfo != hashinfo1:
+                        seen_counts[base_file_id][0] += 1
+                        file_id = f"{base_file_id}#{dup_index}"
+                        name = f"{name}#{dup_index}"
+
+                        print(f"DIFF {base_file_id} {hashinfo} {hashinfo1}")
+                        changed_count += 1
+                    else:
+                        # Skip if the same
+                        continue
+
+                else:
+                    seen_counts[base_file_id] = [0, hashinfo]
+
+                
+                # CHECK FILE CHANGES ]
                 
                 # Accumulate size for root
                 dirs[""]["size"] += size
-                
+
+#                continue
+
                 current_id = ""
                 # Use original parts for directory hierarchy, so duplicate files 
                 # reside in the same correct parent directory
@@ -416,7 +438,13 @@ class SQLiteDBAdapter(BaseDBAdapter):
                     "parent_id": parent_id,
                     "info": json.dumps({"path": path, "hashinfo": hashinfo, "hash": md5})
                 })
+            
+            if clone_count > 0 or changed_count > 0:
+                print(f"{clone_count} clones {changed_count} changed")
+
+            #return None
             return batch
+
 
         with self.conn:
             n = 100_000
