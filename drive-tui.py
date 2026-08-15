@@ -28,6 +28,8 @@ from vfs import format_size, normalize_path, get_stat_info
 
 from views import ActionsScreen, driveActions
 
+from datetime import datetime
+
 # DRIVE DB [
 
 def load_llogs(files):
@@ -378,12 +380,16 @@ class DemoApp(App):
 
             indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
 
+            #t = info['created']
+
             rows = [
                 f"{dir}",                                           # line 1
                 f"{indicator} ",                                    # line 2
                 f"Size: {format_size(node.size, 0)}",               # line 3
-                f"Created: {info.get("created", "")}",              # line 4
-                f"Modified: {info.get("modified", "")}",            # line 5
+#                f"Created: {info.get("created", "")}",              # line 4
+#                f"Modified: {info.get("modified", "")}",            # line 5
+                f"Created:  {datetime.fromtimestamp(info['created']).strftime('%Y-%m-%d %H:%M:%S') if info.get('created') else ''}",
+                f"Modified: {datetime.fromtimestamp(info['modified']).strftime('%Y-%m-%d %H:%M:%S') if info.get('modified') else ''}",            
             ]
             
             self.set_quick_rows(rows)
