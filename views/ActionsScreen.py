@@ -32,9 +32,6 @@ from textual.containers import Horizontal
 from textual.widgets import Header, Footer, ListView, ListItem, Label, Static
 from rich.table import Table
 
-#from livelog import LiveLog
-#from livelog2 import LiveLog as LiveLog2
-
 from drive import load_log
 
 #from vfs import VirtualFS, Node
@@ -117,6 +114,13 @@ class ActionsScreen(ModalScreen):
         filename = export_sh()
         self.app.notify(f"Export to {filename}")
 
+    def action_apply(self):
+        applied = apply_actions()
+        self.app.notify(f"Applied {applied} actions")
+        self.action_clear()
+        self.action_close()
+
+
     def on_button_pressed(self, event: Button.Pressed):
         match event.button.id:
             case "close":
@@ -155,6 +159,17 @@ def unique_filename(filename: str) -> str:
             return str(new_path)
         i += 1
 
+def get_local_path(vfspath):
+    p, parts = normalize_path(vfspath)
+    local = aliases.get(parts[0])
+    if local:
+        parts[0] = local
+        p = '/'.join(parts) 
+    return p
+
+# FILE UTIL ]
+# EXPORT SH [
+
 def export_sh():
     # create actions dir
     actionsdir = 'actions'
@@ -191,11 +206,7 @@ def export_sh():
 
     # flush actions
     for action in driveActions.actions:
-        p, parts = normalize_path(action[1])
-        local = aliases.get(parts[0])
-        if local:
-            parts[0] = local
-            p = '/'.join(parts) 
+        p = get_local_path(action[1])
         file.write(f"{action[0]} {shlex.quote(p)}")
         file.write("\n")
 
@@ -206,4 +217,33 @@ def export_sh():
 
     return filename
 
-# FILE UTIL ]
+# EXPORT SH ]
+# APPLY ACTIONS [
+
+import shutil
+
+def apply_actions():
+    removed = {}
+
+    for action in driveActions.actions:
+        op = action[0]
+        file = action[1]
+        p = get_local_path(file)
+
+        info = get_stat_info(p)
+
+        if info["exists"]:
+            if op == 'remove':
+                removed[p] = file
+                shutil.rmtree(file)
+#                if info["is_file"]:
+#                    # remove file
+#                    pass
+#                if info["is_dir"]:
+#                    # remove dir
+#                    pass
+
+    return removed
+
+# APPLY ACTIONS ]
+
