@@ -116,7 +116,10 @@ class ActionsScreen(ModalScreen):
 
     def action_apply(self):
         applied = apply_actions()
-        self.app.notify(f"Applied {applied} actions")
+
+        self.app.notify(f"{applied}")
+        self.app.notify(f"Applied {len(applied)} actions")
+        
         self.action_clear()
         self.action_close()
 
@@ -133,7 +136,7 @@ class ActionsScreen(ModalScreen):
                 self.action_export()
 
             case "apply":
-                self.app.notify("Apply")
+                self.action_apply()
 
 
 # DRIVE ACTIONS VIEW ]
@@ -235,13 +238,12 @@ def apply_actions():
         if info["exists"]:
             if op == 'remove':
                 removed[p] = file
-                shutil.rmtree(file)
-#                if info["is_file"]:
-#                    # remove file
-#                    pass
-#                if info["is_dir"]:
-#                    # remove dir
-#                    pass
+                if info["is_file"]:
+                    # remove file
+                    os.remove(p)
+                if info["is_dir"]:
+                    # remove dir
+                    shutil.rmtree(p)
 
     return removed
 

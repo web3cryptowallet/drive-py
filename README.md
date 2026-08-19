@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.96
+drive.py v0.97
 
-v0.96 - BUGFIX: vfs: sqlite: fix cloned files changes 
+v0.97 - FIX: action apply
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -226,6 +226,9 @@ v0.95
 
 v0.96
  - BUGFIX: vfs: sqlite: fix cloned files changes 
+
+v0.97
+- FIX: action apply
 
 ## Recomended projects
 
