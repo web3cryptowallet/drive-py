@@ -148,7 +148,8 @@ dst_size:3
 - TODO: actionsview: Delete key - remove from actlions list
 - TODO: actionsview: highlight dir
 - TODO: Shift-Delete: Select files to remove (DataTable, space select, multiple options)
-
+- TODO: Config: -c config.sh arg 
+- TODO: Config: config.sh section DB=mysql and LLOGSEARCHPATH=../llogd/:../llogd1/
 
 ## FAQ
 
