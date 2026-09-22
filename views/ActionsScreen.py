@@ -63,6 +63,7 @@ class ActionsScreen(ModalScreen):
     """
 
     BINDINGS = [
+        ("t", "app.switch_theme", "Theme"),
         ("escape", "close", "Close"),
         ("x", "clear", "clear"),
         ("e", "export", "export"),
@@ -248,4 +249,3 @@ def apply_actions():
     return removed
 
 # APPLY ACTIONS ]
-

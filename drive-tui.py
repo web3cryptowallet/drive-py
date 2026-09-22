@@ -15,6 +15,7 @@ from pathlib import Path
 import shlex
 
 from textual.app import App
+from textual.theme import Theme
 from textual.widgets import Header, Footer, Button
 
 from livelog import LiveLog
@@ -31,6 +32,7 @@ from views import ActionsScreen, driveActions
 from datetime import datetime
 
 # DRIVE DB [
+# LOAD ALL LOGS INTO MEMORY [
 
 def load_llogs(files):
 
@@ -53,13 +55,43 @@ def load_llogs(files):
 
     return right
 
+# LOAD ALL LOGS INTO MEMORY ]
+# STREAM LOGS INTO SQLITE ONE AT A TIME [
+
+def load_lite(files, rebuild_db=False, **db_kwargs):
+    """Load logs into SQLite with at most one parsed log held in memory."""
+    start = perf_counter()
+    fs = VirtualFS(None, 'sqlite', **db_kwargs)
+    try:
+        if rebuild_db:
+            fs.db.rebuild_db()
+            fs.cwd = fs.db.get_root()
+            
+        for index, file in enumerate(files):
+            # PARSE COMMIT AND RELEASE A SINGLE LOG [
+
+            print(f'Loading {index}: {file}')
+            right = {'hashes': {}, 'files': {}, 'file_types': {}, 'modified': {}}
+            load_log(right, file)
+            fs.update(right)
+            del right
+
+            # PARSE COMMIT AND RELEASE A SINGLE LOG ]
+
+        print(f"Loaded SQLite logs in {perf_counter() - start:.3f} s")
+        return fs
+    except BaseException:
+        fs.db.conn.close()
+        raise
+
+
+# STREAM LOGS INTO SQLITE ONE AT A TIME ]
 # DRIVE DB ]
 # DEMO APP [
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Header, Footer, ListView, ListItem, Label, Static
-from rich.table import Table
+from textual.widgets import Header, Footer, Label, Static
 
 # from vfs import VirtualFS
 
@@ -72,7 +104,7 @@ data = {
         "test0/t1/fileC": {"MD5:d41d8cd98f00b204e9800998ecf8427e:0"},
     }
 }
-from textual.widgets import ListItem, Label
+from textual.widgets import Label
 from textual.containers import Horizontal, VerticalScroll
 
 VFS = None
@@ -99,28 +131,52 @@ class DemoApp(App):
     TITLE = "drive.py"
     SUB_TITLE = "file manager"
 
-#    CSS = open("theme.css").read()
-
     CSS = """
     Horizontal {
         height: 1fr;
     }
 
     #files {
-        width: 45%;
+        height: 100%;
+        width: 50%;
         border: solid green;
     }
 
     #quick_scroll {
-        width: 55%;
+        width: 50%;
         border: solid blue;
     }
 
     #quick {
         height: 100%;
-        width: 55%;
+        width: 50%;
         border: solid blue;
         padding: 1;
+    }
+
+    .-theme-mc-blue #files, .-theme-mc-blue #quick {
+        border: solid #55ffff;
+    }
+
+    .-theme-mc-blue DataTable > .datatable--header {
+        background: #0000aa;
+        color: #ffff55;
+        text-style: bold;
+    }
+
+    .-theme-mc-default #files, .-theme-mc-default #quick {
+        border: solid #d0cfcc;
+    }
+
+    .-theme-mc-default Header {
+        background: #06989a;
+        color: #2e3436;
+    }
+
+    .-theme-mc-default DataTable > .datatable--header {
+        background: #3465a4;
+        color: #ffff55;
+        text-style: bold;
     }
     """
 
@@ -135,6 +191,7 @@ class DemoApp(App):
 #        ("ctrl+z", "undo", "Undo"),
         ("ctrl+x", "copy_text", "Copy"),
         ("escape", "back", "Parent"),
+        ("t", "switch_theme", "Theme"),
         ("q", "quit", "Quit"),
     ]
 
@@ -146,8 +203,9 @@ class DemoApp(App):
         yield Header()
 
         with Horizontal():
-            yield ListView(id="files")
-            yield DataTable(id="quick")
+            yield DataTable(id="files", cursor_type="row", show_row_labels=False,
+                            cursor_foreground_priority="renderable")
+            yield DataTable(id="quick", cursor_foreground_priority="renderable")
 
 #        from textual.app import App, ComposeResult
 #        from textual_image.widget import Image
@@ -165,6 +223,13 @@ class DemoApp(App):
 
 
     # ACTIONS [
+
+    def action_switch_theme(self):
+        themes = ("mc-default", "mc-blue", "textual-dark")
+        labels = ("MC Default", "MC Blue", "Textual Dark")
+        index = (themes.index(self.theme) + 1) % len(themes) if self.theme in themes else 0
+        self.theme = themes[index]
+        self.notify(f"Theme: {labels[index]}", timeout=1)
 
     def action_copy_text(self):
         text = self.query_one("#quick", Static).render()
@@ -243,11 +308,11 @@ class DemoApp(App):
 
         try:
             if focused and focused.id == "files":
-                filesView = focused  # ListView
-                index = filesView.index
-                files = self.vfs.listdir()
-                file = files[index] # need vfs.get_full_path(index)
-                f = self.vfs.pwd() + '/' + file[0]
+                filesView = focused  # DataTable
+                if not filesView.row_count:
+                    return None
+                row_key = filesView.coordinate_to_cell_key(filesView.cursor_coordinate).row_key
+                f = self.vfs.pwd() + '/' + row_key.value
                 return f
             elif focused and focused.id == "quick":
                 quickView = focused  # DataTable
@@ -267,13 +332,57 @@ class DemoApp(App):
 
 
     def on_mount(self):
-#        self.add_class("theme-blue")
+        self.register_theme(Theme(
+            name="mc-default",
+            primary="#06989a",
+            secondary="#06989a",
+            accent="#ffff55",
+            foreground="#eeeeec",
+            background="#3465a4",
+            surface="#12488b", # panel colors
+            panel="#3465a4",
+            dark=True,
+            variables={
+                "block-cursor-background": "#06989a",
+                "block-cursor-foreground": "#2e3436",
+                "block-cursor-text-style": "bold",
+                "block-cursor-blurred-background": "#06989a",
+                "block-cursor-blurred-foreground": "#2e3436",
+                "footer-background": "#06989a",
+                "footer-key-background": "#2e3436",
+                "footer-description-background": "#06989a",
+                "footer-key-foreground": "#eeeeec",
+                "footer-description-foreground": "#2e3436",
+            },
+        ))
+        self.register_theme(Theme(
+            name="mc-blue",
+            primary="#00aaaa",
+            secondary="#00aaaa",
+            accent="#ffff55",
+            foreground="#ffffff",
+            background="#0000aa",
+            surface="#0000aa",
+            panel="#0000aa",
+            dark=True,
+            variables={
+                "block-cursor-background": "#00aaaa",
+                "block-cursor-foreground": "#000000",
+                "block-cursor-text-style": "bold",
+                "block-cursor-blurred-background": "#008080",
+                "block-cursor-blurred-foreground": "#ffffff",
+                "footer-background": "#0000aa",
+                "footer-key-foreground": "#ffff55",
+                "footer-description-foreground": "#ffffff",
+            },
+        ))
+        self.theme = "mc-default"
 
         self.vfs = VFS
         self.nav_stack = []  # Track directory history for mc-style restoration
 
-#        files = self.query_one("#files", DataTable)
-#        files.add_columns("Name", "Size", "Dup")
+        files = self.query_one("#files", DataTable)
+        files.add_columns("Name", "Size", "Files / Dups")
 
         quick = self.query_one("#quick", DataTable)
         quick.add_column("Info")
@@ -288,17 +397,11 @@ class DemoApp(App):
         self.refresh_list(target_name=target_name)
 
     def refresh_list(self, target_name: str | None = None):
-        lv = self.query_one("#files", ListView)
-        lv.clear()
+        files = self.query_one("#files", DataTable)
+        files.clear()
 
         target_index = 0
-        items = []
-
         for index, (name, is_dir) in enumerate(self.vfs.listdir()):
-            grid = Table.grid(expand=True, padding=(0, 1))
-            grid.add_column(ratio=1, overflow="ellipsis", no_wrap=True)
-            grid.add_column(justify="right")
-            grid.add_column(justify="right")
 
             if is_dir:
                 if name == '..':
@@ -313,9 +416,10 @@ class DemoApp(App):
 
                 total_files = f"({node.total_files})"
 
-                grid.add_row(f"{indicator} 📁 {name}", total_files, size)
-#                grid.add_row(f"📁 {name}", "", f"{size}{indicator}")
-#                grid.add_row(f"{indicator}", f"📁 {name}", "", f"{size}")
+                label = Text.from_markup(f"{indicator} 📁 ")
+                label.append(name)
+                files.add_row(label, Text(size, justify="right"),
+                              Text(total_files, justify="right"), key=name)
             else:
                 node = self.vfs.get(name)
 
@@ -331,38 +435,18 @@ class DemoApp(App):
 
                 indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
 
-                grid.add_row(
-                    f"{indicator} 📄 {name}",
-                    size,
-                    f"({dup_count})"
-                )
-
-                # grid.add_row(
-                #     f"📄 {name}",
-                #     size,
-                #     f"({dup_count}){indicator}"
-                # )
-
-                # grid.add_row(
-                #     f"{indicator}",
-                #     f"📄 {name}",
-                #     size,
-                #     f"({dup_count})"
-                # )
-
-            item = ListItem(Static(grid))
-            item.file_name = name
-            items.append(item)
+                label = Text.from_markup(f"{indicator} 📄 ")
+                label.append(name)
+                files.add_row(label, Text(size, justify="right"),
+                              Text(f"({dup_count})", justify="right"), key=name)
 
             if target_name and name == target_name:
                 target_index = index
 
-        lv.extend(items)
-
         def apply_selection():
-            lv.focus()
-            lv.index = target_index
-            lv.scroll_to_widget(lv.children[target_index], animate=False)
+            files.focus()
+            if files.row_count:
+                files.move_cursor(row=target_index, column=0, animate=False)
 
         self.call_after_refresh(apply_selection)
         #self.query_one("#quick_scroll", VerticalScroll).scroll_home(animate=False)
@@ -399,6 +483,9 @@ class DemoApp(App):
 
             rows = [
                 f"{dir}",                                           # line 0
+                "[bold cyan]╭────────╮  drive.py v0.98[/bold cyan]",
+                "[bold cyan]│ ━━━━ ● │[/bold cyan]  [bold]File Manager[/bold]",
+                "[bold cyan]╰────────╯[/bold cyan]  [dim]Explore • Compare • Keep[/dim]",
                 f"",                                                # line 1
                 f"Legend:",                                         # line 2
                 f"[green]●[/green] Avaible",
@@ -411,6 +498,7 @@ class DemoApp(App):
                 f"[yellow]Enter[/yellow]: Open directory or view file info",
                 f"[yellow]Esc[/yellow]: Go back up to the parent directory",
                 f"[yellow]Ctrl + X[/yellow]: Copy info panel text to clipboard",
+                f"[yellow]t[/yellow]: Cycle MC Default, MC Blue, and Textual Dark themes",
                 f"[yellow]q[/yellow]: Quit the application",
                 f"",
                 f"File Removal (Queue):",
@@ -430,12 +518,11 @@ class DemoApp(App):
 
         # UPDATE QUICK VIEW ]
 
-    def on_list_view_selected(self, event: ListView.Selected):
-        if event.list_view.id == "quick":
-#            path = getattr(event.item, "file_path", None)
+    def on_data_table_row_selected(self, event: DataTable.RowSelected):
+        if event.data_table.id != "files":
             return
 
-        name = event.item.file_name
+        name = event.row_key.value
 
         if name == "..":
 #            self.query_one("#quick").update(self.vfs.pwd())
@@ -510,8 +597,8 @@ class DemoApp(App):
                 f"{indicator} {is_dir_s}{is_file_s}",               # line 1
                 f"Name: {node.name}",                               # line 2
                 f"Size: {format_size(node.size, 0)} {size_suffix}", # line 3
-                f"Created: {info.get("created", "")}",              # line 4
-                f"Modified: {info.get("modified", "")}",            # line 5
+                f"Created:  {datetime.fromtimestamp(info['created']).strftime('%Y-%m-%d %H:%M:%S') if info.get('created') is not None else ''}", # line 4
+                f"Modified: {datetime.fromtimestamp(info['modified']).strftime('%Y-%m-%d %H:%M:%S') if info.get('modified') is not None else ''}", # line 5
                 file_hash,                                          # line 6
                 "",                                                 # line 7
                 f"Other Duplicates ({len(other_dups)}):",           # line 8
@@ -583,13 +670,15 @@ if __name__ == '__main__':
     )
     parser.add_argument('-d', '--db', action='append', help='LLOG DB data path')
     parser.add_argument('-c', '--cache', help='Cache DB type: sqlite or redis')
-    parser.add_argument('-b', '--build', action="store_true", help='Build cache from LLOG DB')
+    cache_mode = parser.add_mutually_exclusive_group()
+    cache_mode.add_argument('-b', '--build', '--rebuild', action="store_true",
+                            help='Rebuild cache from LLOG DB')
+    cache_mode.add_argument('-u', '--update', action="store_true",
+                            help='Update SQLite cache one log at a time without rebuilding (requires -c sqlite)')
 
-    try:
-        args = parser.parse_args()
-    except SystemExit as e:
-        print(f"Error: Missing required arguments. Use `-h` for help.")
-        exit(e.code)  # Exit with the same error code
+    args = parser.parse_args()
+    if args.update and args.cache != 'sqlite':
+        parser.error('-u/--update requires -c sqlite')
     
 #    if not args.file:
 #        if not args.src:
@@ -648,7 +737,7 @@ if __name__ == '__main__':
         pass
 
     # READ CONFIG ]
-    # LOAD LLOG DB [
+    # LOAD LOGS USING STREAMING SQLITE OR IN MEMORY STORAGE [
 
     rebuild_db = False
     db_type="memory"
@@ -664,7 +753,7 @@ if __name__ == '__main__':
 
     db = None
 
-    if db_type == "memory" or rebuild_db:
+    if db_type == "memory" or rebuild_db or args.update:
         scan_dirs = ['.']
 
         if args.db:
@@ -672,27 +761,34 @@ if __name__ == '__main__':
 
         files = load_db(scan_dirs)
 
-        db = load_llogs(files)
+        if db_type == 'sqlite':
+            VFS = load_lite(files, rebuild_db=rebuild_db)
+            if not VFS.db.get_root() or not VFS.db.get_children(VFS.db.get_root()):
+                VFS.db.conn.close()
+                print("NO FILES FOUND!")
+                exit(1)
+        else:
+            db = load_llogs(files)
 
 
     #    pprint(db)
     #    print(json.dumps(db["hashes"], indent=4))
 
-        print(f"Total loaded {len(db['hashes'])} hashes and {len(db['files'])} files")
-        print("DONE!")
-        if len(db['files']) == 0:
-            print("NO FILES FOUND!")
-            exit(1)
+        if db is not None:
+            print(f"Total loaded {len(db['hashes'])} hashes and {len(db['files'])} files")
+            print("DONE!")
+            if len(db['files']) == 0:
+                print("NO FILES FOUND!")
+                exit(1)
 
-    # LOAD LLOG DB ]
-
-    VFS = VirtualFS(db, db_type, rebuild_db)
+    if VFS is None:
+        VFS = VirtualFS(db, db_type, rebuild_db)
 
     # cleanup
     if db:
         del db["files"]
         del db["hashes"]
 
+    # LOAD LOGS USING STREAMING SQLITE OR IN MEMORY STORAGE ]
 
     DemoApp().run()
-

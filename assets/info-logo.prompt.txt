@@ -1,0 +1,3 @@
+Generated using the built-in image_gen tool.
+
+Use case: logo-brand. Create a compact horizontal drive.py logo for a terminal disk comparison application info panel. A bold disk-drive emblem with a check mark beside the exact wordmark "drive.py". Flat crisp geometric artwork, highly legible at small sizes, muted blue #3465a4, teal #06989a, pale yellow #ffff55 and white. Transparent background. Wide horizontal composition, tight but safe margins. No slogan, mockup, shadows, or extra text.

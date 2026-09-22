@@ -1,16 +1,26 @@
 # drive.py
 
-drive.py v0.97
+## Megadisks demo
 
-v0.97 - FIX: action apply
+Browse synthetic disks, files, and backup duplicates in the TUI:
+
+```bash
+./run-megadisks.sh
+```
+
+Requires the local `.venv` environment with the TUI dependencies and generated `log-megadisks/` data.
+
+drive.py v0.98
+
+v0.98 - TUI tables and MC themes, modular VFS, memory-efficient SQLite loading, experimental updates and regression tests
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
 - **drive.py** — CLI disk analyzer.
 - **drive-tui.py** — TUI for the disk database.
 
-![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-2.png)
-![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
+![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
+![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-2.png)
 
 
 ## Prerequisites
@@ -51,6 +61,19 @@ Just try this demo:
 ```
 
 ## TUI
+
+MC Default starts with the reference Midnight Commander palette: muted blue panels,
+teal selections, and yellow headings. MC Blue preserves the previous saturated blue
+palette. Press `t` to cycle through MC Default, MC Blue, and Textual Dark. The shortcut is also
+listed in the footer and the root directory's Help / Shortcuts panel.
+
+The file and info panes each use 50% of the width. Status circles in both panes
+keep their colors when selected.
+
+The info pane displays Created and Modified dates for files and directories in
+local time using `YYYY-MM-DD HH:MM:SS` (for example, `2026-09-22 14:30:05`).
+Unavailable dates are left blank.
+
 ```
 sudo apt install python3-venv
 
@@ -68,14 +91,46 @@ Run with in-memory db for small amount of files
 python drive-tui.py
 ```
 
-Build SQLite cache for big disks
+Rebuild SQLite cache for big disks (`-b`)
 ```
 python drive-tui.py -c sqlite -b
 ```
-Run with SQLite cache
+SQLite builds load and commit one log at a time through `load_lite`, releasing
+each parsed log before loading the next. Memory usage depends on the largest
+individual log rather than all logs combined. Later logs overwrite matching
+files. The `-b` option recreates the cache once before loading begins.
+
+**Experimental:** Update an existing SQLite cache without recreating it (`-u` / `--update`):
+```
+python drive-tui.py -c sqlite -u -d log-test0
+```
+Both modes load one log at a time. Use either `-u` or `-b`, not both.
+
+Run with SQLite cache without importing logs:
 ```
 python drive-tui.py -c sqlite
 ```
+
+To merge files into an existing SQLite cache without rebuilding it, use the
+adapter's `update` method:
+
+```python
+from vfs import SQLiteDBAdapter
+
+db = SQLiteDBAdapter("drivevfs")
+try:
+    db.update({"disk/folder/file.txt": {"MD5:checksum:123"}})
+finally:
+    db.conn.close()
+```
+
+Updates overwrite matching files, create missing parent directories, adjust
+directory sizes, and refresh duplicate lookups. Files omitted from the update
+remain unchanged. Each path must have one `hash:size` value. An incoming file
+replaces an existing directory and its cached descendants, including their
+duplicate entries. A file needed as a parent is replaced with a directory;
+its old size and duplicate entries are removed. Invalid input rolls back the
+update. These replacements affect only the cache. `build` still recreates it.
 
 ```
 pip install textual-image pillow
@@ -141,9 +196,29 @@ dst_size:3
 # total ]
 ```
 
+## Tests
+
+Run the regression suite with:
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Redis tests require the Python `redis` package and `redis-server` on `PATH`
+(or an executable path in `REDIS_SERVER`). They start and stop a private server
+using a temporary Unix socket with persistence disabled. If either dependency
+is missing, Redis tests are skipped. To run only Redis tests:
+
+```sh
+.venv/bin/python -m unittest discover -s tests -p 'test_redis.py' -v
+```
+
+Redis coverage reuses SQLite navigation assertions and compares node metadata,
+directory sizes, and duplicate indexes with SQLite. It also checks reopening
+and empty trees. Incremental updates remain SQLite-only.
+
 ## TODO
 
-- TODO: Redis test
 - TODO: files: Page up/down keys navigation (DataTable)
 - TODO: actionsview: Delete key - remove from actlions list
 - TODO: actionsview: highlight dir
@@ -230,6 +305,20 @@ v0.96
 
 v0.97
 - FIX: action apply
+
+v0.98
+- SQLITE: Add experimental `-u` incremental updates; `-b` rebuilds the cache. Both load one log at a time to limit memory usage
+- TUI: Use MC Default at startup; press `t` to cycle through MC Default, MC Blue, and Textual Dark, with the shortcut listed in help and the footer
+- TUI: Replace the file list with a DataTable showing Name, Size, and Files / Dups columns
+- TUI: Adapt file selection, directory navigation, and cursor restoration to table rows; handle empty selections and display filenames as literal text
+- FIX: Set the TUI file pane height to 100%
+- TUI: Give the file and info panes equal widths (50% each)
+- FIX: Preserve status circle colors under the cursor in both the file and info panes
+- FIX: Use a portable Python 3 shebang for the TUI launcher
+- REFACTOR: Split vfs.py into a vfs package with separate filesystem, node, path mapping, action, utility, and demo modules
+- REFACTOR: Move the base, memory, SQLite, and Redis adapters into vfs/adapter while preserving public vfs imports and shared drive mappings
+- TEST: Add regression coverage for memory and SQLite navigation, SQLite cache reopening, duplicate lookup, drive mappings, local metadata, and public exports
+- DEV: Add run-test-llog.sh and run-test-tui.sh helpers for generating and browsing demo reports
 
 ## Recomended projects
 
