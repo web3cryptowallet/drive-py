@@ -1,15 +1,5 @@
 # drive.py
 
-## Megadisks demo
-
-Browse synthetic disks, files, and backup duplicates in the TUI:
-
-```bash
-./run-megadisks.sh
-```
-
-Requires the local `.venv` environment with the TUI dependencies and generated `log-megadisks/` data.
-
 drive.py v0.98
 
 v0.98 - TUI tables and MC themes, modular VFS, memory-efficient SQLite loading, experimental updates and regression tests
@@ -59,6 +49,16 @@ Just try this demo:
 ```bash
 ./drive.py -s test0/t0 -d test0/t1 log-test0
 ```
+
+## Megadisks demo
+
+Browse synthetic disks, files, and backup duplicates in the TUI:
+
+```bash
+./run-megadisks.sh
+```
+
+Requires the local `.venv` environment with the TUI dependencies and generated `log-megadisks/` data.
 
 ## TUI
 
