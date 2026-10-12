@@ -326,3 +326,54 @@ v0.98
 - [bitchatX21](https://github.com/goldenwebb/bitchatX21) a better version of Bitchat for iOS
 
 *AI-Independet code. Created through human work*
+
+### Live drive map
+
+Original prompt, implementation contracts, update history, and Rust conversion
+notes: [FEATURE-realtime-drive-scanner.md](FEATURE-realtime-drive-scanner.md).
+
+Press **s** on a selected file or directory to open its live scanner popup
+(on `..`, this scans the current directory). Press **s** or **Esc** to close.
+Scanning uses one background worker and repeats five seconds after each pass.
+Closing the popup cancels the worker; opening it starts a fresh scan.
+
+- **Arrows** move the map cursor; clicking a bucket selects it. The lower panel
+  shows its paths, sizes, file totals and status counts, with up to 100 paths per page.
+- **m** switches between file-count and byte-size packing. **v** switches between
+  fixed and scrolling packing (scrolling is the default). Map symbols occupy
+  adjacent single-character cells across the available width. Bucket rows have
+  no viewport cap; use the vertical scrollbar, wheel, arrows or **Page Up/Down**.
+  Rows grow automatically; there is no Rows input. Edit **Paths/bucket** or
+  **MiB/bucket**, then press **Enter**. Columns fit automatically; optional fixed
+  packing uses the viewport as its cell budget. Scrolling size mode applies both limits; an oversized file gets
+  its own bucket. The details list uses half its previous share of flexible height.
+- The live scan line shows the current path and **MB/s (read avg)**: actual
+  checksum bytes read divided by elapsed time in this pass, using decimal MB.
+  Idle speed is zero; the last path remains visible. Hover for the full path.
+- **View start** above the map shows the first visible bucket number, file count,
+  size and first path. It follows scrolling independently of the selected bucket.
+- Detail pages are numbered **1..N**, with as many numbered buttons as fit the
+  width and ellipses for omitted ranges. The navigation row is
+  `|< <-1000 <-100 <-10 < > >+10 >+100 >+1000 >|`; jumps stop at the first/last page.
+  Click or drag the horizontal slider to seek. With the slider focused,
+  **Left/Right** move one page and **Home/End** select first/last. Page zooming has
+  been removed. **>** advances one page. File pages contain only as many rows as
+  fit in the details panel, up to 100; the file list has no vertical scrollbar.
+- White **U** means disk-only/new, red **U** means missing from disk, green **●**
+  means verified, orange **M** means modified, and **?** means unverified (the
+  details panel explains read/checksum errors). Mixed buckets display the highest
+  priority state in that order: modified, missing, new, unverified, verified.
+  Resting symbols have a black background; selection adds an underline and keeps
+  the colors. The filled green circle matches the main files view.
+  Details list all states. A white-on-red spinner animates updates for one
+  second, including under the cursor; files currently being checked show **S n%** in the details list.
+
+Existing VFS path IDs identify files. SQLite saves discoveries in a separate
+`scan_paths` table; Redis uses a `scan_paths` hash; memory storage keeps them for
+that adapter's lifetime. Discovery does not replace imported baseline hashes or
+turn a new file into a verified file. Verification compares file type, size and
+stored content checksum (including same-size modifications). Unsupported/missing
+checksums remain unverified. Directory verification checks presence and type;
+symlinks are not traversed. The virtual root scans configured/known drives, not
+the host root. Changes appear on scan events; this is repeated scanning rather
+than an OS filesystem watcher. Quick-view integration and bookmarks are deferred.

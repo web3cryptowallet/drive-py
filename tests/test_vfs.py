@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import vfs
 from vfs import paths
@@ -86,6 +87,50 @@ class VirtualFSTests(unittest.TestCase):
             vfs.aliases.update(old_aliases)
             vfs.prefixes.clear()
             vfs.prefixes.update(old_prefixes)
+
+    def test_disk_overlay_and_refresh(self):
+        for backend in ('memory', 'sqlite'):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as cache:
+                root = Path(directory)
+                (root / 'known').write_text('abc')
+                (root / 'new').write_text('new')
+                (root / 'folder').mkdir()
+                (root / 'folder' / 'child').write_text('child')
+                data = {'files': {str(root / 'known'): {'hash:3'},
+                                  str(root / 'deleted'): {'old:4'}}, 'hashes': {}}
+                kwargs = {'db_path': str(Path(cache) / 'vfs.db')} if backend == 'sqlite' else {}
+                fs = vfs.VirtualFS(data, db_type=backend, rebuild_db=True, **kwargs)
+                try:
+                    with patch('vfs.filesystem.os.getcwd', return_value=directory):
+                        fs.start_in_current_directory()
+                    self.assertEqual(fs.pwd(), directory)
+                    self.assertEqual({n.name: n.info['status'] for n in fs.list_nodes()},
+                                     {'known': 'tracked', 'deleted': 'deleted',
+                                      'new': 'new', 'folder': 'new'})
+                    self.assertIsNone(fs.db.get_child(fs.cwd, 'new'))
+                    self.assertEqual(fs.get_full_info(fs.get('new'))['dups'], [])
+                    fs.enter('folder')
+                    self.assertIn(('child', False), fs.listdir())
+                    fs.enter('..')
+                    self.assertEqual(fs.pwd(), directory)
+                    (root / 'known').unlink()
+                    (root / 'deleted').write_text('back')
+                    (root / 'new').unlink()
+                    states = {n.name: n.info['status'] for n in fs.list_nodes()}
+                    self.assertEqual(states['known'], 'deleted')
+                    self.assertEqual(states['deleted'], 'tracked')
+                    self.assertNotIn('new', states)
+                finally:
+                    if backend == 'sqlite':
+                        fs.db.conn.close()
+
+    def test_startup_uses_drive_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(vfs.aliases, {'mapped': directory}, clear=True):
+                fs = vfs.VirtualFS({'files': {'mapped/missing': {'hash:1'}}})
+                with patch('vfs.filesystem.os.getcwd', return_value=directory):
+                    fs.start_in_current_directory()
+                self.assertEqual(fs.pwd(), '/mapped')
 
     def test_public_exports(self):
         for name in vfs.__all__:

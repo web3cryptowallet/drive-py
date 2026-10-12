@@ -28,6 +28,7 @@ from vfs import prefixes, disabled_prefixes, aliases # MapDrive
 from vfs import format_size, normalize_path, get_stat_info
 
 from views import ActionsScreen, driveActions
+from views.ScannerScreen import ScannerScreen
 
 from datetime import datetime
 
@@ -192,6 +193,8 @@ class DemoApp(App):
         ("ctrl+x", "copy_text", "Copy"),
         ("escape", "back", "Parent"),
         ("t", "switch_theme", "Theme"),
+        ("n", "cycle_display_mode", "Display mode"),
+        ("s", "scan_map", "Drive map"),
         ("q", "quit", "Quit"),
     ]
 
@@ -230,6 +233,13 @@ class DemoApp(App):
         index = (themes.index(self.theme) + 1) % len(themes) if self.theme in themes else 0
         self.theme = themes[index]
         self.notify(f"Theme: {labels[index]}", timeout=1)
+
+    def action_cycle_display_mode(self):
+        files = self.query_one("#files", DataTable)
+        name = (files.coordinate_to_cell_key(files.cursor_coordinate).row_key.value
+                if files.row_count else None)
+        self.display_mode = self.display_mode % 3 + 1
+        self.refresh_list(target_name=name)
 
     def action_copy_text(self):
         text = self.query_one("#quick", Static).render()
@@ -297,6 +307,12 @@ class DemoApp(App):
                 self.total_removed_files += 1
 
     # ACTION REMOVE ALL FILES ]
+
+    def action_scan_map(self):
+        path = self.get_current_file()
+        if not path or path.endswith('/..'):
+            path = self.vfs.pwd()
+        self.push_screen(ScannerScreen(self.vfs, path))
 
     def action_show_actions(self):
         self.push_screen(ActionsScreen())
@@ -379,6 +395,8 @@ class DemoApp(App):
         self.theme = "mc-default"
 
         self.vfs = VFS
+        self.vfs.start_in_current_directory()
+        self.display_mode = 1
         self.nav_stack = []  # Track directory history for mc-style restoration
 
         files = self.query_one("#files", DataTable)
@@ -401,44 +419,34 @@ class DemoApp(App):
         files.clear()
 
         target_index = 0
-        for index, (name, is_dir) in enumerate(self.vfs.listdir()):
-
-            if is_dir:
-                if name == '..':
-                    node = self.vfs.get_cwd()
-                else:
-                    node = self.vfs.get(name)
-                size = format_size(node.size, 0)
-
-                info = self.vfs.get_full_info(node, True)
-
-                indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
-
-                total_files = f"({node.total_files})"
-
-                label = Text.from_markup(f"{indicator} 📁 ")
-                label.append(name)
-                files.add_row(label, Text(size, justify="right"),
-                              Text(total_files, justify="right"), key=name)
+        nodes = self.vfs.list_nodes()
+        entries = [(node.name, node) for node in nodes]
+        if self.vfs.get('..') is not None:
+            entries.insert(0, ('..', self.vfs.get('..')))
+        for index, (name, node) in enumerate(entries):
+            status = node.info.get('status', 'tracked') if name != '..' else 'tracked'
+            color = 'white' if self.display_mode != 2 else {
+                'new': 'yellow', 'deleted': 'red', 'tracked': 'white',
+            }[status]
+            if self.display_mode == 1:
+                color = '#ffffff'
+            icon = '📁' if node.is_dir else '📄'
+            if self.display_mode == 3:
+                marker = {'new': '*', 'deleted': '!'}.get(status, ' ')
+                label = Text(f"{marker} {icon} {name}", style=color)
             else:
-                node = self.vfs.get(name)
-
                 info = self.vfs.get_full_info(node, True)
-
-                file_hash = node.info['hashinfo']
-                if isinstance(file_hash, set):
-                    file_hash = next(iter(file_hash))
-
-                size = format_size(node.size, 1)
-
-                dup_count = len(self.vfs.get_hash_dups(file_hash))
-
-                indicator = f"[green]●[/green]" if info["exists"] else "[red]●[/red]"
-
-                label = Text.from_markup(f"{indicator} 📄 ")
-                label.append(name)
-                files.add_row(label, Text(size, justify="right"),
-                              Text(f"({dup_count})", justify="right"), key=name)
+                indicator_color = 'green' if info['exists'] else 'red'
+                if self.display_mode == 1 and status == 'new':
+                    indicator_color = 'dark_orange'
+                label = Text(style=color)
+                label.append('●', style=indicator_color)
+                label.append(f" {icon} {name}")
+            count = node.total_files if node.is_dir else len(
+                self.vfs.get_hash_dups(node.info.get('hashinfo')))
+            files.add_row(label, Text(format_size(node.size, int(not node.is_dir)),
+                                      style=color, justify="right"),
+                          Text(f"({count})", style=color, justify="right"), key=name)
 
             if target_name and name == target_name:
                 target_index = index
@@ -488,9 +496,19 @@ class DemoApp(App):
                 "[bold cyan]╰────────╯[/bold cyan]  [dim]Explore • Compare • Keep[/dim]",
                 f"",                                                # line 1
                 f"Legend:",                                         # line 2
-                f"[green]●[/green] Avaible",
-                f"[red]●[/red] Not found",
-                f"[yellow]●[/yellow] Maybe it's available. It was available last time",
+                *([
+                    "[white]Files in database and on disk[/white]",
+                    "[white]* New: on disk only[/white]",
+                    "[white]! Deleted: in database only[/white]",
+                ] if self.display_mode == 3 else [
+                    "[green]●[/green] Available in database and on disk",
+                    "[red]●[/red] Not found on disk",
+                    "[dark_orange]●[/dark_orange] New file or directory: not in database",
+                ] if self.display_mode == 1 else [
+                    "[green]●[/green] Available",
+                    "[red]●[/red] Not found",
+                ]),
+                "[dark_orange]?[/dark_orange] Maybe available; it was available last time",
                 f"[red]R[/red] In remove queue",
                 f"[red]D[/red] Deleted",
                 f"",
@@ -499,6 +517,8 @@ class DemoApp(App):
                 f"[yellow]Esc[/yellow]: Go back up to the parent directory",
                 f"[yellow]Ctrl + X[/yellow]: Copy info panel text to clipboard",
                 f"[yellow]t[/yellow]: Cycle MC Default, MC Blue, and Textual Dark themes",
+                "[yellow]n[/yellow]: Cycle display: circles, colored names, monochrome",
+                "[yellow]s[/yellow]: Open live drive scanner and file map",
                 f"[yellow]q[/yellow]: Quit the application",
                 f"",
                 f"File Removal (Queue):",
@@ -550,7 +570,7 @@ class DemoApp(App):
             self.vfs.enter(name)
             self.refresh_list()
         else:
-            file_hash = node.info['hashinfo']
+            file_hash = node.info.get('hashinfo') or ''
             if isinstance(file_hash, set):
                 file_hash = next(iter(file_hash))
 

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd -- "$script_dir"
+
+if command -v cargo >/dev/null 2>&1; then
+    rust_drive_cargo="$(command -v cargo)"
+elif [[ -x "$HOME/.cargo/bin/cargo" ]]; then
+    rust_drive_cargo="$HOME/.cargo/bin/cargo"
+elif [[ -x /tmp/rust-drive-cargo/bin/cargo ]]; then
+    export CARGO_HOME=/tmp/rust-drive-cargo
+    export RUSTUP_HOME=/tmp/rust-drive-rustup
+    rust_drive_cargo=/tmp/rust-drive-cargo/bin/cargo
+else
+    echo "Cargo not found. Install Rust or add Cargo to PATH." >&2
+    exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+    set -- --demo
+fi
+
+exec "$rust_drive_cargo" run --locked --manifest-path "$script_dir/../drive-rust/Cargo.toml" -- "$@"

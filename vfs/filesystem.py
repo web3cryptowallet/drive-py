@@ -2,9 +2,11 @@
 
 # IMPORT FILESYSTEM NAVIGATION AND DUPLICATE INSPECTION DEPENDENCIES [
 
+import os
+
 from .adapter.memory import MemoryDBAdapter
 from .nodes import VFSNode
-from .paths import get_stat_info, path_update_prefix
+from .paths import aliases, get_real_path, get_stat_info, path_update_prefix
 from .adapter.redis import RedisDBAdapter
 from .adapter.sqlite import SQLiteDBAdapter
 from .utils import normalize_path
@@ -28,8 +30,9 @@ class VirtualFS:
             raise ValueError(f"Unknown db_type: {db_type}")
 
         if db_type == "memory" or rebuild_db:
-            self.db.build(data["files"], data["hashes"])
+            self.db.build(data["files"], data.get("hashes", {}))
 
+        self._local_nodes = {}
         self.cwd = self.db.get_root()
 
     # SELECT AND INITIALIZE FILESYSTEM STORAGE ]
@@ -47,55 +50,85 @@ class VirtualFS:
     # NAVIGATE AND LIST THE CURRENT DIRECTORY [
 
     def pwd(self):
-        node = self.cwd
-        parts = []
-        while True:
-            parent = self.db.get_parent(node)
-            if parent is None:
+        return self.cwd.id or "/"
+
+    def start_in_current_directory(self):
+        """Open the process directory, translating local drive mounts to aliases."""
+        path = os.getcwd()
+        for alias, local in sorted(aliases.items(), key=lambda item: len(item[1]), reverse=True):
+            local = os.path.abspath(local)
+            if path == local or path.startswith(local.rstrip('/') + '/'):
+                path = '/' + alias + path[len(local):]
                 break
-            parts.append(node.name)
-            node = parent
-        return "/" + "/".join(reversed(parts))
+        node = self.get_from_path(path)
+        if node and node.is_dir:
+            self.cwd = node
+
+    def _parent(self, node):
+        if node.parent_id is None:
+            return None
+        return self.get_from_path(node.parent_id)
+
+    def _child(self, parent, name):
+        node = self.db.get_child(parent, name)
+        if node is not None:
+            return node
+        return self._local_node(parent.id + '/' + name, parent.id)
+
+    def _local_node(self, path, parent_id):
+        real = get_real_path(path)
+        try:
+            st = os.lstat(real)
+        except OSError:
+            return None
+        node = VFSNode(path, path.rsplit('/', 1)[-1], os.path.isdir(real),
+                       size=st.st_size, parent_id=parent_id,
+                       info={'path': path, 'hashinfo': None, 'status': 'new'})
+        if parent_id == "":
+            self._local_nodes[path] = node
+        return node
+
+    def list_nodes(self, node=None):
+        """Merge immediate disk entries with database nodes without changing storage."""
+        node = node or self.cwd
+        children = {child.name: child for child in self.db.get_children(node)}
+        # The empty root is a virtual collection of drives, not the host root.
+        if node.id:
+            try:
+                with os.scandir(get_real_path(node.id)) as entries:
+                    for entry in entries:
+                        if entry.name not in children:
+                            child = self._local_node(node.id + '/' + entry.name, node.id)
+                            if child:
+                                children[entry.name] = child
+            except OSError:
+                pass
+        else:
+            for child in self._local_nodes.values():
+                if child.parent_id == '' and child.name not in children:
+                    children[child.name] = child
+        for child in children.values():
+            if child.info.get('status') != 'new':
+                child.info['status'] = ('tracked' if os.path.lexists(get_real_path(child.id))
+                                        else 'deleted')
+        return sorted(children.values(), key=lambda child: (not child.is_dir, child.name))
 
     def listdir(self, node = None):
         if node is None:
             node = self.cwd
 
-        result = []
-
-        if self.db.get_parent(node):
-            result.append(("..", True))
-
-        dirs = []
-        files = []
-
-        children = self.db.get_children(node)
-
-        for node in children:
-            if node.is_dir:
-                dirs.append(node)
-            else:
-                files.append(node)
-
-        dirs.sort(key=lambda n: n.name)
-        files.sort(key=lambda n: n.name)
-
-        for n in dirs:
-            result.append((n.name, True))
-
-        for n in files:
-            result.append((n.name, False))
-
+        result = [("..", True)] if self._parent(node) else []
+        result.extend((child.name, child.is_dir) for child in self.list_nodes(node))
         return result
 
     def enter(self, name):
         if name == "..":
-            parent = self.db.get_parent(self.cwd)
+            parent = self._parent(self.cwd)
             if parent:
                 self.cwd = parent
             return
 
-        node = self.db.get_child(self.cwd, name)
+        node = self._child(self.cwd, name)
         if node and node.is_dir:
             self.cwd = node
 
@@ -104,8 +137,8 @@ class VirtualFS:
 
     def get(self, name) -> VFSNode:
         if name == "..":
-            return self.db.get_parent(self.cwd)
-        return self.db.get_child(self.cwd, name)
+            return self._parent(self.cwd)
+        return self._child(self.cwd, name)
 
     # NAVIGATE AND LIST THE CURRENT DIRECTORY ]
     # INSPECT FILE METADATA AND DUPLICATE CONTENT [
@@ -117,7 +150,7 @@ class VirtualFS:
 
             return info
 
-        current_path = node.info.get('path')
+        current_path = node.id
         info = get_stat_info(current_path)
 
         if only_stat:
@@ -128,7 +161,7 @@ class VirtualFS:
         file_hash = node.info.get('hashinfo')
         
         # Fetch duplicates from the database instead of memory
-        all_dups = self.db.get_hash_dups(file_hash)
+        all_dups = self.get_hash_dups(file_hash)
         
         dups = [p for p in map(lambda x: path_update_prefix('/' + normalize_path(x)[0]), all_dups) if p != current_path]
         
@@ -146,16 +179,18 @@ class VirtualFS:
 
     def get_hash_dups(self, file_hash):
         """Returns a set of paths that share the same hash."""
-        return self.db.get_hash_dups(file_hash)
+        return self.db.get_hash_dups(file_hash) if file_hash else []
 
     # INSPECT FILE METADATA AND DUPLICATE CONTENT ]
     # LOOK UP A NODE BY VIRTUAL PATH [
 
     def get_from_path(self, fullpath):
+        if not fullpath or fullpath == "/":
+            return self.db.get_root()
         path, parts = normalize_path(fullpath)
         node = self.db.get_root()
         for p in parts:
-            node = self.db.get_child(node, p)
+            node = self._child(node, p)
             if node is None:
                 break
         return node

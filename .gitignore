@@ -23,3 +23,9 @@ config.sh
 drivevfs
 
 actions
+
+FEATURE-realtime-drive-scanner.md
+TRANSPLIT.md
+
+pack.sh
+
