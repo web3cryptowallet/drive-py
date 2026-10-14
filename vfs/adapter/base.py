@@ -24,6 +24,23 @@ class BaseDBAdapter(ABC):
     @abstractmethod
     def get_parent(self, node): pass
 
+    def add_scanned_file(self, path, digest, size):
+        """Insert a completed checksum baseline for a previously untracked file."""
+        raise NotImplementedError
+
+    def scanned_file_metadata(self, path, digest, size):
+        path, parts = normalize_path(path_update_prefix(path))
+        if not path or not all(parts) or size < 0:
+            raise ValueError('Expected a file path and non-negative size')
+        file_id = '/' + '/'.join(parts)
+        ancestors = ['']
+        for part in parts[:-1]:
+            ancestors.append(ancestors[-1] + '/' + part)
+        return {'id': file_id, 'name': parts[-1], 'is_dir': False,
+                'size': size, 'parent_id': ancestors[-1],
+                'info': {'path': file_id, 'hash': digest, 'state': 'verified',
+                         'hashinfo': f'{digest}:{size}'}}, ancestors
+
     # DEFINE THE DATABASE NAVIGATION CONTRACT ]
     # PARSE FILE HASHES AND ACCUMULATE DIRECTORY SIZES [
 

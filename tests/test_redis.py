@@ -95,6 +95,17 @@ class RedisTests(unittest.TestCase):
             for hash_id in (*self.data['hashes'], 'missing:1'):
                 self.assertEqual(actual.get_hash_dups(hash_id), sql.get_hash_dups(hash_id))
 
+    def test_scanned_file_insert_is_indexed_and_idempotent(self):
+        fs = vfs.VirtualFS({'files': {}, 'hashes': {}}, db_type='redis', rebuild_db=True)
+        self.assertTrue(fs.db.add_scanned_file('/new/dir/file', 'md5:abc', 3))
+        node = fs.get_from_path('/new/dir/file')
+        self.assertEqual(node.info['hashinfo'], 'md5:abc:3')
+        self.assertEqual(fs.db.get_root().size, 3)
+        self.assertEqual(fs.get_hash_dups('md5:abc:3'), {'/new/dir/file'})
+        self.assertFalse(fs.db.add_scanned_file('/new/dir/file', 'md5:changed', 5))
+        self.assertEqual(fs.db.get_root().size, 3)
+        self.assertEqual(fs.get_from_path('/new/dir/file').info['hash'], 'md5:abc')
+
     def test_empty_tree(self):
         fs = vfs.VirtualFS({'files': {}, 'hashes': {}}, db_type='redis', rebuild_db=True)
         self.assertEqual(fs.pwd(), '/')

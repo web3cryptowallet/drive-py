@@ -389,6 +389,31 @@ class SQLiteDBAdapter(BaseDBAdapter):
             )
             # APPLY ACCUMULATED DIRECTORY SIZE CHANGES ]
 
+    def add_scanned_file(self, path, digest, size):
+        metadata, ancestors = self.scanned_file_metadata(path, digest, size)
+        with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            if self.conn.execute('SELECT 1 FROM nodes WHERE id = ?',
+                                 (metadata['id'],)).fetchone():
+                return False
+            parents = {key: self.conn.execute('SELECT is_dir FROM nodes WHERE id = ?',
+                                              (key,)).fetchone() for key in ancestors}
+            if any(parent and not parent['is_dir'] for parent in parents.values()):
+                raise ValueError('A stored file occupies a parent directory')
+            for index, key in enumerate(ancestors):
+                if not parents[key]:
+                    self.conn.execute('INSERT INTO nodes VALUES (?, ?, 1, 0, ?, ?)',
+                                      (key, key.rsplit('/', 1)[-1],
+                                       ancestors[index - 1] if index else None, '{}'))
+                self.conn.execute('UPDATE nodes SET size = size + ? WHERE id = ?', (size, key))
+            self.conn.execute('INSERT INTO nodes VALUES (?, ?, 0, ?, ?, ?)',
+                              (metadata['id'], metadata['name'], size, metadata['parent_id'],
+                               json.dumps(metadata['info'])))
+            self.conn.execute('INSERT INTO hashes VALUES (?, ?)',
+                              (metadata['info']['hashinfo'], metadata['info']['path']))
+        return True
+
     # MERGE FILES WITHOUT REBUILDING SQLITE ]
     # QUERY SQLITE NODES AND DUPLICATES [
 

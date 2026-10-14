@@ -29,6 +29,8 @@ from vfs import format_size, normalize_path, get_stat_info
 
 from views import ActionsScreen, driveActions
 from views.ScannerScreen import ScannerScreen
+from views.FilesTable import FilesTable
+from views.HelpScreen import HelpScreen, main_help
 
 from datetime import datetime
 
@@ -141,6 +143,8 @@ class DemoApp(App):
         height: 100%;
         width: 50%;
         border: solid green;
+        overflow-x: hidden;
+        overflow-y: scroll;
     }
 
     #quick_scroll {
@@ -195,6 +199,7 @@ class DemoApp(App):
         ("t", "switch_theme", "Theme"),
         ("n", "cycle_display_mode", "Display mode"),
         ("s", "scan_map", "Drive map"),
+        ("h", "help", "Help"),
         ("q", "quit", "Quit"),
     ]
 
@@ -206,7 +211,7 @@ class DemoApp(App):
         yield Header()
 
         with Horizontal():
-            yield DataTable(id="files", cursor_type="row", show_row_labels=False,
+            yield FilesTable(id="files", cursor_type="row", show_row_labels=False,
                             cursor_foreground_priority="renderable")
             yield DataTable(id="quick", cursor_foreground_priority="renderable")
 
@@ -215,7 +220,6 @@ class DemoApp(App):
 #        yield Image("assets/console-1.png")
 
 
-        yield Footer()
 
     def show_image(self, filename):
         from PIL import Image
@@ -308,11 +312,17 @@ class DemoApp(App):
 
     # ACTION REMOVE ALL FILES ]
 
+    def action_help(self):
+        self.push_screen(HelpScreen("File manager help", main_help(self.display_mode)))
+
     def action_scan_map(self):
-        path = self.get_current_file()
-        if not path or path.endswith('/..'):
-            path = self.vfs.pwd()
-        self.push_screen(ScannerScreen(self.vfs, path))
+        table = self.query_one('#files', DataTable)
+        selected = (table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+                    if table.row_count else None)
+        def scan_closed(_result):
+            self.vfs.cwd = self.vfs.get_from_path(self.vfs.pwd())
+            self.refresh_list(target_name=selected)
+        self.push_screen(ScannerScreen(self.vfs, self.vfs.pwd()), scan_closed)
 
     def action_show_actions(self):
         self.push_screen(ActionsScreen())
@@ -400,7 +410,8 @@ class DemoApp(App):
         self.nav_stack = []  # Track directory history for mc-style restoration
 
         files = self.query_one("#files", DataTable)
-        files.add_columns("Name", "Size", "Files / Dups")
+        files.add_columns(Text("Name", justify="left"), Text("Size", justify="left"),
+                          Text("Dups", justify="left"))
 
         quick = self.query_one("#quick", DataTable)
         quick.add_column("Info")
@@ -444,9 +455,9 @@ class DemoApp(App):
                 label.append(f" {icon} {name}")
             count = node.total_files if node.is_dir else len(
                 self.vfs.get_hash_dups(node.info.get('hashinfo')))
-            files.add_row(label, Text(format_size(node.size, int(not node.is_dir)),
-                                      style=color, justify="right"),
-                          Text(f"({count})", style=color, justify="right"), key=name)
+            files.add_row(label, Text(format_size(node.size, int(not node.is_dir)).strip(),
+                                      style=color, justify="left"),
+                          Text(f"({count})", style=color, justify="left"), key=name)
 
             if target_name and name == target_name:
                 target_index = index
@@ -456,6 +467,8 @@ class DemoApp(App):
             if files.row_count:
                 files.move_cursor(row=target_index, column=0, animate=False)
 
+        files.fit_columns()
+        self.call_after_refresh(files.fit_columns)
         self.call_after_refresh(apply_selection)
         #self.query_one("#quick_scroll", VerticalScroll).scroll_home(animate=False)
 
@@ -495,41 +508,9 @@ class DemoApp(App):
                 "[bold cyan]│ ━━━━ ● │[/bold cyan]  [bold]File Manager[/bold]",
                 "[bold cyan]╰────────╯[/bold cyan]  [dim]Explore • Compare • Keep[/dim]",
                 f"",                                                # line 1
-                f"Legend:",                                         # line 2
-                *([
-                    "[white]Files in database and on disk[/white]",
-                    "[white]* New: on disk only[/white]",
-                    "[white]! Deleted: in database only[/white]",
-                ] if self.display_mode == 3 else [
-                    "[green]●[/green] Available in database and on disk",
-                    "[red]●[/red] Not found on disk",
-                    "[dark_orange]●[/dark_orange] New file or directory: not in database",
-                ] if self.display_mode == 1 else [
-                    "[green]●[/green] Available",
-                    "[red]●[/red] Not found",
-                ]),
-                "[dark_orange]?[/dark_orange] Maybe available; it was available last time",
-                f"[red]R[/red] In remove queue",
-                f"[red]D[/red] Deleted",
-                f"",
-                f"Help / Shortcuts:",
-                f"[yellow]Enter[/yellow]: Open directory or view file info",
-                f"[yellow]Esc[/yellow]: Go back up to the parent directory",
-                f"[yellow]Ctrl + X[/yellow]: Copy info panel text to clipboard",
-                f"[yellow]t[/yellow]: Cycle MC Default, MC Blue, and Textual Dark themes",
-                "[yellow]n[/yellow]: Cycle display: circles, colored names, monochrome",
-                "[yellow]s[/yellow]: Open live drive scanner and file map",
-                f"[yellow]q[/yellow]: Quit the application",
-                f"",
-                f"File Removal (Queue):",
-                f"[yellow]Del[/yellow]: Queue the selected file for removal",
-                f"[yellow]Shift + Del[/yellow]: Queue file and all duplicates for removal",
-                f"",
-                f"Action Queue:",
-                f"[yellow]a[/yellow]: Open the Actions screen to review operations",
-                f"[yellow]x[/yellow]: Clear the entire queue (inside Actions)",
-                f"[yellow]e[/yellow]: export to apply/drive*.sh",
-                f"[yellow]Ctrl+Enter[/yellow]: Apply",
+                "[#ff8800]h[/#ff8800]: Open help view",
+                "",
+                *main_help(self.display_mode),
             ]
 
             self.set_quick_rows(rows)

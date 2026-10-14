@@ -1,20 +1,26 @@
 """Single-worker disk verification and event-driven, sequential map buckets.
 
-The scan index is deliberately separate from the imported comparison baseline.
+Discovery records remain separate; verified new files join the VFS baseline.
+Existing comparison baselines are preserved.
 Path IDs have the same meaning as nodes.id throughout the existing VFS.
 """
-from collections import Counter
-from dataclasses import dataclass, replace
+from bisect import bisect_left
+from collections import Counter, deque
+from dataclasses import asdict, dataclass, replace
 import hashlib
+import json
 import math
 import os
+import random
 from queue import Full
+from threading import Event, RLock, Thread
 import sqlite3
 import stat
 import time
 
 from .adapter.sqlite import SQLiteDBAdapter
 from .paths import aliases, get_real_path
+from .nodes import VFSNode
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,14 @@ class ScanEntry:
     progress: int | None = None
     error: str = ''
 
+    def __post_init__(self):
+        if self.is_dir:
+            object.__setattr__(self, 'state', 'directory')
+            object.__setattr__(self, 'size', 0)
+            object.__setattr__(self, 'progress', None)
+        elif self.state == 'directory':
+            object.__setattr__(self, 'state', 'unknown')
+
 
 @dataclass(frozen=True)
 class ScanStats:
@@ -35,26 +49,267 @@ class ScanStats:
     elapsed: float = 0.
     active: bool = False
 
+    paths: int = 0
+    size_scanned: int | None = None
+
+    # None preserves compatibility for callers constructing legacy statistics.
+    rate_samples: tuple | None = None
+
+    def recent_rate(self, column):
+        now = time.monotonic()
+        return sum(sample[column] for sample in self.rate_samples
+                   if 0 <= now - sample[0] < 5) / 5
+
+    @property
+    def paths_per_second(self):
+        if self.rate_samples is not None:
+            return self.recent_rate(1)
+        return self.paths / self.elapsed if self.active and self.elapsed > 0 else 0.
+
     @property
     def mb_per_second(self):
-        return self.bytes_read / self.elapsed / 1_000_000 if self.active and self.elapsed > 0 else 0.
+        if self.rate_samples is not None:
+            return self.recent_rate(2) / 1_000_000
+        size = self.bytes_read if self.size_scanned is None else self.size_scanned
+        return size / self.elapsed / 1_000_000 if self.active and self.elapsed > 0 else 0.
 
+
+class ScanStore:
+    """Scanner-owned records, separate from the imported comparison baseline."""
+    def __init__(self, db):
+        self.db = db
+        if isinstance(db, SQLiteDBAdapter):
+            db.conn.execute("CREATE TABLE IF NOT EXISTS scan_state (kind TEXT, key TEXT, value TEXT, PRIMARY KEY(kind, key))")
+            db.conn.commit()
+        elif not hasattr(db, 'client') and not hasattr(db, 'scan_state'):
+            db.scan_state = {}
+
+    def get(self, kind, key, default=None):
+        db = self.db
+        if isinstance(db, SQLiteDBAdapter):
+            row = db.conn.execute('SELECT value FROM scan_state WHERE kind=? AND key=?', (kind, key)).fetchone()
+            value = row[0] if row else None
+        elif hasattr(db, 'client'):
+            value = db.client.hget('scan_state:' + kind, key)
+        else:
+            value = db.scan_state.get((kind, key))
+        return json.loads(value) if value is not None else default
+
+    def items(self, kind):
+        db = self.db
+        if isinstance(db, SQLiteDBAdapter):
+            rows = db.conn.execute('SELECT key, value FROM scan_state WHERE kind=?', (kind,))
+        elif hasattr(db, 'client'):
+            rows = db.client.hgetall('scan_state:' + kind).items()
+        else:
+            rows = ((key, value) for (record_kind, key), value in db.scan_state.items()
+                    if record_kind == kind)
+        return {(key.decode() if isinstance(key, bytes) else key): json.loads(value)
+                for key, value in rows}
+
+    def put(self, kind, key, value):
+        value = json.dumps(value)
+        db = self.db
+        if isinstance(db, SQLiteDBAdapter):
+            with db.conn:
+                db.conn.execute('INSERT OR REPLACE INTO scan_state VALUES (?, ?, ?)', (kind, key, value))
+        elif hasattr(db, 'client'):
+            db.client.hset('scan_state:' + kind, key, value)
+        else:
+            db.scan_state[kind, key] = value
+
+
+class ScanControls:
+    """Independent mode flags and wake signal shared with the worker."""
+    def __init__(self, modes=(True, False, False), read_known=False, new_first=True,
+                 startup=False, heavy_order='normal'):
+        self.startup_mode = 1 if startup else None
+        self.modes = (True, False, False) if startup else tuple(modes)
+        self.heavy_order = heavy_order if heavy_order in ('normal', 'expert') else 'normal'
+        self.buckets = ()
+        self.read_known = read_known
+        self.new_first = new_first
+        self.wake = Event()
+        self.lock = RLock()
+        self.epochs = (0, 0, 0)
+        self.requests = ((0, None),) * 3
+        self.entry_priorities = {}
+        self.expert_queue = deque()
+        self.expert_current = None
+        self.selector_batch = 0
+        self.selector_next = 0
+        self.priority_revision = 0
+        self.selector_pool = []
+        self.selector_catalog = None
+
+    @property
+    def selected_buckets(self):
+        with self.lock:
+            return ((self.expert_current,) if self.expert_current else ()) + tuple(self.expert_queue)
+
+    def expert_eligible_indices(self, buckets):
+        tiers = {}
+        for index, ids in enumerate(buckets):
+            priorities = [self.entry_priorities[path] for path in ids
+                          if path in self.entry_priorities]
+            if priorities:
+                tiers[index] = (0 if any(value < 2 for value in priorities) else
+                                1 if any(value != 3 for value in priorities) else 2)
+        tier = min(tiers.values(), default=None)
+        return {index for index, value in tiers.items() if value == tier}
+
+    def enqueue_expert(self, eligible=None, buckets=None):
+        """Selector-only: enqueue the next eligible file bucket in map order."""
+        with self.lock:
+            if not self.modes[2] or self.heavy_order != 'expert' or self.startup_mode is not None:
+                return False
+            occupied = {path for ids in self.selected_buckets for path in ids}
+            if not self.buckets:
+                return False
+            buckets = self.buckets if buckets is None else buckets
+            eligible = self.expert_eligible_indices(buckets) if eligible is None else eligible
+            count = len(buckets)
+            for offset in range(count):
+                index = (self.selector_next + offset) % count
+                if index not in eligible:
+                    continue
+                ids = buckets[index]
+                if any(path in occupied for path in ids):
+                    continue
+                if not any(path in self.entry_priorities for path in ids):
+                    continue
+                self.expert_queue.append(ids)
+                self.selector_next = (index + 1) % count
+                self.wake.set()
+                return True
+            return False
+
+    def enqueue_expert_batch(self):
+        with self.lock:
+            if not self.modes[2] or self.heavy_order != 'expert' or self.startup_mode is not None:
+                if not self.selected_buckets:
+                    self.selector_batch = 0
+                return 0
+            buckets = self.buckets
+            if self.selector_catalog is not buckets:
+                self.selector_pool = []
+                self.selector_catalog = buckets
+            if not self.selector_pool:
+                occupied = {path for ids in self.selected_buckets for path in ids}
+                self.selector_pool = sorted(
+                    index for index in self.expert_eligible_indices(buckets)
+                    if not any(path in occupied for path in buckets[index]))
+            if not self.selector_pool:
+                return 0
+            # Consume one random-start sequence from the reusable candidate list.
+            requested = min(random.randint(1, 20), len(self.selector_pool))
+            first = random.choice(self.selector_pool)
+            start = bisect_left(self.selector_pool, first)
+            stop = min(start + requested, len(self.selector_pool))
+            chosen = self.selector_pool[start:stop]
+            del self.selector_pool[start:stop]
+            wrapped = requested - len(chosen)
+            if wrapped:
+                chosen.extend(self.selector_pool[:wrapped])
+                del self.selector_pool[:wrapped]
+            for index in chosen:
+                self.expert_queue.append(buckets[index])
+            self.selector_next = (chosen[-1] + 1) % len(buckets)
+            self.selector_batch = len(chosen)
+            self.wake.set()
+            return len(chosen)
+
+    def claim_expert(self):
+        with self.lock:
+            if (not self.modes[2] or self.heavy_order != 'expert' or
+                    self.expert_current is not None or not self.expert_queue):
+                return None
+            self.expert_current = self.expert_queue.popleft()
+            return self.expert_current
+
+    def finish_expert(self, interrupted=False):
+        with self.lock:
+            ids = self.expert_current
+            self.expert_current = None
+            if interrupted and ids and self.heavy_order == 'expert':
+                self.expert_queue.appendleft(ids)
+
+    def cancel_startup(self):
+        with self.lock:
+            if self.startup_mode is not None:
+                self.startup_mode = None
+                self.epochs = tuple(value + 1 for value in self.epochs)
+
+    def advance_startup(self, mode):
+        with self.lock:
+            if self.startup_mode == mode:
+                self.startup_mode = mode + 1 if mode < 3 else None
+                self.modes = tuple(self.startup_mode == index for index in (1, 2, 3))
+
+    def toggle_order(self):
+        with self.lock:
+            self.cancel_startup()
+            self.heavy_order = 'expert' if self.heavy_order == 'normal' else 'normal'
+            self.expert_queue.clear()
+            self.selector_pool = []
+            self.epochs = tuple(value + (i == 2) for i, value in enumerate(self.epochs))
+            self.wake.set()
+
+    def toggle(self, mode):
+        with self.lock:
+            self.cancel_startup()
+            self.modes = tuple(not value if index == mode - 1 else value
+                               for index, value in enumerate(self.modes))
+            self.epochs = tuple(value + (index == mode - 1)
+                                for index, value in enumerate(self.epochs))
+            self.wake.set()
+
+    def start_from(self, mode, path):
+        with self.lock:
+            self.cancel_startup()
+            index = mode - 1
+            self.requests = tuple((value[0] + 1, path) if i == index else value
+                                  for i, value in enumerate(self.requests))
+            self.epochs = tuple(value + (i == index) for i, value in enumerate(self.epochs))
+            self.modes = tuple(True if i == index else value for i, value in enumerate(self.modes))
+            if mode == 3 and self.heavy_order == 'expert':
+                self.selector_pool = []
+                self.expert_queue.clear()
+                selected = next(((i, ids) for i, ids in enumerate(self.buckets) if path in ids), None)
+                if selected:
+                    bucket_index, ids = selected
+                    self.expert_queue.append(ids)
+                    self.selector_batch = 1
+                    self.selector_next = (bucket_index + 1) % len(self.buckets)
+            self.wake.set()
 
 class DriveScanner:
-    """Walk the union of disk and baseline paths off the Textual event loop."""
-
-    def __init__(self, db, path, events, stop, interval=5):
+    """One disk worker with independently enabled discovery/metadata/hash passes."""
+    def __init__(self, db, path, events, stop, interval=5, controls=None, entries=(), root_names=()):
         self.source = db
+        self.root_names = tuple(root_names)
         self.path = path.rstrip('/')
-        self.events = events
-        self.stop = stop
-        self.interval = interval
-        self.previous_ids = set()
+        self.events, self.stop, self.interval = events, stop, interval
+        self.controls = controls or ScanControls()
+        self.entries = {entry.id: replace(entry, progress=None) for entry in entries}
+        self.previous_ids = set(self.entries)
         self.remembered = set()
         self.current_path = self.path or '/'
-        self.bytes_read = 0
+        self.bytes_read = self.paths = self.size_scanned = 0
         self.started = time.monotonic()
         self.last_stats = 0.
+        self.current_mode = 0
+        self.elapsed = 0.
+        self.checkpoints = None
+        self.requests_seen = [0, 0, 0]
+        self.active_epoch = 0
+        self.expert_scanned = False
+        self.selector_thread = None
+        self.selector_stop = Event()
+        self.rate_samples = deque()
+        self.baseline_known = {}
+        self.expert_initialized = False
+        self.checksums = None
 
     def emit(self, event):
         while not self.stop.is_set():
@@ -64,142 +319,423 @@ class DriveScanner:
             except Full:
                 pass
 
-    def report_stats(self, *, path=None, read=0, force=False, active=True):
+    def report_stats(self, *, path=None, read=0, completed_size=None, force=False, active=True):
         if path is not None:
             self.current_path = path
         self.bytes_read += read
         now = time.monotonic()
+        if completed_size is not None:
+            if self.rate_samples and now - self.rate_samples[-1][0] < .1:
+                stamp, paths, size = self.rate_samples.pop()
+                self.rate_samples.append((stamp, paths + 1, size + completed_size))
+            else:
+                self.rate_samples.append((now, 1, completed_size))
+        while self.rate_samples and now - self.rate_samples[0][0] >= 5:
+            self.rate_samples.popleft()
         if force or now - self.last_stats >= .1:
             self.emit(('stats', ScanStats(self.current_path, self.bytes_read,
-                                         max(0., now - self.started), active)))
+                                         self.elapsed + max(0., now - self.started), active,
+                                         self.paths, self.size_scanned, tuple(self.rate_samples))))
             self.last_stats = now
 
+    def enabled(self, mode):
+        return (not self.stop.is_set() and self.controls.modes[mode - 1] and
+                (self.current_mode != mode or
+                 self.active_epoch == self.controls.epochs[mode - 1]))
+
+    def begin_mode(self, mode):
+        self.current_mode = mode
+        self.active_epoch = self.controls.epochs[mode - 1]
+        revision, anchor = self.controls.requests[mode - 1]
+        key = str(mode)
+        if revision != self.requests_seen[mode - 1]:
+            self.requests_seen[mode - 1] = revision
+            paths = list(self.entries)
+            if anchor in paths:
+                paths = paths[paths.index(anchor):]
+            if mode in (1, 2):
+                frontier = self.discovery_frontier(paths)
+                self.checkpoints['1' if mode == 1 else '2-discovery'] = {
+                    'stack': list(reversed(frontier or [self.path])),
+                    'seen': [], 'partial': True}
+            if mode != 1:
+                self.checkpoints[key] = {'remaining': paths, 'first': anchor}
+        if self.checkpoints.get(key) is None:
+            self.checkpoints[key] = (
+                {'stack': [self.path], 'seen': [], 'partial': False} if mode == 1
+                else {'remaining': ([] if mode == 3 and self.controls.heavy_order == 'expert'
+                                    and self.controls.startup_mode is None else list(self.entries)),
+                      'first': None})
+        self.save_positions()
+
+    def discovery_frontier(self, paths):
+        frontier, selected = [], set()
+        for path in paths:
+            parent = path.rpartition('/')[0]
+            while parent and parent not in selected:
+                parent = parent.rpartition('/')[0]
+            if not parent:
+                frontier.append(path)
+                selected.add(path)
+        return frontier
+
+    def finish_startup_mode(self, mode):
+        if (self.enabled(mode) and self.checkpoints.get(str(mode)) is None and
+                (mode != 2 or self.checkpoints.get('2-discovery') is None)):
+            self.controls.advance_startup(mode)
+
+    def save_positions(self):
+        self.store.put('position', self.path or '/', self.checkpoints)
+
+    def select_buckets(self):
+        exhausted = None
+        while not self.stop.is_set() and not self.selector_stop.is_set():
+            with self.controls.lock:
+                signature = (id(self.controls.buckets), self.controls.priority_revision,
+                             self.controls.modes, self.controls.heavy_order,
+                             self.controls.startup_mode, len(self.controls.expert_queue),
+                             self.controls.expert_current)
+            selected = (0 if signature == exhausted else
+                        self.controls.enqueue_expert_batch())
+            exhausted = None if selected else signature
+            self.selector_stop.wait(random.uniform(.2, 1.0) if selected else .05)
+
     def run(self):
+        self.selector_thread = Thread(target=self.select_buckets,
+                                      name='drive-bucket-selector', daemon=True)
+        self.selector_thread.start()
         db = self.source
         owns_connection = isinstance(db, SQLiteDBAdapter)
         try:
             if owns_connection:
-                # SQLite connections belong to their creating thread.
                 db = object.__new__(SQLiteDBAdapter)
                 db.conn = sqlite3.connect(self.source.db_path, timeout=2)
                 db.conn.row_factory = sqlite3.Row
-                db.conn.execute('''CREATE TABLE IF NOT EXISTS scan_paths (
-                    id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)''')
-                db.conn.commit()
-            elif not hasattr(db, 'scan_paths'):
-                db.scan_paths = {}
             while not self.stop.is_set():
-                self.emit(('phase', 'Scanning'))
+                self.controls.wake.clear()
+                if not any(self.controls.modes):
+                    self.emit(('phase', 'Stopped'))
+                    while not self.stop.is_set() and not self.controls.wake.wait(.1):
+                        pass
+                    continue
                 self.scan_once(db)
-                if owns_connection:
-                    db.conn.commit()
-                self.emit(('phase', f'Watching — next scan in {self.interval:g} seconds'))
-                if self.stop.wait(self.interval):
-                    break
+                if self.controls.modes[2] and self.controls.heavy_order == 'expert':
+                    if not self.expert_scanned:
+                        self.controls.wake.wait(.1)
+                    continue
+                self.emit(('phase', f'Watching — next scan in {self.interval:g} seconds'
+                           if any(self.controls.modes) else 'Stopped'))
+                # Short waits also honor popup cancellation while every mode is stopped.
+                deadline = time.monotonic() + self.interval
+                while not self.stop.is_set() and time.monotonic() < deadline:
+                    if self.controls.wake.wait(.1):
+                        break
         except Exception as exc:
             self.report_stats(force=True, active=False)
             self.emit(('phase', f'Scan stopped: {exc}'))
         finally:
+            self.selector_stop.set()
+            self.selector_thread.join(2)
             if owns_connection and db is not self.source:
                 db.conn.close()
 
     def remember(self, db, entry):
         if entry.id in self.remembered:
             return
-        self.remembered.add(entry.id)
         if isinstance(db, SQLiteDBAdapter):
-            db.conn.execute('INSERT OR IGNORE INTO scan_paths VALUES (?, ?)',
-                            (entry.id, entry.path))
-            # Do not hold a write transaction open while hashing a large file.
-            db.conn.commit()
+            with db.conn:
+                db.conn.execute('CREATE TABLE IF NOT EXISTS scan_paths (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
+                db.conn.execute('INSERT OR IGNORE INTO scan_paths VALUES (?, ?)', (entry.id, entry.path))
         elif hasattr(db, 'client'):
             db.client.hset('scan_paths', entry.id, entry.path)
         else:
+            if not hasattr(db, 'scan_paths'):
+                db.scan_paths = {}
             db.scan_paths[entry.id] = entry.path
+        self.remembered.add(entry.id)
+
+    def baseline(self, db, path):
+        node = db.get_root()
+        for part in path.strip('/').split('/') if path else []:
+            node = db.get_child(node, part) if node else None
+        if node is None or (not node.is_dir and not node.info.get('hash') and not node.info.get('hashinfo')):
+            saved = self.checksums.get(path)
+            if saved:
+                node = VFSNode(path, path.rsplit('/', 1)[-1], False,
+                               size=saved['size'], info={'hash': saved['hash']})
+        node = node or self.checksum_dirs.get(path)
+        self.baseline_known[path] = bool(node and (node.is_dir or node.info.get('hash') or
+                                                 node.info.get('hashinfo')))
+        return node
+
+    def disk_info(self, path):
+        try:
+            return os.lstat(get_real_path(path)), ''
+        except (FileNotFoundError, NotADirectoryError):
+            return None, ''
+        except OSError as exc:
+            return None, str(exc)
+
+    def publish(self, db, entry):
+        new = entry.id not in self.entries
+        self.entries[entry.id] = entry
+        if new and self.current_mode == 2 and self.checkpoints.get('2') is not None:
+            self.checkpoints['2']['remaining'].append(entry.id)
+        self.remember(db, entry)
+        self.store.put('entry', entry.id, asdict(entry))
+        self.emit(('entry', entry))
+        self.paths += 1
+        self.size_scanned += entry.size if not entry.is_dir else 0
+        self.update_priority(entry)
+        self.report_stats(path=entry.path, completed_size=entry.size, force=True)
+
+    def update_priority(self, entry):
+        if entry.state in ('unknown', 'new'):
+            priority = 1 if self.baseline_known.get(entry.id, False) else 0
+        else:
+            priority = 3 if entry.state == 'verified' else 2 if entry.state == 'modified' else 4
+        with self.controls.lock:
+            old = self.controls.entry_priorities.get(entry.id)
+            if entry.is_dir:
+                self.controls.entry_priorities.pop(entry.id, None)
+            else:
+                self.controls.entry_priorities[entry.id] = priority
+            if old != self.controls.entry_priorities.get(entry.id):
+                self.controls.priority_revision += 1
 
     def scan_once(self, db):
+        self.store = ScanStore(db)
+        if self.checkpoints is None:
+            self.checkpoints = self.store.get('position', self.path or '/', {})
+        self.current_mode = 0
         self.started = time.monotonic()
-        self.bytes_read = 0
-        self.report_stats(path=self.path or '/', force=True)
-        node = db.get_root()
-        for part in self.path.strip('/').split('/') if self.path else []:
-            node = db.get_child(node, part) if node else None
-        stack = [(self.path, node)]
-        seen = set()
-        while stack and not self.stop.is_set():
-            path, baseline = stack.pop()
-            seen.add(path)
-            self.report_stats(path=path or '/', force=True)
-            real = get_real_path(path) if path else None
-            disk_stat = None
-            error = ''
-            if real:
-                try:
-                    disk_stat = os.lstat(real)
-                except (FileNotFoundError, NotADirectoryError):
-                    pass
-                except OSError as exc:
-                    error = str(exc)
-            is_dir = bool(disk_stat and stat.S_ISDIR(disk_stat.st_mode))
+        expert_only = (self.controls.modes == (False, False, True) and
+                       self.controls.heavy_order == 'expert' and
+                       self.controls.startup_mode is None)
+        if self.checksums is None or not expert_only:
+            self.checksums = {path: value for path, value in self.store.items('checksum').items()
+                              if path == self.path or path.startswith(self.path + '/')}
+            self.checksum_dirs, self.checksum_children = {}, {}
+            for path in self.checksums:
+                child = path
+                while child != self.path:
+                    parent, _, name = child.rpartition('/')
+                    self.checksum_children.setdefault(parent, set()).add(name)
+                    self.checksum_dirs.setdefault(parent, VFSNode(
+                        parent, parent.rsplit('/', 1)[-1], True))
+                    child = parent
+        if self.enabled(1):
+            self.begin_mode(1)
+            self.emit(('phase', 'Lite — finding paths'))
+            self.discover(db)
+            self.finish_startup_mode(1)
+        for mode in (2, 3):
+            self.current_mode = 0
+            if not self.enabled(mode):
+                continue
+            self.begin_mode(mode)
+            self.emit(('phase', 'Medium — verifying metadata' if mode == 2 else 'Heavy — checksums'))
+            if mode == 2:
+                self.discover(db, mode=2, new_only=True)
+            if (mode == 3 and self.controls.heavy_order == 'expert' and
+                    self.controls.startup_mode is None):
+                if not self.expert_initialized:
+                    for entry in self.entries.values():
+                        if not entry.is_dir and entry.id not in self.controls.entry_priorities:
+                            self.baseline(db, entry.path)
+                            self.update_priority(entry)
+                    self.expert_initialized = True
+                self.scan_expert(db)
+            else:
+                self.verify_pending(db, mode)
+                self.finish_startup_mode(mode)
+        self.current_mode = 0
+        self.report_stats(force=True, active=False)
+        self.elapsed += max(0., time.monotonic() - self.started)
+
+    def verify_pending(self, db, mode):
+        checkpoint = self.checkpoints.get(str(mode))
+        pending = (checkpoint['remaining'] if checkpoint is not None else list(self.entries))
+        pending = [path for path in pending if path in self.entries and not self.entries[path].is_dir]
+        first = checkpoint.get('first') if checkpoint else None
+        new = {path for path in pending if self.baseline(db, path) is None} if mode == 3 else set()
+        bucket_indices = {path: index for index, ids in enumerate(self.controls.buckets)
+                          for path in ids} if mode == 3 and not (
+                              self.controls.heavy_order == 'expert' and
+                              self.controls.startup_mode is None) else {}
+        ordered_new = deque(path for path in pending if path in new)
+        original_order = list(pending)
+        ordered_all = deque(pending)
+        pending = set(pending)
+        while pending and self.enabled(mode):
+            while ordered_all and ordered_all[0] not in pending:
+                ordered_all.popleft()
+            while ordered_new and ordered_new[0] not in pending:
+                ordered_new.popleft()
+            prefer_new = mode == 3 and self.controls.new_first and ordered_new
+            if prefer_new and bucket_indices and ordered_all:
+                prefer_new = (bucket_indices.get(ordered_new[0]) ==
+                              bucket_indices.get(ordered_all[0]))
+            order = ordered_new if prefer_new else ordered_all
+            path = first if first in pending else order.popleft()
+            first = None
+            if path not in pending:
+                continue
+            baseline = self.baseline(db, path)
+            disk_stat, error = self.disk_info(path)
+            old = self.entries[path]
+            entry = replace(old, progress=None, error='',
+                            is_dir=stat.S_ISDIR(disk_stat.st_mode) if disk_stat else old.is_dir,
+                            size=(0 if disk_stat and stat.S_ISDIR(disk_stat.st_mode) else
+                                  disk_stat.st_size if disk_stat else old.size))
+            self.report_stats(path=path, force=True)
+            self.emit(('entry', replace(entry, progress=0)))
+            result = self.verify(entry, baseline, disk_stat, error)
+            if not self.enabled(mode):
+                first = path
+                self.emit(('entry', old))
+                break
+            self.publish(db, result)
+            pending.remove(path)
+        self.checkpoints[str(mode)] = (
+            {'remaining': [path for path in original_order if path in pending],
+             'first': first} if pending else None)
+        self.save_positions()
+
+    def scan_expert(self, db):
+        self.expert_scanned = False
+        ids = self.controls.claim_expert()
+        if ids is None:
+            # Timed background additions must not starve a faster scan worker.
+            # Both producers share the candidate pool and queue under one lock.
+            self.controls.enqueue_expert_batch()
+            ids = self.controls.claim_expert()
+        if ids is None:
+            self.emit(('phase', 'Heavy expert — waiting for selected buckets'))
+            return
+        paths = [path for path in ids if path in self.entries and not self.entries[path].is_dir]
+        self.expert_scanned = bool(paths)
+        try:
+            pending = self.checkpoints.get('3')
+            # Resume an interrupted bucket; never extend its work to later buckets.
+            remaining = [path for path in (pending['remaining'] if pending else ()) if path in paths]
+            if not remaining:
+                remaining = paths
+            anchor = pending.get('first') if pending and pending.get('first') in remaining else None
+            self.checkpoints['3'] = {'remaining': remaining, 'first': anchor}
+            if paths:
+                self.emit(('expert', {'id': paths[0]}))
+            self.verify_pending(db, 3)
+        finally:
+            self.controls.finish_expert(
+                interrupted=self.checkpoints.get('3') is not None and
+                self.controls.requests[2][0] == self.requests_seen[2])
+
+    def discover(self, db, mode=1, new_only=False):
+        key = '1' if mode == 1 else '2-discovery'
+        checkpoint = self.checkpoints.get(key)
+        stack = list(checkpoint['stack']) if checkpoint else [self.path]
+        seen = set(checkpoint['seen']) if checkpoint else set()
+        partial = bool(checkpoint and checkpoint.get('partial'))
+        while stack and self.enabled(mode):
+            path = stack[-1]
+            if new_only and path in self.entries and not self.entries[path].is_dir:
+                seen.add(path)
+                stack.pop()
+                continue
+            baseline = self.baseline(db, path)
+            saved = self.store.get('entry', path)
+            disk_stat, error = None, ''
+            # Known directories must still be enumerated to find new descendants.
+            if path and (baseline is None or baseline.is_dir or self.controls.read_known):
+                disk_stat, error = self.disk_info(path)
+            is_dir = stat.S_ISDIR(disk_stat.st_mode) if disk_stat else bool(baseline and baseline.is_dir)
             if path:
-                entry = ScanEntry(path, path, is_dir if disk_stat else bool(baseline and baseline.is_dir),
-                                  (disk_stat.st_size if disk_stat and not is_dir else
-                                   baseline.size if baseline and not baseline.is_dir else 0))
-                self.remember(db, entry)
-                self.emit(('entry', replace(entry, progress=0)))
-                entry = self.verify(entry, baseline, disk_stat, error)
-                if self.stop.is_set():
-                    return
-                self.emit(('entry', entry))
-                self.report_stats(force=True)
-            if not path or is_dir or (baseline and baseline.is_dir):
-                children = {child.name: child for child in db.get_children(baseline)
-                            } if baseline and baseline.is_dir else {}
+                info = baseline.info if baseline else {}
+                state = (saved['state'] if saved else info.get(
+                    'state', {'deleted': 'missing', 'new': 'unknown'}.get(
+                        info.get('status'), 'unknown')))
+                if state not in ('new', 'unknown', 'missing', 'modified', 'verified', 'directory'):
+                    state = 'unknown'
+                size = (disk_stat.st_size if disk_stat and not is_dir else
+                        baseline.size if baseline and not is_dir else 0)
+                entry = ScanEntry(path, path, is_dir, size, state, error=error)
+                if baseline and self.controls.read_known and not entry.is_dir:
+                    entry = self.verify_metadata(entry, baseline, disk_stat, error)
+                if not self.enabled(mode):
+                    break
+                if not new_only or path not in self.entries:
+                    self.publish(db, entry)
+            seen.add(path)
+            stack.pop()
+            if not path or is_dir:
+                children = {child.name: child for child in db.get_children(baseline)} if baseline and baseline.is_dir else {}
+                for name in self.checksum_children.get(path, ()):
+                    children.setdefault(name, self.baseline(db, path + '/' + name))
                 names = set(children)
                 if not path:
-                    # The VFS root is a collection of mounts, never the host /.
                     names.update(aliases)
-                elif is_dir:
+                    names.update(self.root_names)
+                elif disk_stat and stat.S_ISDIR(disk_stat.st_mode):
                     try:
-                        with os.scandir(real) as disk_children:
+                        with os.scandir(get_real_path(path)) as disk_children:
                             names.update(child.name for child in disk_children)
                     except OSError as exc:
-                        self.emit(('entry', replace(entry, state='unknown', error=str(exc))))
-                stack.extend((path + '/' + name, children.get(name))
-                             for name in sorted(names, reverse=True))
-
-        if not self.stop.is_set():
-            removed = self.previous_ids - seen
+                        self.publish(db, replace(entry, state='unknown', error=str(exc)))
+                stack.extend(path + '/' + name for name in sorted(names, reverse=True))
+        if not stack and not partial:
+            removed = set(self.entries) - seen
+            for path in removed:
+                self.entries.pop(path, None)
+                with self.controls.lock:
+                    if self.controls.entry_priorities.pop(path, None) is not None:
+                        self.controls.priority_revision += 1
             if removed:
                 self.emit(('removed', removed))
             self.previous_ids = seen
-            self.report_stats(force=True, active=False)
+        self.checkpoints[key] = {'stack': stack, 'seen': list(seen), 'partial': partial} if stack else None
+        self.save_positions()
 
-    def verify(self, entry, baseline, disk_stat, error):
+    def verify_metadata(self, entry, baseline, disk_stat, error):
+        if entry.is_dir:
+            return replace(entry, state='directory', progress=None)
         if error:
-            return replace(entry, error=error)
+            return replace(entry, state='unknown', error=error)
         if disk_stat is None:
             return replace(entry, state='missing' if baseline else 'unknown')
         if baseline is None:
-            return replace(entry, state='new')
-        if entry.is_dir != baseline.is_dir:
-            return replace(entry, state='modified')
+            return replace(entry, state='unknown')
+        changed = (entry.is_dir != baseline.is_dir or
+                   (not baseline.is_dir and (not stat.S_ISREG(disk_stat.st_mode) or
+                                             disk_stat.st_size != baseline.size)))
+        return replace(entry, state='modified' if changed else 'verified')
+
+    def verify(self, entry, baseline, disk_stat, error):
         if entry.is_dir:
-            return replace(entry, state='verified')
-        if disk_stat.st_size != baseline.size:
+            return replace(entry, state='directory', progress=None)
+        if self.current_mode == 2:
+            return self.verify_metadata(entry, baseline, disk_stat, error)
+        if error:
+            return replace(entry, state='unknown', error=error)
+        if disk_stat is None:
+            return replace(entry, state='missing' if baseline else 'unknown')
+        if baseline is None and self.current_mode != 3:
+            return replace(entry, state='unknown')
+        if baseline and entry.is_dir != baseline.is_dir:
             return replace(entry, state='modified')
         if not stat.S_ISREG(disk_stat.st_mode):
-            return replace(entry, error='Not a regular file; content verification skipped')
-        digest = baseline.info.get('hash', '')
-        if not digest:
+            return replace(entry, state='unknown', error='Not a regular file; content verification skipped')
+        digest = baseline.info.get('hash', '') if baseline else ''
+        if not digest and baseline:
             digest = (baseline.info.get('hashinfo') or '').rsplit(':', 1)[0]
         algorithm, _, expected = digest.rpartition(':')
         if not algorithm:
             algorithm, expected = 'md5', digest
+        add_checksum = not digest
         algorithm = algorithm.lower().replace('-', '')
         try:
             hasher = hashlib.new(algorithm)
-            if len(expected) != hasher.digest_size * 2 or any(c not in '0123456789abcdefABCDEF' for c in expected):
+            if not add_checksum and (len(expected) != hasher.digest_size * 2 or any(c not in '0123456789abcdefABCDEF' for c in expected)):
                 raise ValueError('No supported baseline checksum')
             read = 0
             last_event = 0
@@ -208,11 +744,11 @@ class DriveScanner:
                 # Reject replacements, symlinks and special files without blocking.
                 before = os.fstat(stream.fileno())
                 if not stat.S_ISREG(before.st_mode):
-                    return replace(entry, error='Not a regular file')
+                    return replace(entry, state='unknown', error='Not a regular file')
                 if (before.st_ino, before.st_dev, before.st_mtime_ns, before.st_size) != (
                         disk_stat.st_ino, disk_stat.st_dev, disk_stat.st_mtime_ns, disk_stat.st_size):
                     return replace(entry, state='unknown', error='File changed while opening; retrying next scan')
-                while not self.stop.is_set():
+                while self.enabled(3):
                     chunk = stream.read(1024 * 1024)
                     if not chunk:
                         break
@@ -223,11 +759,22 @@ class DriveScanner:
                         self.emit(('entry', replace(entry, progress=min(99, int(read * 100 / max(1, entry.size))))))
                         last_event = time.monotonic()
                 after = os.fstat(stream.fileno())
+            if not self.enabled(3):
+                return replace(entry, progress=None, state='unknown')
             if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                return replace(entry, error='File changed during verification; retrying next scan')
-            return replace(entry, state='verified' if hasher.hexdigest().lower() == expected.lower() else 'modified')
+                return replace(entry, state='unknown', error='File changed during verification; retrying next scan')
+            digest = algorithm + ':' + hasher.hexdigest()
+            if add_checksum:
+                saved = {'size': after.st_size, 'hash': digest}
+                self.store.put('checksum', entry.path, saved)
+                self.checksums[entry.path] = saved
+                self.baseline_known[entry.id] = True
+            verified = add_checksum or hasher.hexdigest().lower() == expected.lower()
+            if verified:
+                self.store.db.add_scanned_file(entry.path, digest, after.st_size)
+            return replace(entry, state='verified' if verified else 'modified')
         except (OSError, ValueError) as exc:
-            return replace(entry, error=str(exc))
+            return replace(entry, state='unknown', error=str(exc))
 
 
 class Bucket:

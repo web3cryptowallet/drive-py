@@ -64,6 +64,39 @@ class RedisDBAdapter(BaseDBAdapter):
                     
         pipe.execute()
 
+    def add_scanned_file(self, path, digest, size):
+        metadata, ancestors = self.scanned_file_metadata(path, digest, size)
+        node_key = f"node:{metadata['id']}"
+        while True:
+            try:
+                with self.client.pipeline() as pipe:
+                    pipe.watch(node_key, *(f'node:{key}' for key in ancestors))
+                    if pipe.exists(node_key):
+                        return False
+                    parents = [pipe.hgetall(f'node:{key}') for key in ancestors]
+                    if any(parent and not int(parent['is_dir']) for parent in parents):
+                        raise ValueError('A stored file occupies a parent directory')
+                    pipe.multi()
+                    for index, (key, parent) in enumerate(zip(ancestors, parents)):
+                        if not parent:
+                            parent_id = ancestors[index - 1] if index else 'NULL'
+                            pipe.hset(f'node:{key}', mapping={
+                                'id': key, 'name': key.rsplit('/', 1)[-1], 'is_dir': 1,
+                                'size': 0, 'parent_id': parent_id, 'info': '{}'})
+                            if index:
+                                pipe.sadd(f'children:{parent_id}', key)
+                                pipe.hset(f'dir_map:{parent_id}', key.rsplit('/', 1)[-1], key)
+                        pipe.hincrby(f'node:{key}', 'size', size)
+                    stored = dict(metadata, is_dir=0, info=json.dumps(metadata['info']))
+                    pipe.hset(node_key, mapping=stored)
+                    pipe.sadd(f"children:{metadata['parent_id']}", metadata['id'])
+                    pipe.hset(f"dir_map:{metadata['parent_id']}", metadata['name'], metadata['id'])
+                    pipe.sadd(f"hash:{metadata['info']['hashinfo']}", metadata['info']['path'])
+                    pipe.execute()
+                return True
+            except redis.WatchError:
+                continue
+
     # INDEX NODES AND DUPLICATES IN REDIS ]
     # QUERY REDIS NODES AND DUPLICATES [
 

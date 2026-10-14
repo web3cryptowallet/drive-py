@@ -65,7 +65,11 @@ Requires the local `.venv` environment with the TUI dependencies and generated `
 MC Default starts with the reference Midnight Commander palette: muted blue panels,
 teal selections, and yellow headings. MC Blue preserves the previous saturated blue
 palette. Press `t` to cycle through MC Default, MC Blue, and Textual Dark. The shortcut is also
-listed in the footer and the root directory's Help / Shortcuts panel.
+listed in the scrollable help popup: press **h** from the main view.
+Help includes the current display-mode legend and queue shortcuts; shortcut
+keys are orange. Press **h**,
+**Esc**, or **Close** to return. The root info pane also shows the full main
+help, including the current legend and shortcuts; scroll the info table to read it. See [FEATURE-help-view.md](FEATURE-help-view.md).
 
 The file and info panes each use 50% of the width. Status circles in both panes
 keep their colors when selected.
@@ -327,31 +331,125 @@ v0.98
 
 *AI-Independet code. Created through human work*
 
+### Main file table
+
+The main file pane shows **Name**, **Size**, and **Dups**, with left-aligned
+metadata. Size and Dups reserve space so long names do not push them off-screen;
+Name uses the remaining width and is clipped when necessary. Columns refit on
+resize. The main file pane always shows its vertical scrollbar, including
+short or empty listings. Directory rows retain total-file counts under the Dups heading.
+Implementation and Rust handoff: [FEATURE-main-file-table.md](FEATURE-main-file-table.md).
+
 ### Live drive map
 
 Original prompt, implementation contracts, update history, and Rust conversion
 notes: [FEATURE-realtime-drive-scanner.md](FEATURE-realtime-drive-scanner.md).
 
-Press **s** on a selected file or directory to open its live scanner popup
-(on `..`, this scans the current directory). Press **s** or **Esc** to close.
-Scanning uses one background worker and repeats five seconds after each pass.
-Closing the popup cancels the worker; opening it starts a fresh scan.
+Press **s** to open the live scanner for the **current VFS directory**, regardless
+of the selected file/subdirectory. At `/` with `a` selected, it scans `/`.
+The map dialog uses the main file pane’s solid pseudographic border and theme color.
+Press **s** or **Esc** to close. **h** opens scanner help with all shortcuts and
+symbols; **h/Esc** or **Close** returns without stopping scanning. The bottom
+suggestion block has moved into this scrollable popup.
+Scanning uses one background disk worker; expert has a separate bucket-selector
+thread. Manual normal passes repeat after five seconds.
+Closing saves the map per selected path and cancels the worker. Reopening restores
+entries, packing settings, view position and scanner controls.
 
+- **1 / 2 / 3** independently toggle **lite / medium / heavy** RUN/STOP.
+  **RUN** appears in bold green; **STOP** appears in bold red.
+  On opening, **lite → medium → heavy** runs once, then all modes stop. Changing
+  1/2/3 (including Shift-start) cancels this startup sequence. Pending positions
+  resume when saved. Lite builds buckets from database names/states and disk
+  discoveries; new files show **?**. **r** toggles reading known file metadata
+  in lite (off by default; directories still enumerate disk children).
+  Lite recurses through all subfolders under the scan path, merging DB and disk
+  entries. At the virtual root, this includes disk-only roots visible in the main
+  list when the scanner opens, alongside DB roots and configured aliases.
+  Directories show white **D** and have their own filter; medium and heavy skip
+  them for verification. Medium also discovers new files/directories, then
+  checks file presence/type/size; matching metadata is green. Heavy reads
+  checksums, compares existing hashes or saves a new baseline in scanner storage.
+  Successfully verified new files are also inserted into the VFS database with
+  parent directories and hash indexes. Closing the scanner refreshes the main
+  list, where these files show a green circle. Interrupted/failed hashes stay new.
+  **t** switches heavy priority between **new-first / all** within each bucket;
+  both process all files. Enabled passes run sequentially in one worker. Stop all to pause.
+  Each mode saves its pending path on stop and resumes it on start/reopen.
+  Interrupted hashes restart the unfinished file.
+- **j** switches heavy bucket order: **normal** visits sequentially; **expert**
+  uses a separate selector thread with a candidate list built once and rebuilt
+  when exhausted: **each tick picks one random starting bucket**,
+  draws a length from **1–20**, then marks that many following eligible buckets
+  blue in map order, wrapping at the end. It continuously appends ranges while
+  scanning, skipping occupied/ineligible buckets without duplicates. **1–20 is
+  the number added per tick**, and total blue work can exceed 20. New ranges are
+  appended while earlier ranges scan, without waiting for a sequence to finish.
+  Fewer are added only when fewer eligible unoccupied buckets remain.
+  Buckets containing **? unverified files** are selected first, then other
+  non-green buckets. Fully green buckets are skipped until **all file buckets
+  are green**. Mixed ?/green buckets remain eligible. Directory-only buckets
+  are skipped. **t** controls new/all priority inside
+  each bucket. The scan worker consumes the queue in FIFO
+  order, finishing each bucket without a time limit. Expert-only scanning reuses
+  its checksum catalog between buckets to avoid repeated whole-map setup.
+  The selector keeps adding
+  random-start ranges while scanning
+  (a fresh random delay of 0.2–1 seconds after adding buckets; paused/unavailable work polled every
+  50 ms). When the work queue empties, the scan worker immediately adds another
+  random sequence, so the timer does not throttle hashing. Queued/processing buckets
+  show blue backgrounds while heavy is on; unchanged highlights are cached.
+  Highlight refreshes defer when the selector is busy, keeping UI input responsive.
+  Exhausted selection waits for catalog/queue/priority changes before searching again; completing
+  a bucket restores its normal background. Heavy scanning leaves your map
+  cursor, file page and end-follow mode in place. Pausing keeps pending work in this
+  window; closing retains the unfinished path checkpoint, not the entire queue.
+  Switching j cancels startup; the automatic startup heavy pass stays finite/normal.
+- With map or file-list focus, **]** moves deeper through the selected file
+  row's directory ancestors; **[** moves back. For file `/a/b/c`, ] chooses `/a`, then `/a/b`.
+  Matching buckets get a random background while symbols keep their foreground.
+  **f** fixes those colors; **d** clears all colors. Fixed colors survive scope
+  changes/repacking and are saved with the map. Highlighting is visual; scan
+  targets and file filters stay independent.
+- **Shift+1 / Shift+2 / Shift+3** starts that mode at the first file/path in the
+  selected bucket, including while running. **! / @ / #** work in terminals that
+  report shifted digits as characters. The scan continues through later map
+  entries; heavy applies new/all priority after the cursor's first path. Empty
+  maps do nothing. Lite discovers descendants in that suffix and preserves
+  earlier entries until a later full scan. Mode start/stop also saves the map.
 - **Arrows** move the map cursor; clicking a bucket selects it. The lower panel
-  shows its paths, sizes, file totals and status counts, with up to 100 paths per page.
+  shows paths with colored status symbols matching the map, sizes, file totals
+  and status counts, with up to 100 paths per page. Symbols keep their color under
+  row selection; scanning rows retain the leading **S n%** progress text.
+  Click a colored status-count button (such as **? unverified: 1**) to filter
+  paths by that state. Click it again or **All** to remove the filter. Counts
+  show bucket totals; file pages and errors follow matching paths. The active
+  filter has a white background with black text, is saved with the map, and
+  updates as scan states change. Buttons align left at their label width;
+  the row scrolls horizontally when needed instead of scaling the buttons.
+  **Right** at the last bucket enters follow mode: **>** marks the next empty cell
+  and advances as new buckets arrive, scrolling and wrapping automatically.
+  **Right** keeps follow mode active. Other arrows or **Page Up/Down** exit;
+  clicking a real bucket exits too.
+  The marker has no file details or Shift-start target. This mode is saved with
+  the map and can also wait for the first bucket of an empty map.
 - **m** switches between file-count and byte-size packing. **v** switches between
   fixed and scrolling packing (scrolling is the default). Map symbols occupy
   adjacent single-character cells across the available width. Bucket rows have
   no viewport cap; use the vertical scrollbar, wheel, arrows or **Page Up/Down**.
   Rows grow automatically; there is no Rows input. Edit **Paths/bucket** or
-  **MiB/bucket**, then press **Enter**. Columns fit automatically; optional fixed
+  **MiB/bucket** in the single-line settings row, then press **Enter**.
+  Columns fit automatically with no Cols display; optional fixed
   packing uses the viewport as its cell budget. Scrolling size mode applies both limits; an oversized file gets
   its own bucket. The details list uses half its previous share of flexible height.
-- The live scan line shows the current path and **MB/s (read avg)**: actual
-  checksum bytes read divided by elapsed time in this pass, using decimal MB.
-  Idle speed is zero; the last path remains visible. Hover for the full path.
-- **View start** above the map shows the first visible bucket number, file count,
-  size and first path. It follows scrolling independently of the selected bucket.
+- The live scan info shows **paths/s**, **MB/s–PB/s** (MB, GB, TB, PB in 1,000-unit steps), **total paths** and **total size**
+  across all three modes. Each completed visit counts, including repeat cycles;
+  MB/s uses visited file sizes, not actual read bytes. Rates use only the last
+  **five seconds** of completed visits/sizes, divided by five, and decay to zero
+  after five idle seconds. Totals stay cumulative for this window. Counters reset on
+  reopen. The current/last path stays visible, with its full path in a tooltip.
+- **bucket N/total** on the Total-paths statistics line shows the first visible
+  bucket and follows scrolling independently of selection. Empty maps show 0/0.
 - Detail pages are numbered **1..N**, with as many numbered buttons as fit the
   width and ellipses for omitted ranges. The navigation row is
   `|< <-1000 <-100 <-10 < > >+10 >+100 >+1000 >|`; jumps stop at the first/last page.
@@ -359,10 +457,20 @@ Closing the popup cancels the worker; opening it starts a fresh scan.
   **Left/Right** move one page and **Home/End** select first/last. Page zooming has
   been removed. **>** advances one page. File pages contain only as many rows as
   fit in the details panel, up to 100; the file list has no vertical scrollbar.
-- White **U** means disk-only/new, red **U** means missing from disk, green **●**
-  means verified, orange **M** means modified, and **?** means unverified (the
-  details panel explains read/checksum errors). Mixed buckets display the highest
+  Long paths have a **horizontal scrollbar**. With the file list focused,
+  **Left/Right** pan horizontally. Live updates change rows in place and keep
+  that position without briefly resetting to the left edge. Changing pages
+  also preserves the horizontal position. Page height excludes the horizontal scrollbar. **Up** on
+  the first file opens the previous page at its last file; **Down** on the last
+  file opens the next page at its first file. The overall list endpoints clamp,
+  and navigation follows the active status filter.
+- White **?** means new/unverified, red **U** means missing from disk, green **●**
+  means the latest metadata/checksum check matched, orange **M** means modified
+  (white **U** is retained for legacy stored new states). For unknown files the
+  details panel explains read/checksum errors. Mixed buckets display the highest
   priority state in that order: modified, missing, new, unverified, verified.
+  A bucket containing both unverified and verified files shows a green **?**
+  when unverified is its highest-priority state; unverified-only buckets stay white.
   Resting symbols have a black background; selection adds an underline and keeps
   the colors. The filled green circle matches the main files view.
   Details list all states. A white-on-red spinner animates updates for one
@@ -370,10 +478,15 @@ Closing the popup cancels the worker; opening it starts a fresh scan.
 
 Existing VFS path IDs identify files. SQLite saves discoveries in a separate
 `scan_paths` table; Redis uses a `scan_paths` hash; memory storage keeps them for
-that adapter's lifetime. Discovery does not replace imported baseline hashes or
-turn a new file into a verified file. Verification compares file type, size and
-stored content checksum (including same-size modifications). Unsupported/missing
-checksums remain unverified. Directory verification checks presence and type;
-symlinks are not traversed. The virtual root scans configured/known drives, not
-the host root. Changes appear on scan events; this is repeated scanning rather
+that adapter's lifetime. Additional JSON `scan_state` records store latest states,
+new checksums, maps and per-mode pending-path positions; memory records last only for the adapter's lifetime.
+Imported baseline nodes/hashes stay unchanged. Heavy detects same-size content
+changes; medium's green metadata result does not certify file contents.
+Unsupported checksums remain unverified; absent hashes are created by heavy.
+Saved checksum paths remain discoverable even after deletion, so they show missing.
+Directories are discovered by lite and excluded from verification; directory
+symlinks are not traversed.
+The virtual root scans configured/known drives, not the host root.
+Map snapshots save on mode start/stop, cursor-start and close/shutdown; abrupt termination can lose the latest
+snapshot. Changes appear on scan events; this is repeated scanning rather
 than an OS filesystem watcher. Quick-view integration and bookmarks are deferred.

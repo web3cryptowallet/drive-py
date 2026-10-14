@@ -15,6 +15,7 @@ class MemoryDBAdapter(BaseDBAdapter):
     def __init__(self):
         self.nodes = {}
         self.children_idx = {}
+        self.hashes = {}
 
     def build(self, files, hashes):
         self.hashes = hashes
@@ -28,6 +29,28 @@ class MemoryDBAdapter(BaseDBAdapter):
                 if node.parent_id not in self.children_idx:
                     self.children_idx[node.parent_id] = {}
                 self.children_idx[node.parent_id][node.name] = node
+
+    def add_scanned_file(self, path, digest, size):
+        metadata, ancestors = self.scanned_file_metadata(path, digest, size)
+        if metadata['id'] in self.nodes:
+            return False
+        if any(key in self.nodes and not self.nodes[key].is_dir for key in ancestors):
+            raise ValueError('A stored file occupies a parent directory')
+        for index, key in enumerate(ancestors):
+            if key not in self.nodes:
+                node = VFSNode(key, key.rsplit('/', 1)[-1], True,
+                               parent_id=ancestors[index - 1] if index else None)
+                self.nodes[key] = node
+                if node.parent_id is not None:
+                    self.children_idx.setdefault(node.parent_id, {})[node.name] = node
+            self.nodes[key].size += size
+            self.nodes[key].total_files += 1
+        node = VFSNode(**metadata)
+        self.nodes[node.id] = node
+        self.children_idx.setdefault(node.parent_id, {})[node.name] = node
+        hashinfo = metadata['info']['hashinfo']
+        self.hashes[hashinfo] = set(self.hashes.get(hashinfo, ())) | {metadata['info']['path']}
+        return True
 
     # BUILD NODE AND CHILD LOOKUP INDEXES ]
     # QUERY IN MEMORY NODES AND DUPLICATES [
