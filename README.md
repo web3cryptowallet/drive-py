@@ -9,9 +9,10 @@ Multithreaded disk file comparison tool for verification and MD5 checksum report
 - **drive.py** — CLI disk analyzer.
 - **drive-tui.py** — prompt_toolkit TUI for browsing the disk database and live drive maps.
 
+[![drive.py scanner map(https://asciinema.org/a/cU8hD5HZ4d9o7DsJ.svg)](https://asciinema.org/a/cU8hD5HZ4d9o7DsJ)
+
 ![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
 ![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-2.png)
-
 
 ## Prerequisites
 - Python 3.10 or newer
@@ -101,90 +102,6 @@ The prompt_toolkit implementation is now the main `drive-tui.py`. Shared VFS,
 scanner and database code remains in `vfs/`. Run active tests with
 `uv run python -m unittest discover -s tests -v`.
 
-The former Textual application, views, theme, launchers and dependent tests are
-preserved in [texual.removed](texual.removed/README.md). The following legacy
-Textual UI notes describe that archive; use the launchers above for the main UI.
-See [FEATURE-pt-main.md](FEATURE-pt-main.md) for the migration record.
-
-## Archived Textual TUI notes
-
-MC Default starts with the reference Midnight Commander palette: muted blue panels,
-teal selections, and yellow headings. MC Blue preserves the previous saturated blue
-palette. Press `t` to cycle through MC Default, MC Blue, and Textual Dark. The shortcut is also
-listed in the scrollable help popup: press **h** from the main view.
-Help includes the current display-mode legend and queue shortcuts; shortcut
-keys are orange. Press **h**,
-**Esc**, or **Close** to return. The root info pane also shows the full main
-help, including the current legend and shortcuts; scroll the info table to read it. See [FEATURE-help-view.md](FEATURE-help-view.md).
-
-The file and info panes each use 50% of the width. Status circles in both panes
-keep their colors when selected.
-
-The info pane displays Created and Modified dates for files and directories in
-local time using `YYYY-MM-DD HH:MM:SS` (for example, `2026-09-22 14:30:05`).
-Unavailable dates are left blank.
-
-```
-sudo apt install python3-venv
-
-python3 -m venv .venv
-
-pip install textual
-pip install pyperclip
-
-sudo apt install xclip
-
-```
-
-Run with in-memory db for small amount of files
-```
-PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py
-```
-
-Rebuild SQLite cache for big disks (`-b`)
-```
-PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py -c sqlite -b
-```
-SQLite builds load and commit one log at a time through `load_lite`, releasing
-each parsed log before loading the next. Memory usage depends on the largest
-individual log rather than all logs combined. Later logs overwrite matching
-files. The `-b` option recreates the cache once before loading begins.
-
-**Experimental:** Update an existing SQLite cache without recreating it (`-u` / `--update`):
-```
-PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py -c sqlite -u -d log-test0
-```
-Both modes load one log at a time. Use either `-u` or `-b`, not both.
-
-Run with SQLite cache without importing logs:
-```
-PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py -c sqlite
-```
-
-To merge files into an existing SQLite cache without rebuilding it, use the
-adapter's `update` method:
-
-```python
-from vfs import SQLiteDBAdapter
-
-db = SQLiteDBAdapter("drivevfs")
-try:
-    db.update({"disk/folder/file.txt": {"MD5:checksum:123"}})
-finally:
-    db.conn.close()
-```
-
-Updates overwrite matching files, create missing parent directories, adjust
-directory sizes, and refresh duplicate lookups. Files omitted from the update
-remain unchanged. Each path must have one `hash:size` value. An incoming file
-replaces an existing directory and its cached descendants, including their
-duplicate entries. A file needed as a parent is replaced with a directory;
-its old size and duplicate entries are removed. Invalid input rolls back the
-update. These replacements affect only the cache. `build` still recreates it.
-
-```
-pip install textual-image pillow
-```
 
 ## Run demo: View demo log files in your browser 
 
