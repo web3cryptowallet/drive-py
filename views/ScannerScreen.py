@@ -678,24 +678,51 @@ class ScannerScreen(ModalScreen):
         if not self.controls.lock.acquire(blocking=False):
             return
         try:
-            queue = self.controls.expert_queue
-            signature = (visible, id(self.model), id(self.model.buckets), len(self.model.entries),
-                         self.controls.expert_current, len(queue),
-                         queue[0] if queue else None, queue[-1] if queue else None)
-            if signature == getattr(self, '_expert_highlight_signature', None):
-                return
-            buckets = self.controls.selected_buckets if visible else ()
+            changes = self.controls.selection_changes
+            self.controls.selection_changes = {}
         finally:
             self.controls.lock.release()
-        self._expert_highlight_signature = signature
-        seen = set()
-        for ids in buckets:
-            # Keep one visual anchor per selected work bucket after regrouping.
-            index = next((self.model.locations[key] for key in ids
-                          if key in self.model.locations), None)
-            if index is not None and index not in seen:
-                seen.add(index)
-        grid.expert_selected = seen
+        if not hasattr(self, '_expert_work'):
+            self._expert_work = {}
+            self._expert_counts = {}
+            self._expert_blue = set()
+        signature = (id(self.model), id(self.model.buckets), len(self.model.entries))
+        remap = signature != getattr(self, '_expert_model_signature', None)
+
+        def anchor(ids):
+            return next((self.model.locations[key] for key in ids
+                         if key in self.model.locations), None)
+
+        def account(index, delta):
+            if index is None:
+                return
+            count = self._expert_counts.get(index, 0) + delta
+            if count:
+                self._expert_counts[index] = count
+                self._expert_blue.add(index)
+            else:
+                self._expert_counts.pop(index, None)
+                self._expert_blue.discard(index)
+
+        for key, (ids, delta) in changes.items():
+            previous = self._expert_work.get(key)
+            count = (previous[1] if previous else 0) + delta
+            index = previous[2] if previous else (None if remap else anchor(ids))
+            if not remap:
+                account(index, delta)
+            if count:
+                self._expert_work[key] = (ids, count, index)
+            else:
+                self._expert_work.pop(key, None)
+        if remap:
+            self._expert_counts.clear()
+            self._expert_blue.clear()
+            for key, (ids, count, _) in self._expert_work.items():
+                index = anchor(ids)
+                self._expert_work[key] = (ids, count, index)
+                account(index, count)
+            self._expert_model_signature = signature
+        grid.expert_selected = self._expert_blue if visible else set()
         grid.expert_mode = visible
 
     def update_stats(self):

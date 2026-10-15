@@ -4,7 +4,6 @@ Discovery records remain separate; verified new files join the VFS baseline.
 Existing comparison baselines are preserved.
 Path IDs have the same meaning as nodes.id throughout the existing VFS.
 """
-from bisect import bisect_left
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -19,6 +18,7 @@ import stat
 import time
 
 from .adapter.sqlite import SQLiteDBAdapter
+from .scanner_pool import CandidatePool
 from .paths import aliases, get_real_path
 from .nodes import VFSNode
 
@@ -119,6 +119,34 @@ class ScanStore:
             db.scan_state[kind, key] = value
 
 
+class SelectionQueue(deque):
+    """Internal FIFO that records membership deltas for the map overlay."""
+    def __init__(self, changed):
+        super().__init__()
+        self.changed = changed
+
+    def append(self, ids):
+        super().append(ids)
+        self.changed(ids, 1)
+
+    def appendleft(self, ids):
+        super().appendleft(ids)
+        self.changed(ids, 1)
+
+    def extend(self, values):
+        for ids in values:
+            self.append(ids)
+
+    def popleft(self):
+        ids = super().popleft()
+        self.changed(ids, -1)
+        return ids
+
+    def clear(self):
+        while self:
+            self.popleft()
+
+
 class ScanControls:
     """Independent mode flags and wake signal shared with the worker."""
     def __init__(self, modes=(True, False, False), read_known=False, new_first=True,
@@ -134,24 +162,51 @@ class ScanControls:
         self.epochs = (0, 0, 0)
         self.requests = ((0, None),) * 3
         self.entry_priorities = {}
-        self.expert_queue = deque()
-        self.expert_current = None
+        self.selection_changes = {}
+        self.selection_revision = 0
+        self.expert_queue = SelectionQueue(self._selection_changed)
+        self._expert_current = None
         self.selector_batch = 0
         self.selector_next = 0
         self.priority_revision = 0
-        self.selector_pool = []
+        self.selector_pool = CandidatePool()
         self.selector_catalog = None
+        self.selector_builder = None
+        self.selector_empty_signature = None
+
+    def _selection_changed(self, ids, delta):
+        key = id(ids)
+        change = self.selection_changes.get(key)
+        total = delta + (change[1] if change else 0)
+        if total:
+            self.selection_changes[key] = (ids, total)
+        else:
+            self.selection_changes.pop(key, None)
+        self.selection_revision += 1
+
+    @property
+    def expert_current(self):
+        return self._expert_current
+
+    @expert_current.setter
+    def expert_current(self, ids):
+        if self._expert_current is not None:
+            self._selection_changed(self._expert_current, -1)
+        self._expert_current = ids
+        if ids is not None:
+            self._selection_changed(ids, 1)
 
     @property
     def selected_buckets(self):
         with self.lock:
             return ((self.expert_current,) if self.expert_current else ()) + tuple(self.expert_queue)
 
-    def expert_eligible_indices(self, buckets):
+    def expert_eligible_indices(self, buckets, priorities=None):
+        priorities_by_path = self.entry_priorities if priorities is None else priorities
         tiers = {}
         for index, ids in enumerate(buckets):
-            priorities = [self.entry_priorities[path] for path in ids
-                          if path in self.entry_priorities]
+            priorities = [priorities_by_path[path] for path in ids
+                          if path in priorities_by_path]
             if priorities:
                 tiers[index] = (0 if any(value < 2 for value in priorities) else
                                 1 if any(value != 3 for value in priorities) else 2)
@@ -162,6 +217,8 @@ class ScanControls:
         """Selector-only: enqueue the next eligible file bucket in map order."""
         with self.lock:
             if not self.modes[2] or self.heavy_order != 'expert' or self.startup_mode is not None:
+                return False
+            if self.selector_builder is not None:
                 return False
             occupied = {path for ids in self.selected_buckets for path in ids}
             if not self.buckets:
@@ -178,43 +235,64 @@ class ScanControls:
                     continue
                 if not any(path in self.entry_priorities for path in ids):
                     continue
+                self.selector_pool = CandidatePool()
                 self.expert_queue.append(ids)
                 self.selector_next = (index + 1) % count
                 self.wake.set()
                 return True
             return False
 
-    def enqueue_expert_batch(self):
+    def prepare_expert_pool(self):
+        """Snapshot under the shared lock; build once outside it."""
         with self.lock:
             if not self.modes[2] or self.heavy_order != 'expert' or self.startup_mode is not None:
-                if not self.selected_buckets:
-                    self.selector_batch = 0
-                return 0
+                return False
             buckets = self.buckets
             if self.selector_catalog is not buckets:
-                self.selector_pool = []
+                self.selector_pool = CandidatePool()
                 self.selector_catalog = buckets
-            if not self.selector_pool:
-                occupied = {path for ids in self.selected_buckets for path in ids}
-                self.selector_pool = sorted(
-                    index for index in self.expert_eligible_indices(buckets)
-                    if not any(path in occupied for path in buckets[index]))
-            if not self.selector_pool:
+                self.selector_empty_signature = None
+                self.selector_builder = None
+            if self.selector_pool:
+                return True
+            signature = (self.priority_revision, self.selection_revision, self.epochs)
+            if self.selector_builder is not None or signature == self.selector_empty_signature:
+                return False
+            token = self.selector_builder = object()
+            priorities = self.entry_priorities.copy()
+            occupied_buckets = self.selected_buckets
+        try:
+            occupied = {path for ids in occupied_buckets for path in ids}
+            eligible = self.expert_eligible_indices(buckets, priorities)
+            pool = CandidatePool(sorted(index for index in eligible
+                                        if not any(path in occupied for path in buckets[index])))
+            with self.lock:
+                if (self.selector_builder is not token or self.buckets is not buckets or
+                        not self.modes[2] or self.heavy_order != 'expert' or
+                        self.startup_mode is not None):
+                    return False
+                self.selector_pool = pool
+                self.selector_empty_signature = signature if not pool else None
+                return bool(pool)
+        finally:
+            with self.lock:
+                if self.selector_builder is token:
+                    self.selector_builder = None
+
+    def enqueue_expert_batch(self):
+        if not self.prepare_expert_pool():
+            return 0
+        with self.lock:
+            if (not self.modes[2] or self.heavy_order != 'expert' or
+                    self.startup_mode is not None or self.selector_catalog is not self.buckets or
+                    not self.selector_pool):
                 return 0
-            # Consume one random-start sequence from the reusable candidate list.
             requested = min(random.randint(1, 20), len(self.selector_pool))
             first = random.choice(self.selector_pool)
-            start = bisect_left(self.selector_pool, first)
-            stop = min(start + requested, len(self.selector_pool))
-            chosen = self.selector_pool[start:stop]
-            del self.selector_pool[start:stop]
-            wrapped = requested - len(chosen)
-            if wrapped:
-                chosen.extend(self.selector_pool[:wrapped])
-                del self.selector_pool[:wrapped]
+            chosen = self.selector_pool.consume(first, requested)
             for index in chosen:
-                self.expert_queue.append(buckets[index])
-            self.selector_next = (chosen[-1] + 1) % len(buckets)
+                self.expert_queue.append(self.buckets[index])
+            self.selector_next = (chosen[-1] + 1) % len(self.buckets)
             self.selector_batch = len(chosen)
             self.wake.set()
             return len(chosen)
@@ -251,7 +329,9 @@ class ScanControls:
             self.cancel_startup()
             self.heavy_order = 'expert' if self.heavy_order == 'normal' else 'normal'
             self.expert_queue.clear()
-            self.selector_pool = []
+            self.selector_builder = None
+            self.selector_empty_signature = None
+            self.selector_pool = CandidatePool()
             self.epochs = tuple(value + (i == 2) for i, value in enumerate(self.epochs))
             self.wake.set()
 
@@ -273,7 +353,9 @@ class ScanControls:
             self.epochs = tuple(value + (i == index) for i, value in enumerate(self.epochs))
             self.modes = tuple(True if i == index else value for i, value in enumerate(self.modes))
             if mode == 3 and self.heavy_order == 'expert':
-                self.selector_pool = []
+                self.selector_builder = None
+                self.selector_empty_signature = None
+                self.selector_pool = CandidatePool()
                 self.expert_queue.clear()
                 selected = next(((i, ids) for i, ids in enumerate(self.buckets) if path in ids), None)
                 if selected:

@@ -378,7 +378,7 @@ entries, packing settings, view position and scanner controls.
   Each mode saves its pending path on stop and resumes it on start/reopen.
   Interrupted hashes restart the unfinished file.
 - **j** switches heavy bucket order: **normal** visits sequentially; **expert**
-  uses a separate selector thread with a candidate list built once and rebuilt
+  uses a separate selector thread with a candidate pool built once and rebuilt
   when exhausted: **each tick picks one random starting bucket**,
   draws a length from **1–20**, then marks that many following eligible buckets
   blue in map order, wrapping at the end. It continuously appends ranges while
@@ -398,10 +398,12 @@ entries, packing settings, view position and scanner controls.
   (a fresh random delay of 0.2–1 seconds after adding buckets; paused/unavailable work polled every
   50 ms). When the work queue empties, the scan worker immediately adds another
   random sequence, so the timer does not throttle hashing. Queued/processing buckets
-  show blue backgrounds while heavy is on; unchanged highlights are cached.
-  Highlight refreshes defer when the selector is busy, keeping UI input responsive.
-  Exhausted selection waits for catalog/queue/priority changes before searching again; completing
-  a bucket restores its normal background. Heavy scanning leaves your map
+  show blue backgrounds while heavy is on. Highlight updates apply only added or
+  completed buckets; a full remap is needed when map grouping changes. Candidate
+  ranges are removed without shifting the remaining pool. Pool building runs
+  outside the shared lock; highlight refreshes defer if its snapshot lock is busy.
+  Exhausted selection waits for catalog/queue/priority changes before searching
+  again. Completing a bucket restores its normal background. Heavy scanning leaves your map
   cursor, file page and end-follow mode in place. Pausing keeps pending work in this
   window; closing retains the unfinished path checkpoint, not the entire queue.
   Switching j cancels startup; the automatic startup heavy pass stays finite/normal.

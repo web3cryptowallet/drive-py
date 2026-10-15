@@ -1,0 +1,11 @@
+[project]
+name = "drive-py"
+version = "0.1.0"
+description = "Drive file browser"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3.0.53,<4",
+]
+
+[tool.uv]
+package = false

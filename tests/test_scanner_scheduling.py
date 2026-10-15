@@ -152,7 +152,7 @@ class SchedulingTests(unittest.TestCase):
         controls.buckets = (('green',), ('mixed-green', 'unknown'), ('missing',), ('modified',))
         controls.entry_priorities = {'green': 3, 'mixed-green': 3, 'unknown': 1,
                                      'missing': 4, 'modified': 2}
-        with patch('vfs.scanner.random.choice', side_effect=lambda values: values[0]), patch(
+        with patch('vfs.scanner.random.choice', side_effect=lambda values: min(values)), patch(
                 'vfs.scanner.random.randint', side_effect=lambda low, high: high):
             self.assertEqual(controls.enqueue_expert_batch(), 1)
             self.assertEqual(controls.selected_buckets, (controls.buckets[1],))
@@ -229,7 +229,7 @@ class SchedulingTests(unittest.TestCase):
             self.assertEqual(controls.enqueue_expert_batch(), 2)
             self.assertEqual(controls.enqueue_expert_batch(), 2)
             self.assertEqual(search.call_count, 1)
-            self.assertEqual(controls.selector_pool, [])
+            self.assertFalse(controls.selector_pool)
             self.assertEqual(controls.selected_buckets,
                              (('2',), ('3',), ('4',), ('5',), ('0',), ('1',)))
             controls.claim_expert()
@@ -244,7 +244,7 @@ class SchedulingTests(unittest.TestCase):
         controls.entry_priorities = dict.fromkeys((str(i) for i in range(200)), 0)
         lengths = [20, 20, 7, 3, 19, 2]
         with patch('vfs.scanner.random.randint', side_effect=lengths) as draw, patch(
-                'vfs.scanner.random.choice', side_effect=lambda values: values[0]):
+                'vfs.scanner.random.choice', side_effect=lambda values: min(values)):
             self.assertEqual(controls.enqueue_expert_batch(), 20)
             self.assertEqual(controls.claim_expert(), ('0',))
             total = 20
@@ -263,7 +263,7 @@ class SchedulingTests(unittest.TestCase):
         controls.expert_queue.extend(controls.buckets[:2])
         self.assertEqual(controls.claim_expert(), ('0',))
         with patch('vfs.scanner.random.randint', return_value=20) as draw, patch(
-                'vfs.scanner.random.choice', side_effect=lambda values: values[0]):
+                'vfs.scanner.random.choice', side_effect=lambda values: min(values)):
             self.assertEqual(controls.enqueue_expert_batch(), 3)
             self.assertEqual(controls.selected_buckets, controls.buckets)
             self.assertEqual(controls.enqueue_expert_batch(), 0)
@@ -276,7 +276,7 @@ class SchedulingTests(unittest.TestCase):
         controls.entry_priorities = dict.fromkeys(('0', '1', '2'), 0)
         controls.expert_queue.extend(controls.buckets)
         with patch('vfs.scanner.random.randint', return_value=20) as draw, patch(
-                'vfs.scanner.random.choice', side_effect=lambda values: values[0]):
+                'vfs.scanner.random.choice', side_effect=lambda values: min(values)):
             self.assertEqual(controls.enqueue_expert_batch(), 0)
             for _ in range(2):
                 ids = controls.claim_expert()
@@ -351,7 +351,7 @@ class SchedulingTests(unittest.TestCase):
                                    entries=[ScanEntry(str(file), str(file), False, 3) for file in files])
             # No selector thread or timer runs: the worker must replenish its work.
             with patch('vfs.scanner.random.randint', return_value=20), patch(
-                    'vfs.scanner.random.choice', side_effect=lambda values: values[0]):
+                    'vfs.scanner.random.choice', side_effect=lambda values: min(values)):
                 for _ in files:
                     scanner.scan_once(fs.db)
             self.assertEqual(scanner.paths, 40)
