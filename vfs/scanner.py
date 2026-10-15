@@ -108,8 +108,22 @@ class ScanStore:
                 for key, value in rows}
 
     def put(self, kind, key, value):
-        value = json.dumps(value)
+        """Persist only changed JSON data; return whether a write was needed."""
+        value = json.dumps(value, sort_keys=True)
         db = self.db
+        if isinstance(db, SQLiteDBAdapter):
+            row = db.conn.execute('SELECT value FROM scan_state WHERE kind=? AND key=?',
+                                  (kind, key)).fetchone()
+            previous = row[0] if row else None
+        elif hasattr(db, 'client'):
+            previous = db.client.hget('scan_state:' + kind, key)
+            if isinstance(previous, bytes):
+                previous = previous.decode()
+        else:
+            previous = db.scan_state.get((kind, key))
+        # Accept older JSON with different key order/spacing without rewriting it.
+        if previous == value or (previous is not None and json.loads(previous) == json.loads(value)):
+            return False
         if isinstance(db, SQLiteDBAdapter):
             with db.conn:
                 db.conn.execute('INSERT OR REPLACE INTO scan_state VALUES (?, ?, ?)', (kind, key, value))
@@ -117,6 +131,7 @@ class ScanStore:
             db.client.hset('scan_state:' + kind, key, value)
         else:
             db.scan_state[kind, key] = value
+        return True
 
 
 class SelectionQueue(deque):
@@ -376,6 +391,7 @@ class DriveScanner:
         self.entries = {entry.id: replace(entry, progress=None) for entry in entries}
         self.previous_ids = set(self.entries)
         self.remembered = set()
+        self.paths_table_ready = False
         self.current_path = self.path or '/'
         self.bytes_read = self.paths = self.size_scanned = 0
         self.started = time.monotonic()
@@ -525,15 +541,25 @@ class DriveScanner:
         if entry.id in self.remembered:
             return
         if isinstance(db, SQLiteDBAdapter):
-            with db.conn:
-                db.conn.execute('CREATE TABLE IF NOT EXISTS scan_paths (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
-                db.conn.execute('INSERT OR IGNORE INTO scan_paths VALUES (?, ?)', (entry.id, entry.path))
+            if not self.paths_table_ready:
+                with db.conn:
+                    db.conn.execute('CREATE TABLE IF NOT EXISTS scan_paths (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
+                self.paths_table_ready = True
+            existing = db.conn.execute('SELECT path FROM scan_paths WHERE id=?', (entry.id,)).fetchone()
+            if existing is None:
+                with db.conn:
+                    db.conn.execute('INSERT INTO scan_paths VALUES (?, ?)', (entry.id, entry.path))
         elif hasattr(db, 'client'):
-            db.client.hset('scan_paths', entry.id, entry.path)
+            existing = db.client.hget('scan_paths', entry.id)
+            if isinstance(existing, bytes):
+                existing = existing.decode()
+            if existing != entry.path:
+                db.client.hset('scan_paths', entry.id, entry.path)
         else:
             if not hasattr(db, 'scan_paths'):
                 db.scan_paths = {}
-            db.scan_paths[entry.id] = entry.path
+            if db.scan_paths.get(entry.id) != entry.path:
+                db.scan_paths[entry.id] = entry.path
         self.remembered.add(entry.id)
 
     def baseline(self, db, path):

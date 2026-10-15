@@ -60,6 +60,16 @@ Browse synthetic disks, files, and backup duplicates in the TUI:
 
 Requires the local `.venv` environment with the TUI dependencies and generated `log-megadisks/` data.
 
+## Prompt-toolkit launcher
+
+```bash
+./run-pt.sh -d /path/to/logs
+./run-pt.sh -c sqlite
+```
+
+Uses `uv` to run `drive-tui-pt.py` from the project directory, forwarding arguments.
+Use `./run-pt-megadisks.sh` for the generated megadisks dataset.
+
 ## TUI
 
 MC Default starts with the reference Midnight Commander palette: muted blue panels,
@@ -482,6 +492,9 @@ Existing VFS path IDs identify files. SQLite saves discoveries in a separate
 `scan_paths` table; Redis uses a `scan_paths` hash; memory storage keeps them for
 that adapter's lifetime. Additional JSON `scan_state` records store latest states,
 new checksums, maps and per-mode pending-path positions; memory records last only for the adapter's lifetime.
+Unchanged scanner records and existing discovery IDs are not rewritten, including
+after reopening. Changed records/checkpoints still persist; live scan events and
+counters update even when no persistence is needed.
 Imported baseline nodes/hashes stay unchanged. Heavy detects same-size content
 changes; medium's green metadata result does not certify file contents.
 Unsupported checksums remain unverified; absent hashes are created by heavy.

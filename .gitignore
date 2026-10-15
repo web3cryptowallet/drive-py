@@ -24,7 +24,7 @@ drivevfs
 
 actions
 
-FEATURE-realtime-drive-scanner.md
+FEATURE-*.md
 TRANSPLIT.md
 
 pack.sh
