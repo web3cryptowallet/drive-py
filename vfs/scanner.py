@@ -5,6 +5,7 @@ Existing comparison baselines are preserved.
 Path IDs have the same meaning as nodes.id throughout the existing VFS.
 """
 from collections import Counter, deque
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
@@ -107,6 +108,19 @@ class ScanStore:
         return {(key.decode() if isinstance(key, bytes) else key): json.loads(value)
                 for key, value in rows}
 
+    def delete(self, kind, key):
+        """Delete exactly one scanner record, leaving other scopes untouched."""
+        db = self.db
+        if isinstance(db, SQLiteDBAdapter):
+            if db.conn.execute('SELECT 1 FROM scan_state WHERE kind=? AND key=?', (kind, key)).fetchone() is None:
+                return False
+            with db.conn:
+                result = db.conn.execute('DELETE FROM scan_state WHERE kind=? AND key=?', (kind, key))
+            return bool(result.rowcount)
+        if hasattr(db, 'client'):
+            return bool(db.client.hdel('scan_state:' + kind, key))
+        return db.scan_state.pop((kind, key), None) is not None
+
     def put(self, kind, key, value):
         """Persist only changed JSON data; return whether a write was needed."""
         value = json.dumps(value, sort_keys=True)
@@ -125,7 +139,7 @@ class ScanStore:
         if previous == value or (previous is not None and json.loads(previous) == json.loads(value)):
             return False
         if isinstance(db, SQLiteDBAdapter):
-            with db.conn:
+            with db.write_transaction():
                 db.conn.execute('INSERT OR REPLACE INTO scan_state VALUES (?, ?, ?)', (kind, key, value))
         elif hasattr(db, 'client'):
             db.client.hset('scan_state:' + kind, key, value)
@@ -464,7 +478,12 @@ class DriveScanner:
                 else {'remaining': ([] if mode == 3 and self.controls.heavy_order == 'expert'
                                     and self.controls.startup_mode is None else list(self.entries)),
                       'first': None})
-        self.save_positions()
+        # The empty expert checkpoint is a transient bucket placeholder, not
+        # resumable work. Persist the actual bucket remainder after processing.
+        if not (mode == 3 and self.controls.heavy_order == 'expert' and
+                self.controls.startup_mode is None and
+                not self.checkpoints[key]['remaining']):
+            self.save_positions()
 
     def discovery_frontier(self, paths):
         frontier, selected = [], set()
@@ -542,12 +561,12 @@ class DriveScanner:
             return
         if isinstance(db, SQLiteDBAdapter):
             if not self.paths_table_ready:
-                with db.conn:
+                with db.write_transaction():
                     db.conn.execute('CREATE TABLE IF NOT EXISTS scan_paths (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
                 self.paths_table_ready = True
             existing = db.conn.execute('SELECT path FROM scan_paths WHERE id=?', (entry.id,)).fetchone()
             if existing is None:
-                with db.conn:
+                with db.write_transaction():
                     db.conn.execute('INSERT INTO scan_paths VALUES (?, ?)', (entry.id, entry.path))
         elif hasattr(db, 'client'):
             existing = db.client.hget('scan_paths', entry.id)
@@ -589,8 +608,9 @@ class DriveScanner:
         self.entries[entry.id] = entry
         if new and self.current_mode == 2 and self.checkpoints.get('2') is not None:
             self.checkpoints['2']['remaining'].append(entry.id)
-        self.remember(db, entry)
-        self.store.put('entry', entry.id, asdict(entry))
+        with db.write_transaction() if isinstance(db, SQLiteDBAdapter) else nullcontext():
+            self.remember(db, entry)
+            self.store.put('entry', entry.id, asdict(entry))
         self.emit(('entry', entry))
         self.paths += 1
         self.size_scanned += entry.size if not entry.is_dir else 0
@@ -872,14 +892,18 @@ class DriveScanner:
             if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
                 return replace(entry, state='unknown', error='File changed during verification; retrying next scan')
             digest = algorithm + ':' + hasher.hexdigest()
+            verified = add_checksum or hasher.hexdigest().lower() == expected.lower()
+            db = self.store.db
+            # Hash reads and progress events happen before taking a write lock.
+            with db.write_transaction() if isinstance(db, SQLiteDBAdapter) else nullcontext():
+                if add_checksum:
+                    saved = {'size': after.st_size, 'hash': digest}
+                    self.store.put('checksum', entry.path, saved)
+                if verified:
+                    db.add_scanned_file(entry.path, digest, after.st_size)
             if add_checksum:
-                saved = {'size': after.st_size, 'hash': digest}
-                self.store.put('checksum', entry.path, saved)
                 self.checksums[entry.path] = saved
                 self.baseline_known[entry.id] = True
-            verified = add_checksum or hasher.hexdigest().lower() == expected.lower()
-            if verified:
-                self.store.db.add_scanned_file(entry.path, digest, after.st_size)
             return replace(entry, state='verified' if verified else 'modified')
         except (OSError, ValueError) as exc:
             return replace(entry, state='unknown', error=str(exc))

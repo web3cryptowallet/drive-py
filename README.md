@@ -1,21 +1,21 @@
 # drive.py
 
-drive.py v0.98
+drive.py v0.99
 
-v0.98 - TUI tables and MC themes, modular VFS, memory-efficient SQLite loading, experimental updates and regression tests
+v0.99 - prompt_toolkit as the main TUI, live drive scanning and file maps, context help, and saved scan state
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
 - **drive.py** — CLI disk analyzer.
-- **drive-tui.py** — TUI for the disk database.
+- **drive-tui.py** — prompt_toolkit TUI for browsing the disk database and live drive maps.
 
 ![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
 ![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-2.png)
 
 
 ## Prerequisites
-- Python 3
-- virtualenv (required for the TUI)
+- Python 3.10 or newer
+- uv (runs the prompt_toolkit TUI)
 - Node.js (required for the web viewer)
 
 ## Usage
@@ -58,19 +58,52 @@ Browse synthetic disks, files, and backup duplicates in the TUI:
 ./run-megadisks.sh
 ```
 
-Requires the local `.venv` environment with the TUI dependencies and generated `log-megadisks/` data.
+Requires uv and generated `log-megadisks/` data.
 
-## Prompt-toolkit launcher
+## Main TUI (prompt_toolkit)
 
 ```bash
-./run-pt.sh -d /path/to/logs
-./run-pt.sh -c sqlite
+./run.sh -d /path/to/logs
+./run.sh -c sqlite
 ```
 
-Uses `uv` to run `drive-tui-pt.py` from the project directory, forwarding arguments.
-Use `./run-pt-megadisks.sh` for the generated megadisks dataset.
+Uses `uv` to run `drive-tui.py` from the project directory, forwarding arguments.
+`run.sh` defaults to SQLite; use `-c memory` for an in-memory catalog.
+Use `./run-megadisks.sh` for the generated megadisks dataset.
 
-## TUI
+Pass an optional startup directory, including `~`, relative paths or paths with spaces:
+
+```bash
+./drive-tui.py ~
+./drive-tui.py ~/mypath
+./run.sh ~/mypath
+./run.sh "/path/with spaces"
+```
+
+Direct execution requires prompt_toolkit in the Python environment (for example,
+activate `.venv` first); `run.sh` manages dependencies through uv. Without a path,
+the browser starts in the process's current directory. The positional path changes
+only the browsing location; config, log discovery and SQLite cache resolution
+remain in the launch working directory. `run.sh` first changes to the project
+directory. Configured local drive mounts translate to VFS aliases. Invalid or
+non-directory paths produce a command-line error. `-d` selects log input.
+
+Press **q** from any view (including help, Actions and scanner inputs) to quit
+the app. Scanner shutdown retains the existing cancellation and save behavior.
+
+In the PT main view, **Shift+R** clears the saved map and resume positions for the
+current directory. Other folders, file records and checksums are retained.
+
+The prompt_toolkit implementation is now the main `drive-tui.py`. Shared VFS,
+scanner and database code remains in `vfs/`. Run active tests with
+`uv run python -m unittest discover -s tests -v`.
+
+The former Textual application, views, theme, launchers and dependent tests are
+preserved in [texual.removed](texual.removed/README.md). The following legacy
+Textual UI notes describe that archive; use the launchers above for the main UI.
+See [FEATURE-pt-main.md](FEATURE-pt-main.md) for the migration record.
+
+## Archived Textual TUI notes
 
 MC Default starts with the reference Midnight Commander palette: muted blue panels,
 teal selections, and yellow headings. MC Blue preserves the previous saturated blue
@@ -102,12 +135,12 @@ sudo apt install xclip
 
 Run with in-memory db for small amount of files
 ```
-python drive-tui.py
+PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py
 ```
 
 Rebuild SQLite cache for big disks (`-b`)
 ```
-python drive-tui.py -c sqlite -b
+PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py -c sqlite -b
 ```
 SQLite builds load and commit one log at a time through `load_lite`, releasing
 each parsed log before loading the next. Memory usage depends on the largest
@@ -116,13 +149,13 @@ files. The `-b` option recreates the cache once before loading begins.
 
 **Experimental:** Update an existing SQLite cache without recreating it (`-u` / `--update`):
 ```
-python drive-tui.py -c sqlite -u -d log-test0
+PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py -c sqlite -u -d log-test0
 ```
 Both modes load one log at a time. Use either `-u` or `-b`, not both.
 
 Run with SQLite cache without importing logs:
 ```
-python drive-tui.py -c sqlite
+PYTHONPATH=.:texual.removed .venv/bin/python texual.removed/drive-tui.py -c sqlite
 ```
 
 To merge files into an existing SQLite cache without rebuilding it, use the
@@ -334,6 +367,16 @@ v0.98
 - TEST: Add regression coverage for memory and SQLite navigation, SQLite cache reopening, duplicate lookup, drive mappings, local metadata, and public exports
 - DEV: Add run-test-llog.sh and run-test-tui.sh helpers for generating and browsing demo reports
 
+v0.99
+
+- TUI: Make prompt_toolkit the main `drive-tui.py`, with `run.sh` and `run-megadisks.sh` launchers using uv
+- REFACTOR: Preserve the former Textual application, views, theme, launchers, and dependent tests in `texual.removed/`
+- SCANNER: Add live drive maps with lite, medium, and heavy verification, independent scan controls, and normal/expert scheduling
+- SCANNER: Save maps and resume positions per directory; promote checksum-verified new files into the VFS catalog
+- TUI: Add context help with `h`, keep Size and Dups visible, and preserve file-status colors under selection
+- TUI: Use **Shift+R** in the main view to clear the current directory's saved map and resume positions while retaining file records and checksums
+- STORAGE: Skip unchanged scanner record writes across memory, SQLite, and Redis adapters
+
 ## Recomended projects
 
 - [livecomment](https://github.com/d08ble/livecomment) project
@@ -403,6 +446,13 @@ entries, packing settings, view position and scanner controls.
   each bucket. The scan worker consumes the queue in FIFO
   order, finishing each bucket without a time limit. Expert-only scanning reuses
   its checksum catalog between buckets to avoid repeated whole-map setup.
+  SQLite groups each file's checksum/catalog writes and discovery/status writes
+  into two short transactions, and skips empty expert bucket-start checkpoints.
+  A local profiled run of 1,000 new 3-byte files improved from 17.3s to 7.8s
+  (about six commits per file reduced to two, plus a final checkpoint). This
+  isolates warm local SQLite scanning with an unbounded event queue and no UI;
+  real-drive and UI performance can differ. Hash reads and event delivery occur
+  outside these write transactions. Actual interrupted-bucket checkpoints persist.
   The selector keeps adding
   random-start ranges while scanning
   (a fresh random delay of 0.2–1 seconds after adding buckets; paused/unavailable work polled every
@@ -419,9 +469,17 @@ entries, packing settings, view position and scanner controls.
   Switching j cancels startup; the automatic startup heavy pass stays finite/normal.
 - With map or file-list focus, **]** moves deeper through the selected file
   row's directory ancestors; **[** moves back. For file `/a/b/c`, ] chooses `/a`, then `/a/b`.
+  Both keys loop at the limits: for `/a/b/c/file`, **[** cycles
+  `/a/b/c → /a/b → /a → /a/b/c`; **]** cycles in the opposite direction.
+  The matching prefix in file-list paths is gold, including its trailing `/`:
+  scope `a/b` colors `a/b/` in `a/b/file1`, while scope `a` colors only `a/`.
+  The remaining filename keeps its normal color. **d** clears this highlight with the scope colors.
   Matching buckets get a random background while symbols keep their foreground.
-  **f** fixes those colors; **d** clears all colors. Fixed colors survive scope
-  changes/repacking and are saved with the map. Highlighting is visual; scan
+  **f** fixes those colors; **c** clears all colors pinned with **f**, keeping
+  the active scope and gold path highlight; **d** clears all colors. Fixed colors survive scope
+  changes/repacking and are saved with the map. The active **[ / ]** scope color
+  overrides pinned colors for matching buckets; leaving that scope reveals their
+  saved colors. Press **f** again to replace the saved color. Highlighting is visual; scan
   targets and file filters stay independent.
 - **Shift+1 / Shift+2 / Shift+3** starts that mode at the first file/path in the
   selected bucket, including while running. **! / @ / #** work in terminals that

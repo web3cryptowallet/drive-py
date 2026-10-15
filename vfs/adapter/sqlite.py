@@ -5,6 +5,7 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 
 from .base import BaseDBAdapter
 from ..nodes import VFSNode
@@ -26,6 +27,16 @@ class SQLiteDBAdapter(BaseDBAdapter):
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.create_tables()
+
+    @contextmanager
+    def write_transaction(self):
+        """Join a caller's transaction, or commit one small metadata operation."""
+        if self.conn.in_transaction:
+            yield
+        else:
+            with self.conn:
+                self.conn.execute('BEGIN IMMEDIATE')
+                yield
 
     def create_tables(self):
         print("sqlite: create tables")
@@ -391,9 +402,7 @@ class SQLiteDBAdapter(BaseDBAdapter):
 
     def add_scanned_file(self, path, digest, size):
         metadata, ancestors = self.scanned_file_metadata(path, digest, size)
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
+        with self.write_transaction():
             if self.conn.execute('SELECT 1 FROM nodes WHERE id = ?',
                                  (metadata['id'],)).fetchone():
                 return False

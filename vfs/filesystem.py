@@ -52,9 +52,12 @@ class VirtualFS:
     def pwd(self):
         return self.cwd.id or "/"
 
-    def start_in_current_directory(self):
-        """Open the process directory, translating local drive mounts to aliases."""
-        path = os.getcwd()
+    def start_in_current_directory(self, path=None):
+        """Open a local startup path (default: cwd), translating drive aliases."""
+        explicit = path is not None
+        path = os.path.abspath(os.path.expanduser(os.fspath(path))) if explicit else os.getcwd()
+        if explicit and not os.path.isdir(path):
+            raise ValueError(f'Startup path is not a directory: {path}')
         for alias, local in sorted(aliases.items(), key=lambda item: len(item[1]), reverse=True):
             local = os.path.abspath(local)
             if path == local or path.startswith(local.rstrip('/') + '/'):
@@ -63,6 +66,8 @@ class VirtualFS:
         node = self.get_from_path(path)
         if node and node.is_dir:
             self.cwd = node
+        elif explicit:
+            raise ValueError(f'Cannot open startup directory: {path}')
 
     def _parent(self, node):
         if node.parent_id is None:
