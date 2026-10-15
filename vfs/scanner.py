@@ -55,6 +55,8 @@ class ScanStats:
 
     # None preserves compatibility for callers constructing legacy statistics.
     rate_samples: tuple | None = None
+    hash_samples: tuple | None = None
+    hash_started: float | None = None
 
     def recent_rate(self, column):
         now = time.monotonic()
@@ -69,10 +71,51 @@ class ScanStats:
 
     @property
     def mb_per_second(self):
+        if self.hash_samples is not None:
+            now = time.monotonic()
+            duration = min(1., max(0., now - self.hash_started)) if self.hash_started is not None else 0.
+            size = sum(size for stamp, size in self.hash_samples if 0 <= now - stamp < 1)
+            return size / duration / 1_000_000 if duration > 0 else 0.
         if self.rate_samples is not None:
             return self.recent_rate(2) / 1_000_000
         size = self.bytes_read if self.size_scanned is None else self.size_scanned
         return size / self.elapsed / 1_000_000 if self.active and self.elapsed > 0 else 0.
+
+
+class ScanTiming:
+    """Per-map mode processing time; pauses/watch delays are excluded."""
+    def __init__(self, elapsed=(0., 0., 0.)):
+        self.elapsed = list(elapsed)
+        self.run_elapsed = [0., 0., 0.]
+        self.run_tokens = [object(), object(), object()]
+        self.mode = 0
+        self.started = time.monotonic()
+        self.lock = RLock()
+
+    def switch(self, mode, token=None):
+        with self.lock:
+            now = time.monotonic()
+            if self.mode:
+                spent = max(0., now - self.started)
+                self.elapsed[self.mode - 1] += spent
+                self.run_elapsed[self.mode - 1] += spent
+            if mode and self.run_tokens[mode - 1] != token:
+                self.run_elapsed[mode - 1] = 0.
+                self.run_tokens[mode - 1] = token
+            self.mode, self.started = mode, now
+
+    def snapshot(self):
+        with self.lock:
+            elapsed = self.elapsed.copy()
+            if self.mode:
+                elapsed[self.mode - 1] += max(0., time.monotonic() - self.started)
+            return self.mode, tuple(elapsed)
+
+    def display_snapshot(self):
+        with self.lock:
+            spent = max(0., time.monotonic() - self.started) if self.mode else 0.
+            current = self.run_elapsed[self.mode - 1] + spent if self.mode else 0.
+            return current, sum(self.elapsed) + spent
 
 
 class ScanStore:
@@ -189,6 +232,7 @@ class ScanControls:
         self.wake = Event()
         self.lock = RLock()
         self.epochs = (0, 0, 0)
+        self.run_revisions = (0, 0, 0)
         self.requests = ((0, None),) * 3
         self.entry_priorities = {}
         self.selection_changes = {}
@@ -352,6 +396,8 @@ class ScanControls:
             if self.startup_mode == mode:
                 self.startup_mode = mode + 1 if mode < 3 else None
                 self.modes = tuple(self.startup_mode == index for index in (1, 2, 3))
+                self.run_revisions = tuple(value + (self.startup_mode == i + 1)
+                                           for i, value in enumerate(self.run_revisions))
 
     def toggle_order(self):
         with self.lock:
@@ -369,6 +415,9 @@ class ScanControls:
             self.cancel_startup()
             self.modes = tuple(not value if index == mode - 1 else value
                                for index, value in enumerate(self.modes))
+            if self.modes[mode - 1]:
+                self.run_revisions = tuple(value + (i == mode - 1)
+                                           for i, value in enumerate(self.run_revisions))
             self.epochs = tuple(value + (index == mode - 1)
                                 for index, value in enumerate(self.epochs))
             self.wake.set()
@@ -377,6 +426,8 @@ class ScanControls:
         with self.lock:
             self.cancel_startup()
             index = mode - 1
+            self.run_revisions = tuple(value + (i == index)
+                                       for i, value in enumerate(self.run_revisions))
             self.requests = tuple((value[0] + 1, path) if i == index else value
                                   for i, value in enumerate(self.requests))
             self.epochs = tuple(value + (i == index) for i, value in enumerate(self.epochs))
@@ -396,12 +447,13 @@ class ScanControls:
 
 class DriveScanner:
     """One disk worker with independently enabled discovery/metadata/hash passes."""
-    def __init__(self, db, path, events, stop, interval=5, controls=None, entries=(), root_names=()):
+    def __init__(self, db, path, events, stop, interval=5, controls=None, entries=(), root_names=(), timing=None):
         self.source = db
         self.root_names = tuple(root_names)
         self.path = path.rstrip('/')
         self.events, self.stop, self.interval = events, stop, interval
         self.controls = controls or ScanControls()
+        self.timing = timing if timing is not None else ScanTiming()
         self.entries = {entry.id: replace(entry, progress=None) for entry in entries}
         self.previous_ids = set(self.entries)
         self.remembered = set()
@@ -419,6 +471,8 @@ class DriveScanner:
         self.selector_thread = None
         self.selector_stop = Event()
         self.rate_samples = deque()
+        self.hash_samples = deque()
+        self.hash_started = None
         self.baseline_known = {}
         self.expert_initialized = False
         self.checksums = None
@@ -436,6 +490,14 @@ class DriveScanner:
             self.current_path = path
         self.bytes_read += read
         now = time.monotonic()
+        if read:
+            if self.hash_samples and now - self.hash_samples[-1][0] < .1:
+                stamp, size = self.hash_samples.pop()
+                self.hash_samples.append((stamp, size + read))
+            else:
+                self.hash_samples.append((now, read))
+        while self.hash_samples and now - self.hash_samples[0][0] >= 1:
+            self.hash_samples.popleft()
         if completed_size is not None:
             if self.rate_samples and now - self.rate_samples[-1][0] < .1:
                 stamp, paths, size = self.rate_samples.pop()
@@ -447,7 +509,8 @@ class DriveScanner:
         if force or now - self.last_stats >= .1:
             self.emit(('stats', ScanStats(self.current_path, self.bytes_read,
                                          self.elapsed + max(0., now - self.started), active,
-                                         self.paths, self.size_scanned, tuple(self.rate_samples))))
+                                         self.paths, self.size_scanned, tuple(self.rate_samples),
+                                         tuple(self.hash_samples), self.hash_started)))
             self.last_stats = now
 
     def enabled(self, mode):
@@ -456,6 +519,7 @@ class DriveScanner:
                  self.active_epoch == self.controls.epochs[mode - 1]))
 
     def begin_mode(self, mode):
+        self.timing.switch(mode, self.controls.run_revisions[mode - 1])
         self.current_mode = mode
         self.active_epoch = self.controls.epochs[mode - 1]
         revision, anchor = self.controls.requests[mode - 1]
@@ -632,6 +696,12 @@ class DriveScanner:
                 self.controls.priority_revision += 1
 
     def scan_once(self, db):
+        try:
+            self._scan_once(db)
+        finally:
+            self.timing.switch(0)
+
+    def _scan_once(self, db):
         self.store = ScanStore(db)
         if self.checkpoints is None:
             self.checkpoints = self.store.get('position', self.path or '/', {})
@@ -876,6 +946,8 @@ class DriveScanner:
                 if (before.st_ino, before.st_dev, before.st_mtime_ns, before.st_size) != (
                         disk_stat.st_ino, disk_stat.st_dev, disk_stat.st_mtime_ns, disk_stat.st_size):
                     return replace(entry, state='unknown', error='File changed while opening; retrying next scan')
+                if self.hash_started is None:
+                    self.hash_started = time.monotonic()
                 while self.enabled(3):
                     chunk = stream.read(1024 * 1024)
                     if not chunk:

@@ -88,6 +88,9 @@ remain in the launch working directory. `run.sh` first changes to the project
 directory. Configured local drive mounts translate to VFS aliases. Invalid or
 non-directory paths produce a command-line error. `-d` selects log input.
 
+In the main view, **Backspace** or **Esc** goes to the parent directory and
+restores the child selection, including when the info pane has focus.
+
 Press **q** from any view (including help, Actions and scanner inputs) to quit
 the app. Scanner shutdown retains the existing cancellation and save behavior.
 
@@ -373,6 +376,8 @@ v0.99
 - TUI: Accept a startup directory such as `./drive-tui.py ~` or `./run.sh ~/mypath`, including paths with spaces and configured drive aliases
 - REFACTOR: Preserve the former Textual application, views, theme, launchers, and dependent tests in `texual.removed/`
 - LIVE MAP: Press `s` to scan the current VFS directory and display file-status buckets with live progress, path counts and throughput
+- LIVE MAP: Show hashing speed during large files from bytes read/hashed over the last second, updating about every 0.1s; scale MB/s through PB/s and retain five-second paths/s and cumulative totals
+- LIVE MAP: Show expert selected bucket count (queued plus processing), active-mode elapsed time and total processing time spent on the map; retain per-mode times across reopening and append `mode / total` at the end of the `Lite / Medium / Heavy` controls line, without a separate timing row as `M:SS` or `H:MM:SS` (hours continue beyond 24)
 - LIVE MAP: Add independent lite discovery, medium metadata checks and heavy checksum verification; run lite → medium → heavy once on opening, with per-mode pause/resume and cursor-start controls
 - LIVE MAP: Support packing by file count or size, fixed/scroll layouts, bucket limits, an end-follow cursor, status filters, paginated file details and horizontal scrolling
 - LIVE MAP: Add normal/expert heavy scheduling; expert selects random sequences of 1–20 eligible buckets, marks queued work blue and processes it in FIFO order with immediate refill when empty

@@ -280,7 +280,7 @@ from livelog2 import LiveLog
 from vfs import VirtualFS, aliases, disabled_prefixes, format_size, prefixes, get_stat_info
 from vfs.paths import get_real_path
 from vfs.scanner import (DriveScanner, FileMap, Pagination, ScanControls, ScanEntry,
-                         ScanStats, ScanStore)
+                         ScanStats, ScanStore, ScanTiming)
 
 
 async def background_call(function, *args, **kwargs):
@@ -302,6 +302,15 @@ async def background_call(function, *args, **kwargs):
     if not success:
         raise value
     return value
+
+
+def format_elapsed(seconds):
+    seconds = max(0, int(seconds))
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if hours:
+        return f'{hours}:{minutes:02}:{seconds:02}'
+    return f'{minutes}:{seconds:02}'
 
 
 def safe_text(value):
@@ -482,7 +491,8 @@ class DriveBrowser:
         bind(['home'], lambda event: self.move(-len(self.rows)), filter=files_focused)
         bind(['end'], lambda event: self.move(len(self.rows)), filter=files_focused)
         bind(['enter', 'right'], lambda event: self.open(), filter=files_focused)
-        bind(['escape', 'backspace'], lambda event: self.parent())
+        bind(['escape'], lambda event: self.parent())
+        bind(['backspace'], lambda event: self.parent(), eager=True)
         bind(['left'], lambda event: self.parent(), filter=files_focused)
         bind(['tab', 's-tab'], lambda event: event.app.layout.focus(
             self.info if event.app.layout.has_focus(self.control) else self.control))
@@ -773,7 +783,7 @@ def main_help(display_mode):
         '', '[bold]Shortcuts[/bold]',
         '[#ff8800]h / Esc[/#ff8800] (in help): Close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info',
-        '[#ff8800]Esc[/#ff8800] (main view): Go to parent directory',
+        '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
         '[#ff8800]Arrows / Page Up / Page Down[/#ff8800]: Navigate the focused table',
         '[#ff8800]Ctrl+X[/#ff8800]: Copy info panel text to clipboard',
         '[#ff8800]t[/#ff8800]: Cycle MC Default, MC Blue and Textual Dark themes',
@@ -850,9 +860,14 @@ SCANNER_HELP = [
     'Page buttons/jumps or slider: seek; horizontal position is preserved',
     'Slider: [#ff8800]Left/Right[/#ff8800] step; [#ff8800]Home/End[/#ff8800] select first/last page',
     '', '[bold]Info and saved state[/bold]',
-    'Paths/s and MB/s–PB/s use completed visits/sizes from the last 5 seconds',
-    'Rates sum all modes and decay to zero after idle; totals stay cumulative',
+    'Paths/s uses completed visits over 5 seconds; MB/s–PB/s shows bytes hashed over 1 second',
+    'Hash speed updates during files about every 0.1s and decays to zero after idle; totals stay cumulative',
     'Total paths/size count repeat visits; bucket N/total tracks the viewport',
+    'Expert selected counts queued and processing buckets',
+    'Mode time starts at zero on start/resume; map total accumulates processing time across all runs',
+    'Pauses/watch delays are excluded from both timers',
+    'The Lite/Medium/Heavy controls line ends with mode / map time as M:SS or H:MM:SS (hours can exceed 24)',
+    'Map time totals persist across reopening; Shift+R in main resets them with the map',
     'Map settings, selection, filter and per-mode positions save per path',
     '[#ff8800]s / Esc[/#ff8800] (scanner): Close scanner; [#ff8800]h[/#ff8800]: Help',
     '[#ff8800]h / Esc[/#ff8800] (help) or Close button: Return to scanner',
@@ -1444,6 +1459,7 @@ class ScannerView(PTScreen):
         self.return_name = browser.current_name()
         self.store = ScanStore(self.vfs.db)
         saved = self.store.get('map', self.path, {})
+        self.timing = ScanTiming(saved.get('mode_elapsed', (0., 0., 0.)))
         self.controls = ScanControls(saved.get('modes', (True, False, False)),
             saved.get('read_known', False), saved.get('new_first', True), startup=startup,
             heavy_order=saved.get('heavy_order', 'normal'))
@@ -1466,6 +1482,7 @@ class ScannerView(PTScreen):
         self.scope_anchor = self.scope_depth = None
         self.backgrounds = {}
         self.scope_indices = set()
+        self.expert_selected_count = 0
         self.expert_blue = set()
         self.expert_work, self.expert_counts = {}, {}
         self.expert_signature = None
@@ -1630,6 +1647,7 @@ class ScannerView(PTScreen):
         self.browser.scanners.append(self)
         self.start_projection()
         scanner = DriveScanner(self.vfs.db, self.path, self.events, self.stop, controls=self.controls,
+            timing=self.timing,
             entries=self.model.entries.values(),
             root_names=tuple(node.name for node in self.vfs.list_nodes(self.vfs.db.get_root())) if self.path == '/' else ())
         self.worker = Thread(target=scanner.run, name='drive-pt-scanner', daemon=True)
@@ -1703,6 +1721,7 @@ class ScannerView(PTScreen):
         try:
             changes = self.controls.selection_changes
             self.controls.selection_changes = {}
+            self.expert_selected_count = len(self.controls.expert_queue) + (self.controls.expert_current is not None)
         finally:
             self.controls.lock.release()
         # Appending entries does not relocate any existing bucket anchors.
@@ -1814,6 +1833,7 @@ class ScannerView(PTScreen):
             selected=self.selected, scroll_y=self.map_window.vertical_scroll, page=self.pagination.page,
             follow_end=self.follow_end, file_filter=self.filter, heavy_order=self.controls.heavy_order,
             scope_path=self.scope_path, scope_color=self.scope_color, fixed_colors=self.fixed_colors)
+        snapshot['mode_elapsed'] = self.timing.snapshot()[1]
         self.store.put('map', self.path, snapshot)
 
     def selected_bucket(self):
@@ -2118,6 +2138,10 @@ class ScannerView(PTScreen):
             running = self.requested_modes.get(i, running)
             result.extend([('', f'{i} {label} '), ('class:green' if running else 'class:red', 'RUN' if running else 'STOP'), ('', ' · ')])
         result.append(('', f'r {"on" if self.controls.read_known else "off"} · t {"new" if self.controls.new_first else "all"} · j {self.requested_order or self.controls.heavy_order}'))
+        if (self.requested_order or self.controls.heavy_order) == 'expert':
+            result.append(('', f' · Expert selected {self.expert_selected_count} buckets'))
+        current, total = self.timing.display_snapshot()
+        result.append(('', f' · {format_elapsed(current)} / {format_elapsed(total)}'))
         return result
 
     def summary(self):
