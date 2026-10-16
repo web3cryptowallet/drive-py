@@ -11,6 +11,9 @@ Multithreaded disk file comparison tool for verification and MD5 checksum report
 
 [![drive.py scanner map](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-4.png)](https://asciinema.org/a/cU8hD5HZ4d9o7DsJ)
 
+
+![drive.py image and video preview](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-5.png)
+
 ![drive.py main](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-1.png)
 ![drive.py file compare](https://raw.githubusercontent.com/web3cryptowallet/drive-py/master/assets/console-2.png)
 
