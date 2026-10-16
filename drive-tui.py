@@ -700,6 +700,9 @@ class DriveBrowser:
         self.video_status = ''
         self.video_first_row = 0
         self.video_dimensions = (1, 1)
+        self.video_render_dimensions = (1, 1)
+        self.video_metadata = TextArea(read_only=True, wrap_lines=True,
+                                       height=Dimension(min=1, preferred=6, max=6))
         self.video_task = None
         self.video_workers = []
         self.play_button = Button('Play', handler=self.play_video)
@@ -812,6 +815,8 @@ class DriveBrowser:
                         HSplit([
                             Window(FormattedTextControl(lambda: f' Info · y:auto {"on" if self.auto_quick_view else "off"} · i:images {"on" if self.image_previews else "off"}'), height=1,
                                    style='class:info-header'),
+                            ConditionalContainer(self.video_metadata,
+                                                 filter=Condition(lambda: self.video_path is not None)),
                             ConditionalContainer(HSplit([
                                 self.video_area,
                                 VSplit([self.play_button, self.stop_button,
@@ -903,7 +908,7 @@ class DriveBrowser:
         cell_width, cell_height = get_cell_size() or (8, 16)
         player = VideoPreview(self.video_path, (min(1280, width * cell_width),
                                               min(720, height * cell_height)),
-                              lambda image: serialize_video_frame(image, (width, height)))
+                              lambda image: serialize_video_frame(image, self.video_render_dimensions))
         self.video_player = player
         self.video_workers = [worker for worker in self.video_workers if worker.thread.is_alive()]
         self.video_workers.append(player)
@@ -1192,6 +1197,12 @@ class DriveBrowser:
 
     def draw_native_preview(self, app):
         self.draw_grid_native(app)
+        if getattr(self, 'video_path', None) and self.video_area.window.render_info:
+            visible = self.video_area.window.render_info
+            width, height = self.video_dimensions
+            scale = min(1., max(1, visible.window_width - 1) / width,
+                        max(1, visible.window_height) / height)
+            self.video_render_dimensions = (max(1, int(width * scale)), max(1, int(height * scale)))
         if (getattr(self, 'video_path', None) and not self.video_panel_visible()
                 and any(app.layout.has_focus(control)
                         for control in (self.play_button, self.stop_button, self.seek_control))):
@@ -1206,6 +1217,18 @@ class DriveBrowser:
         render = window.render_info
         screen = app.renderer._last_screen
         position = screen.visible_windows_to_write_positions.get(window) if screen else None
+        if getattr(self, 'video_path', None) and render and position:
+            available_width = max(1, render.window_width - 1)
+            available_height = max(1, render.window_height)
+            scale = min(1., available_width / width, available_height / height)
+            fitted = (max(1, int(width * scale)), max(1, int(height * scale)))
+            if fitted != (width, height):
+                self.video_render_dimensions = fitted
+                width, height = fitted
+                # c/r are Kitty placement cell dimensions, not decoded pixels.
+                art = re.sub(r'(?<=[,G])c=\d+', f'c={width}', art)
+                art = re.sub(r'(?<=[,G])r=\d+', f'r={height}', art)
+                self.native_preview = (art, fitted, first_row)
         if not render or not position or width > render.window_width - 1:
             self.clear_native_preview()
             return
@@ -1360,7 +1383,7 @@ class DriveBrowser:
         self.info_lexer.image_lines = {}
         self.info_paths = {}
         if directory and self.vfs.pwd() == "/":
-            lines = ["/", "╭────────╮  drive.py v0.98", "│ ━━━━ ● │  File Manager",
+            lines = ["/", "╭────────╮  drive.py v0.991", "│ ━━━━ ● │  File Manager",
                      "╰────────╯  Explore • Compare • Keep", "", "h: Open help view", "",
                      *main_help(self.display_mode)]
             from term_image.image import KittyImage, auto_image_class
@@ -1417,6 +1440,7 @@ class DriveBrowser:
                 width = max(1, min(80, render.window_width - 1)) if render else 36
                 height = max(1, min(30, self.app.output.get_size().rows - 11)) if hasattr(self, 'app') else 10
                 self.video_dimensions = (width, height)
+                self.video_render_dimensions = (width, height)
                 self.video_first_row = 0
                 self.video_area.lexer.image_lines = {}
                 self.video_area.text = '\n'.join([' ' * width] * height)
@@ -1450,6 +1474,15 @@ class DriveBrowser:
                 lines.append('● ' + path)
             if info.get('exists') and info.get('size') != node.size:
                 lines.append(f'Current disk size: {info.get("size")} bytes')
+        if self.video_path:
+            # Path/status/name/size/created/modified stay above the video.
+            boundary = 6
+            self.video_metadata.text = '\n'.join(safe_text(line) for line in lines[:boundary])
+            lines = lines[boundary:]
+            self.info_paths = {index - boundary: path for index, path in self.info_paths.items()
+                               if index >= boundary}
+            self.info_lexer.colors = {index - boundary: color for index, color in self.info_lexer.colors.items()
+                                      if index >= boundary}
         self.info.text = '\n'.join(safe_text(line) for line in lines)
         self.info.buffer.cursor_position = 0
 

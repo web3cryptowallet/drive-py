@@ -19,11 +19,15 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.data_structures import Size
 from vfs import VirtualFS
-from vfs.video_preview import VideoPreview
+from vfs.video_preview import VideoPreview, video_rotation_filter
 
 spec = importlib.util.spec_from_file_location('video_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
+
+
+def abort_decoder(path, size, connection, library):
+    os._exit(23)  # Simulate a fatal libmpv assertion, not a catchable exception.
 
 
 class WorkerTests(unittest.TestCase):
@@ -38,6 +42,46 @@ class WorkerTests(unittest.TestCase):
         player.seek(1)
         player.seek(12)
         self.assertEqual(player.seeks.get_nowait(), 12)
+
+    def test_rotation_matrix_is_applied_explicitly(self):
+        for angle, expected in [(-90, 'transpose=clock,'), (90, 'transpose=cclock,'),
+                                (180, 'hflip,vflip,'), (0, '')]:
+            result = SimpleNamespace(stdout='{"streams":[{"side_data_list":[{"rotation":' + str(angle) + '}]}]}')
+            with patch('vfs.video_preview.subprocess.run', return_value=result):
+                self.assertEqual(video_rotation_filter('/video.mov'), expected)
+        with patch('vfs.video_preview.subprocess.run', side_effect=FileNotFoundError):
+            self.assertEqual(video_rotation_filter('/video.mov'), '')
+
+    @unittest.skipUnless(os.environ.get('DRIVE_TEST_VIDEO'), 'Set DRIVE_TEST_VIDEO for exact-file regression')
+    def test_exact_portrait_file_without_native_abort(self):
+        # Exercise production software decoding in an outer process; use silent
+        # audio to make this check independent of a desktop audio server.
+        code = r"""
+import ctypes.util
+import mpv
+from vfs.video_preview import _decode
+original = mpv.MPV.__init__
+def init(self, **options):
+    options['ao'] = 'null'
+    original(self, **options)
+mpv.MPV.__init__ = init
+class Connection:
+    frames = 0
+    def poll(self): return False
+    def send(self, event):
+        if event[0] == 'frame': self.frames += 1
+        if event[0] == 'error': raise RuntimeError(event[1])
+    def close(self): pass
+connection = Connection()
+import os
+_decode(os.environ['DRIVE_TEST_VIDEO'], (288, 208), connection, ctypes.util.find_library('mpv'))
+assert connection.frames >= 20, connection.frames
+print(connection.frames)
+"""
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(int(result.stdout.strip()), 20)
 
     def test_frame_serialization(self):
         tui.configure_image_terminal()
@@ -70,6 +114,7 @@ class WorkerTests(unittest.TestCase):
         browser.draw_grid_native = Mock()
         browser.screen_stack = []
         browser.video_path = '/clip.mov'
+        browser.video_dimensions = (10, 2)
         browser.video_panel_visible = Mock(return_value=True)
         browser.native_visible = False
         browser.native_drawn = None
@@ -93,6 +138,46 @@ class WorkerTests(unittest.TestCase):
         self.assertLess(second.index('SECOND'), second.index('d=I,i=731001'))
         self.assertNotIn('d=Z', second)
 
+    def test_native_frame_fits_a_shorter_viewport(self):
+        browser = object.__new__(tui.DriveBrowser)
+        browser.draw_grid_native = Mock()
+        browser.screen_stack = []
+        browser.video_path = '/portrait.mov'
+        browser.video_dimensions = (10, 20)
+        browser.video_panel_visible = Mock(return_value=True)
+        browser.native_visible = False
+        browser.native_drawn = None
+        browser.video_image_id = None
+        window = Mock()
+        window.render_info = SimpleNamespace(window_width=20, window_height=3,
+                                             input_line_to_visible_line={0: 0, 1: 1, 2: 2})
+        browser.video_area = SimpleNamespace(window=window)
+        browser.native_preview = ('\x1b_Ga=T,c=10,r=20,z=731;FRAME\x1b\\', (10, 20), 0)
+        output = Mock()
+        browser.app = SimpleNamespace(output=output, is_done=False, renderer=SimpleNamespace(
+            _last_screen=SimpleNamespace(visible_windows_to_write_positions={
+                window: WritePosition(40, 2, 20, 3)})))
+        browser.draw_native_preview(browser.app)
+        self.assertTrue(browser.native_visible)
+        self.assertIn('r=3', output.write_raw.call_args.args[0])
+        self.assertEqual(browser.native_preview[1], (1, 3))
+
+    @unittest.skipUnless(os.environ.get('DRIVE_TEST_LIBMPV'), 'Requires libmpv test library')
+    def test_native_decoder_abort_is_contained(self):
+        original = ctypes.util.find_library
+        with patch('ctypes.util.find_library', side_effect=lambda name:
+                   os.environ['DRIVE_TEST_LIBMPV'] if name == 'mpv' else original(name)):
+            import mpv
+        player = VideoPreview('/unused.mov', (40, 40), lambda image: {})
+        with patch('vfs.video_preview._decode', abort_decoder):
+            player.start()
+            player.thread.join(5)
+        self.assertFalse(player.thread.is_alive())
+        errors = []
+        while not player.events.empty():
+            errors.append(player.events.get_nowait())
+        self.assertTrue(any(kind == 'error' and '23' in message for kind, message in errors))
+
     @unittest.skipUnless(os.environ.get('DRIVE_TEST_LIBMPV') and shutil.which('ffmpeg'),
                          'Set DRIVE_TEST_LIBMPV to validate real software playback')
     def test_real_software_playback_and_cleanup(self):
@@ -103,23 +188,29 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             video = str(Path(directory) / 'test.mov')
             subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
-                            'testsrc=size=160x90:rate=10:duration=1', '-c:v', 'mpeg4',
+                            'testsrc=size=90x160:rate=10:duration=1', '-c:v', 'mpeg4',
                             '-threads', '1', video], check=True, capture_output=True)
-            player = VideoPreview(video, (160, 90), lambda image: {'dimensions': image.size})
-            player.start()
-            events = []
-            try:
-                while True:
-                    event = player.events.get(timeout=5)
-                    events.append(event)
-                    if event[0] == 'end':
-                        break
-            finally:
-                player.close()
-                player.thread.join(2)
-            self.assertFalse(player.thread.is_alive())
-            self.assertTrue(any(kind == 'frame' and value['dimensions'] == (160, 90) for kind, value in events))
-            self.assertNotIn('error', [event[0] for event in events])
+            rotated = str(Path(directory) / 'rotated.mov')
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', video, '-c', 'copy',
+                            '-metadata:s:v:0', 'rotate=90', rotated], check=True, capture_output=True)
+            for source, bounds in ((video, (160, 90)), (rotated, (95, 63))):
+                player = VideoPreview(source, bounds, lambda image: {'dimensions': image.size})
+                player.start()
+                events = []
+                try:
+                    while True:
+                        event = player.events.get(timeout=5)
+                        events.append(event)
+                        if event[0] == 'end':
+                            break
+                finally:
+                    player.close()
+                    player.thread.join(3)
+                self.assertFalse(player.thread.is_alive())
+                self.assertTrue(any(kind == 'frame' and value['dimensions'] == player.pixels
+                                    for kind, value in events))
+                self.assertNotIn('error', [event[0] for event in events])
+
 
 
 class ControlsTests(unittest.IsolatedAsyncioTestCase):
@@ -264,6 +355,12 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                     video_position = positions[browser.video_area.window]
                     play_position = positions[browser.play_button.window]
                     self.assertGreaterEqual(play_position.ypos, video_position.ypos + video_position.height)
+                    metadata_position = positions[browser.video_metadata.window]
+                    duplicates_position = positions[browser.info.window]
+                    self.assertIn('Modified:', browser.video_metadata.text)
+                    self.assertIn('Other Duplicates', browser.info.text)
+                    self.assertLess(metadata_position.ypos, video_position.ypos)
+                    self.assertGreater(duplicates_position.ypos, play_position.ypos)
                     pipe.send_text('\t\r')  # Stop button.
                     await asyncio.sleep(.04)
                     fake.close.assert_called()

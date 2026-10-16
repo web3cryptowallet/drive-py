@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.99
+drive.py v0.991
 
-v0.99 - prompt_toolkit as the main TUI, live drive scanning and file maps, context help, and saved scan state
+v0.991 - media thumbnail grids, native image previews, on-demand video playback and portrait-video fixes
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -68,7 +68,8 @@ Requires uv and generated `log-megadisks/` data.
 ./run.sh -c sqlite
 ```
 
-Uses `uv` to run `drive-tui.py` from the project directory, forwarding arguments.
+Activates the project `.venv` (creating it with `uv sync` if needed), then uses
+`uv` to run `drive-tui.py` from the project directory, forwarding arguments.
 `run.sh` defaults to SQLite; use `-c memory` for an in-memory catalog.
 Use `./run-megadisks.sh` for the generated megadisks dataset.
 
@@ -289,13 +290,6 @@ v0.98
 
 v0.99
 
-- TUI: Show the drive.py PNG logo at half size in root quick view on Kitty-compatible graphics terminals
-- TUI: Press `v` to toggle media-only (images, videos, audio) / all files; non-media files use compact gray lines only in graphics mode; directories always remain visible with normal colors
-- TUI: Select a video for a large still preview, then click **Play** (or Tab to Play and press Enter); **Stop** ends playback. Controls sit below the video; seek by clicking/scrolling the bar or focused Left/Right. Requires `python-mpv` and native `libmpv` (`sudo apt-get install libmpv2` on Ubuntu)
-- TUI: Thumbnail WebP, AVIF and additional Pillow image formats; MOV/MP4/MKV/WebM/AVI and other video thumbnails require `ffmpeg` on PATH
-- TUI: Toggle thumbnail graphics mode with `g`; `+`/`-` adjust icon display height down to one line while cached previews use 128 or 256 pixel bounds, centered and fitted, with filenames below; background workers prepare medium-quality cached JPEGs linked in the database
-- TUI: Toggle automatic quick view with `y` (default off) and image previews with `i` (default on); keep opened images stable during cursor movement
-- TUI: Press Enter on an image to show a real image in quick view via term-image AutoImage.draw() on Kitty-compatible terminals (color block fallback elsewhere), with metadata and duplicate links; Tab scrolls the pane
 - TUI: Make prompt_toolkit the main `drive-tui.py`, with `run.sh` and `run-megadisks.sh` launchers using uv
 - TUI: Accept a startup directory such as `./drive-tui.py ~` or `./run.sh ~/mypath`, including paths with spaces and configured drive aliases
 - REFACTOR: Preserve the former Textual application, views, theme, launchers, and dependent tests in `texual.removed/`
@@ -312,6 +306,23 @@ v0.99
 - TUI: Use **Shift+R** in the main view to clear the current directory's saved map and resume positions while retaining file records and checksums
 - STORAGE: Skip unchanged scanner record writes across memory, SQLite, and Redis adapters
 - PERFORMANCE: Move expert map projection and mode/order transitions off the UI thread; reduce SQLite processing overhead by grouping metadata writes and skipping empty expert checkpoints
+
+
+v0.991 — 2026-10-16
+
+- TUI: Show the drive.py PNG logo at half size in root quick view on Kitty-compatible graphics terminals
+- TUI: Press `v` to toggle media-only (images, videos, audio) / all files; non-media files use compact gray lines only in graphics mode; directories always remain visible with normal colors
+- TUI: Select a video for a large still preview, then click **Play** (or Tab to Play and press Enter); **Stop** ends playback. Video sits after Modified and before Other Duplicates, with controls below it; seek by clicking/scrolling the bar or focused Left/Right. Uses `ffprobe` (from FFmpeg) for video rotation and requires `python-mpv` and native `libmpv` (`sudo apt-get install libmpv2` on Ubuntu)
+- TUI: Thumbnail WebP, AVIF and additional Pillow image formats; MOV/MP4/MKV/WebM/AVI and other video thumbnails require `ffmpeg` on PATH
+- TUI: Toggle thumbnail graphics mode with `g`; `+`/`-` adjust icon display height down to one line while cached previews use 128 or 256 pixel bounds, centered and fitted, with filenames below; background workers prepare medium-quality cached JPEGs linked in the database
+- TUI: Toggle automatic quick view with `y` (default off) and image previews with `i` (default on); keep opened images stable during cursor movement
+- TUI: Press Enter on an image to show a real image in quick view via term-image AutoImage.draw() on Kitty-compatible terminals (color block fallback elsewhere), with metadata and duplicate links; Tab scrolls the pane
+- VIDEO: Play/Stop controls and a clickable, scrollable seek bar appear after Modified and before Other Duplicates; selecting a video loads a large still without autoplay
+- FIX: Suppress and filter Kitty graphics replies so they cannot navigate to root or toggle previews off
+- FIX: Fit native video frames to smaller terminal viewports and keep the file list usable when video controls cannot fit
+- FIX: Reduce playback blinking by displaying each new native frame before releasing the previous frame
+- FIX: Apply video rotation explicitly before scaling to fix the portrait MOV crop assertion; isolate decoding in a child process so native failures cannot terminate the browser
+- STORAGE: Cache medium-quality JPEG thumbnails at 128/256 pixel bounds, link cache IDs to source files in the database, and invalidate previews when source metadata or JPEG quality changes
 
 
 ## Recomended projects
