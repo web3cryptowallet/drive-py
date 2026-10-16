@@ -278,7 +278,9 @@ except ImportError as exc:
 from drive import load_log
 from livelog2 import LiveLog
 from vfs import VirtualFS, aliases, disabled_prefixes, format_size, prefixes, get_stat_info
+from vfs.video_preview import VideoPreview
 from vfs.paths import get_real_path
+from vfs.thumbnails import thumbnail, IMAGE_SUFFIXES, THUMBNAIL_SUFFIXES, MEDIA_SUFFIXES, VIDEO_SUFFIXES
 from vfs.scanner import (DriveScanner, FileMap, Pagination, ScanControls, ScanEntry,
                          ScanStats, ScanStore, ScanTiming)
 
@@ -318,6 +320,198 @@ def safe_text(value):
     return ''.join(c if c.isprintable() else '?' for c in str(value))
 
 
+
+
+def configure_image_terminal(probe=False):
+    """Probe before prompt_toolkit starts reading input, then cache capabilities."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='It seems this process is not running within a terminal.*', category=UserWarning)
+        from term_image import disable_queries, enable_queries
+        from term_image.image import auto_image_class
+    if probe:
+        enable_queries()
+        try:
+            auto_image_class()
+            from term_image.utils import get_cell_size
+            get_cell_size()
+        finally:
+            disable_queries()
+    else:
+        disable_queries()
+
+
+def ascii_image_preview(path, width=60, height=24, *, color=False, native=None, z_index=731):
+    """Render a bounded term-image frame; ANSI is consumed only by InfoLexer."""
+    import warnings
+    from contextlib import redirect_stdout
+    from io import StringIO
+    configure_image_terminal()
+    from term_image.image import AutoImage, BlockImage, KittyImage
+    from term_image.exceptions import TermImageError
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    width, height = max(1, min(120, width)), max(1, min(40, height))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(path) as source:
+                original_size = source.size
+                # Refuse huge decompressions, including warning-sized images.
+                if source.width * source.height > 20_000_000:
+                    return ['Image preview unavailable: image exceeds 20 megapixels.']
+                image = ImageOps.exif_transpose(source).convert('RGBA')
+                scale = min(width / image.width, height * 2 / image.height, 1)
+                target = (max(1, int(image.width * scale)),
+                          max(1, int(image.height * scale / 2)))
+                with AutoImage(image, width=target[0], height=target[1]) as preview:
+                    is_native = isinstance(preview, KittyImage) and native is not None
+                    # Graphics protocols cannot pass through the text lexer.
+                    # Other graphics styles retain the embedded block fallback.
+                    renderer = preview
+                    if not is_native and not isinstance(preview, BlockImage):
+                        renderer = BlockImage(image.copy(), width=target[0], height=target[1])
+                    try:
+                        output = StringIO()
+                        with redirect_stdout(output):
+                            options = {'method': 'whole', 'z_index': z_index, 'mix': True} if is_native else {}
+                            renderer.draw(h_align='left', pad_width=1, v_align='top',
+                                          pad_height=1, animate=False, check_size=False,
+                                          **options)
+                        art = output.getvalue().rstrip('\n')
+                        if is_native:
+                            native(art, target)
+                            return [f'Image: {original_size[0]} x {original_size[1]}',
+                                    *[' ' * target[0] for _ in range(target[1])]]
+                    finally:
+                        if renderer is not preview:
+                            renderer.close()
+                if not color:
+                    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+                    art = ''.join(text for _, text in to_formatted_text(ANSI(art)))
+                return [f'Image: {original_size[0]} x {original_size[1]}',
+                        *art.splitlines()]
+    except (OSError, ValueError, UnidentifiedImageError, TermImageError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return ['Image preview unavailable: unreadable or unsupported image.']
+
+
+def prepare_grid_thumbnail(path, file_id, size, bounds, cell_ratio):
+    """Decode, cache, fit and serialize on a worker without redirecting stdout."""
+    from PIL import Image
+    from term_image.image import AutoImage, BlockImage, KittyImage
+    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+    record = thumbnail(path, file_id, size)
+    with Image.open(record['path']) as source:
+        image = source.convert('RGB')
+    width, height = bounds
+    scale = min(width / image.width, height / (image.height * cell_ratio))
+    target = (max(1, min(width, round(image.width * scale))),
+              max(1, min(height, round(image.height * scale * cell_ratio))))
+    with AutoImage(image, width=target[0], height=target[1]) as preview:
+        if isinstance(preview, KittyImage):
+            # Public string formatting performs the same protocol serialization
+            # without draw()'s process-global stdout writes from a worker thread.
+            art = format(preview, '1.1+Wz732m1')
+            return {'record': record, 'native': (art, target), 'lines': [], 'dimensions': target}
+        if isinstance(preview, BlockImage):
+            art = str(preview)
+        else:
+            with BlockImage(image.copy(), width=target[0], height=target[1]) as fallback:
+                art = str(fallback)
+    return {'record': record, 'native': None,
+            'lines': [to_formatted_text(ANSI(line)) for line in art.splitlines()],
+            'dimensions': target}
+
+
+class KittyReplyFilter:
+    """Consume graphics APC responses before PT can turn them into app keys."""
+    def __init__(self, parser):
+        self.parser = parser
+        self.pending = ''
+
+    def feed(self, data):
+        self.pending += data
+        while self.pending:
+            start = self.pending.find('\x1b_G')
+            if start < 0:
+                keep = 2 if self.pending.endswith('\x1b_') else 1 if self.pending.endswith('\x1b') else 0
+                ready = self.pending[:-keep] if keep else self.pending
+                if ready:
+                    self.parser.feed(ready)
+                self.pending = self.pending[-keep:] if keep else ''
+                return
+            if start:
+                self.parser.feed(self.pending[:start])
+                self.pending = self.pending[start:]
+            end = self.pending.find('\x1b\\', 3)
+            if end < 0:
+                if len(self.pending) > 8192:
+                    self.pending = ''  # Bound malformed response buffering.
+                return
+            self.pending = self.pending[end + 2:]
+
+    def flush(self):
+        if self.pending and not self.pending.startswith('\x1b_G'):
+            self.parser.feed(self.pending)
+            self.pending = ''
+        self.parser.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.parser, name)
+
+
+def native_graphics_payload(art):
+    """Keep only Kitty APC packets; text-layout cursor moves must not reach the TUI."""
+    packets = re.findall(r'\x1b_G.*?\x1b\\', art, flags=re.DOTALL)
+    if not packets:
+        return ''
+    # C=1 prevents Kitty's own placement from moving the terminal cursor.
+    for index, packet in enumerate(packets):
+        header, payload = packet[3:].split(';', 1)
+        controls = [value for value in header.split(',') if not value.startswith('q=')]
+        if index == 0:
+            controls = [value for value in controls if not value.startswith('C=')]
+            controls.append('C=1')
+        controls.append('q=2')  # Suppress both successful and failed terminal replies.
+        packets[index] = '\x1b_G' + ','.join(controls) + ';' + payload
+    return ''.join(packets)
+
+
+def serialize_video_frame(image, dimensions):
+    """Serialize one software-decoded frame on the playback worker."""
+    from term_image.image import AutoImage, BlockImage, KittyImage
+    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+    width, height = dimensions
+    with AutoImage(image, width=width, height=height) as preview:
+        if isinstance(preview, KittyImage):
+            return {'native': (format(preview, '1.1+Wz731m1'), dimensions), 'lines': []}
+        if isinstance(preview, BlockImage):
+            art = str(preview)
+        else:
+            with BlockImage(image.copy(), width=width, height=height) as fallback:
+                art = str(fallback)
+    return {'native': None, 'lines': [to_formatted_text(ANSI(line)) for line in art.splitlines()]}
+
+
+def fit_filename(text, width):
+    """Keep the filename ending when a tile cannot display its full name."""
+    text = safe_text(text)
+    if get_cwidth(text) <= width:
+        return fit(text, width)
+    if width <= 1:
+        return '…'[:width]
+    suffix = []
+    used = 0
+    for char in reversed(text):
+        cells = get_cwidth(char)
+        if used + cells > width - 1:
+            break
+        suffix.append(char)
+        used += cells
+    return '…' + ' ' * (width - 1 - used) + ''.join(reversed(suffix))
+
+
 def fit(text, width):
     text = safe_text(text)
     result, used = [], 0
@@ -348,6 +542,8 @@ class FilesControl(UIControl):
 
     def create_content(self, width, height):
         browser = self.browser
+        if browser.graphics_mode:
+            return browser.grid_content(width, height, header=self.header)
         # Reserve metadata first; degrade gracefully in very small terminals.
         size_width, dups_width = browser.metadata_widths
         if width < size_width + dups_width + 5:
@@ -365,6 +561,8 @@ class FilesControl(UIControl):
             row = browser.rows[index]
             selected = index == browser.selected
             base = 'class:selected' if selected else 'class:' + row['color']
+            if row['color'] == 'muted':
+                base += ' class:muted'
             label = fit(row['label'], name_width)
             fragments = []
             if label and browser.display_mode != 3:
@@ -384,13 +582,56 @@ class FilesControl(UIControl):
             return NotImplemented
         browser = self.browser
         if event.event_type == MouseEventType.SCROLL_DOWN:
-            browser.move(3)
+            browser.move_grid_row(1) if browser.graphics_mode else browser.move(3)
         elif event.event_type == MouseEventType.SCROLL_UP:
-            browser.move(-3)
+            browser.move_grid_row(-1) if browser.graphics_mode else browser.move(-3)
         elif event.event_type == MouseEventType.MOUSE_UP:
             browser.app.layout.focus(self)
-            browser.selected = min(event.position.y, max(0, len(browser.rows) - 1))
-            browser.app.invalidate()
+            index = event.position.y
+            if browser.graphics_mode:
+                if event.position.y >= len(browser.grid_lines):
+                    return
+                entries, _, media = browser.grid_lines[event.position.y]
+                column = min(len(entries) - 1, event.position.x // browser.grid_tile_width) if media else 0
+                index = entries[column]
+            browser.select(min(index, max(0, len(browser.rows) - 1)))
+        else:
+            return NotImplemented
+
+
+class VideoSeekControl(UIControl):
+    def __init__(self, browser):
+        self.browser = browser
+        self.keys = KeyBindings()
+        for key, seconds in [('left', -5), ('right', 5)]:
+            self.keys.add(key)(lambda event, seconds=seconds: browser.seek_video(seconds, relative=True))
+        self.keys.add('home')(lambda event: browser.seek_video(0))
+        self.keys.add('end')(lambda event: browser.seek_video(browser.video_duration))
+        self.width = 1
+
+    def is_focusable(self):
+        return True
+
+    def get_key_bindings(self):
+        return self.keys
+
+    def create_content(self, width, height):
+        self.width = max(1, width - 20)
+        duration = self.browser.video_duration
+        fraction = min(1., self.browser.video_position / duration) if duration else 0
+        filled = round(fraction * self.width)
+        text = '[' + '=' * filled + '-' * (self.width - filled) + '] '
+        text += format_elapsed(self.browser.video_position) + ' / ' + format_elapsed(duration)
+        return UIContent(get_line=lambda _: [('class:header', fit(text, width))], line_count=1,
+                         show_cursor=False)
+
+    def mouse_handler(self, event):
+        browser = self.browser
+        if event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            browser.seek_video(5 if event.event_type == MouseEventType.SCROLL_UP else -5, relative=True)
+        elif event.event_type == MouseEventType.MOUSE_UP:
+            browser.app.layout.focus(self)
+            browser.seek_video(max(0., min(1., (event.position.x - 1) / self.width)) * browser.video_duration)
         else:
             return NotImplemented
 
@@ -399,9 +640,11 @@ class InfoLexer(Lexer):
     """Color only explicit status markers; filenames remain literal text."""
     def __init__(self):
         self.colors = {}
+        self.image_lines = {}
 
     def lex_document(self, document):
         colors = self.colors.copy()
+        image_lines = self.image_lines.copy()
 
         def line(index):
             if index >= len(document.lines):
@@ -409,6 +652,8 @@ class InfoLexer(Lexer):
             text = document.lines[index]
             if index == 0:
                 return [('class:selected', text)]
+            if index in image_lines:
+                return image_lines[index]
             if index in colors and text.startswith('●'):
                 return [('class:' + colors[index], text[:1]), ('', text[1:])]
             return [('', text)]
@@ -432,6 +677,47 @@ THEMES = [
 
 class DriveBrowser:
     def __init__(self, vfs, *, path=None, input=None, output=None):
+        import sys
+        configure_image_terminal(probe=output is None and sys.stdout.isatty())
+        self.native_preview = None
+        self.native_visible = False
+        self.native_drawn = None
+        self.auto_quick_view = False
+        self.image_previews = True
+        self.info_directory = True
+        self.graphics_mode = False
+        self.media_only = False
+        self.video_path = None
+        self.video_epoch = 0
+        self.video_position = 0.
+        self.video_duration = 0.
+        self.video_image_id = None
+        self.video_area = TextArea(read_only=True, wrap_lines=False, lexer=InfoLexer(),
+                                   height=lambda: Dimension(min=1, preferred=self.video_dimensions[1],
+                                                            max=self.video_dimensions[1]))
+        self.seek_control = VideoSeekControl(self)
+        self.video_player = None
+        self.video_status = ''
+        self.video_first_row = 0
+        self.video_dimensions = (1, 1)
+        self.video_task = None
+        self.video_workers = []
+        self.play_button = Button('Play', handler=self.play_video)
+        self.stop_button = Button('Stop', handler=self.stop_video)
+        self.grid_layout_key = None
+        self.grid_lines = []
+        self.grid_positions = {}
+        self.icon_size = 128
+        self.icon_lines = 8
+        self.grid_columns = 1
+        self.grid_tile_width = 14
+        self.grid_tile_height = 3
+        self.thumbnail_epoch = 0
+        self.thumbnail_task = None
+        self.thumbnail_executor = None
+        self.thumbnails = {}
+        self.grid_native_drawn = None
+        self.thumbnail_errors = 0
         self.vfs = vfs
         self.selected = 0
         self.display_mode = 1
@@ -484,18 +770,25 @@ class DriveBrowser:
         bind(['delete'], lambda event: self.queue_remove())
         bind(['s-delete'], lambda event: self.queue_remove(all_duplicates=True))
         bind(['c-x'], lambda event: self.copy_info())
-        bind(['up'], lambda event: self.move(-1), filter=files_focused)
-        bind(['down'], lambda event: self.move(1), filter=files_focused)
-        bind(['pageup'], lambda event: self.move(-self.page_size()), filter=files_focused)
-        bind(['pagedown'], lambda event: self.move(self.page_size()), filter=files_focused)
+        bind(['up'], lambda event: self.move_grid_row(-1) if self.graphics_mode else self.move(-1), filter=files_focused)
+        bind(['down'], lambda event: self.move_grid_row(1) if self.graphics_mode else self.move(1), filter=files_focused)
+        bind(['pageup'], lambda event: self.move_grid_page(-1) if self.graphics_mode else self.move(-self.page_size()), filter=files_focused)
+        bind(['pagedown'], lambda event: self.move_grid_page(1) if self.graphics_mode else self.move(self.page_size()), filter=files_focused)
         bind(['home'], lambda event: self.move(-len(self.rows)), filter=files_focused)
         bind(['end'], lambda event: self.move(len(self.rows)), filter=files_focused)
-        bind(['enter', 'right'], lambda event: self.open(), filter=files_focused)
+        bind(['enter'], lambda event: self.open(), filter=files_focused)
+        bind(['right'], lambda event: self.move(1) if self.graphics_mode else self.open(), filter=files_focused)
         bind(['escape'], lambda event: self.parent())
         bind(['backspace'], lambda event: self.parent(), eager=True)
-        bind(['left'], lambda event: self.parent(), filter=files_focused)
-        bind(['tab', 's-tab'], lambda event: event.app.layout.focus(
-            self.info if event.app.layout.has_focus(self.control) else self.control))
+        bind(['left'], lambda event: self.move(-1) if self.graphics_mode else self.parent(), filter=files_focused)
+        bind(['tab'], lambda event: self.focus_main(1))
+        bind(['s-tab'], lambda event: self.focus_main(-1))
+        bind(['g'], lambda event: self.toggle_graphics())
+        bind(['v'], lambda event: self.toggle_media_filter())
+        bind(['+', '='], lambda event: self.resize_icons(1), filter=files_focused)
+        bind(['-'], lambda event: self.resize_icons(-1), filter=files_focused)
+        bind(['y'], lambda event: self.toggle_auto_quick_view())
+        bind(['i'], lambda event: self.toggle_image_previews())
         bind(['n'], lambda event: self.cycle_mode())
         bind(['t'], lambda event: self.cycle_theme())
         bind(['f5'], lambda event: self.refresh(self.current_name()))
@@ -517,8 +810,14 @@ class DriveBrowser:
                     VSplit([
                         Window(width=1),
                         HSplit([
-                            Window(FormattedTextControl(' Info'), height=1,
+                            Window(FormattedTextControl(lambda: f' Info · y:auto {"on" if self.auto_quick_view else "off"} · i:images {"on" if self.image_previews else "off"}'), height=1,
                                    style='class:info-header'),
+                            ConditionalContainer(HSplit([
+                                self.video_area,
+                                VSplit([self.play_button, self.stop_button,
+                                        Window(FormattedTextControl(lambda: safe_text(self.video_status)), height=1)], height=1),
+                                Window(self.seek_control, height=1),
+                            ]), filter=Condition(self.video_panel_visible)),
                             self.info,
                         ]),
                         Window(width=1),
@@ -531,7 +830,416 @@ class DriveBrowser:
         self.app = Application(layout=self.main_layout,
                                key_bindings=bindings, full_screen=True, mouse_support=True,
                                style=DynamicStyle(self.style), color_depth=ColorDepth.DEPTH_24_BIT,
-                               input=input, output=output)
+                               input=input, output=output,
+                               after_render=self.draw_native_preview)
+        if hasattr(self.app.input, 'vt100_parser'):
+            self.app.input.vt100_parser = KittyReplyFilter(self.app.input.vt100_parser)
+
+    def video_panel_visible(self):
+        if not self.video_path or not hasattr(self, 'app'):
+            return False
+        size = self.app.output.get_size()
+        return size.rows >= 12 and size.columns >= 60
+
+    def focus_main(self, direction):
+        controls = [self.control, self.info]
+        if self.video_panel_visible():
+            controls.extend([self.play_button, self.stop_button, self.seek_control])
+        index = next((i for i, control in enumerate(controls)
+                      if self.app.layout.has_focus(control)), 0)
+        self.app.layout.focus(controls[(index + direction) % len(controls)])
+
+    def seek_video(self, seconds, relative=False):
+        target = self.video_position + seconds if relative else seconds
+        target = max(0., min(self.video_duration, target)) if self.video_duration else max(0., target)
+        self.video_position = target
+        if self.video_player is not None:
+            self.video_player.seek(target)
+        self.app.invalidate()
+
+    async def load_video_poster(self, path, epoch):
+        file_id = self.video_file_id
+        try:
+            from term_image.utils import get_cell_size
+            cell_width, cell_height = get_cell_size() or (8, 16)
+            item = await background_call(prepare_grid_thumbnail, path, file_id, 256,
+                                         self.video_dimensions, cell_width / cell_height)
+            if self.video_epoch != epoch or self.video_player is not None:
+                return
+            ScanStore(self.vfs.db).put('thumbnail', f'256:{file_id}', item['record'])
+            self.apply_video_frame(item)
+            self.app.invalidate()
+        except Exception as exc:
+            # Preview failures must remain local, never invoke PT's blocking
+            # background-task exception dialog while navigating the file list.
+            if self.video_epoch == epoch:
+                self.video_status = 'Still unavailable: ' + safe_text(str(exc))[:100]
+                self.app.invalidate()
+
+    def apply_video_frame(self, value):
+        if value['native']:
+            art, dimensions = value['native']
+            # Grid serialization uses its own layer; posters belong to quick view.
+            self.native_preview = (art.replace('z=732', 'z=731'), dimensions, 0)
+        else:
+            self.native_preview = None
+            self.video_area.lexer.image_lines = dict(enumerate(value['lines']))
+            self.video_area.text = '\n'.join(''.join(text for _, text in row) for row in value['lines'])
+
+    def stop_video(self):
+        if self.video_player is not None:
+            self.video_player.close()
+            self.video_player = None
+        self.video_status = 'Stopped'
+        if hasattr(self, 'app'):
+            self.app.invalidate()
+
+    def play_video(self):
+        if not self.video_path or self.video_player is not None:
+            return
+        self.video_epoch += 1  # Ignore an unfinished still-preview request.
+        width, height = self.video_dimensions
+        from term_image.utils import get_cell_size
+        cell_width, cell_height = get_cell_size() or (8, 16)
+        player = VideoPreview(self.video_path, (min(1280, width * cell_width),
+                                              min(720, height * cell_height)),
+                              lambda image: serialize_video_frame(image, (width, height)))
+        self.video_player = player
+        self.video_workers = [worker for worker in self.video_workers if worker.thread.is_alive()]
+        self.video_workers.append(player)
+        self.video_status = 'Starting…'
+        player.start()
+        if self.video_position:
+            player.seek(self.video_position)
+        self.video_task = self.app.create_background_task(self.receive_video(player))
+        self.app.invalidate()
+
+    async def receive_video(self, player):
+        from queue import Empty
+        try:
+            while self.video_player is player:
+                try:
+                    kind, value = player.events.get_nowait()
+                except Empty:
+                    await asyncio.sleep(.03)
+                    continue
+                if kind == 'error':
+                    self.video_status = value
+                elif kind == 'end':
+                    if self.video_status in ('Starting…', 'Playing'):
+                        self.video_status = 'Finished'
+                    self.video_player = None
+                    break
+                elif kind == 'frame':
+                    self.video_status = 'Playing'
+                    self.video_position = value.get('_position', self.video_position)
+                    self.video_duration = value.get('_duration', self.video_duration)
+                    self.apply_video_frame(value)
+                self.app.invalidate()
+        except Exception as exc:
+            if self.video_player is player:
+                self.video_status = 'Video preview error: ' + safe_text(str(exc))[:100]
+                self.video_player = None
+        finally:
+            player.close()
+            self.app.invalidate()
+
+    def icon_dimensions(self):
+        from term_image.utils import get_cell_size
+        cell_width, cell_height = get_cell_size() or (8, 16)
+        return (max(1, math.ceil(self.icon_lines * cell_height / cell_width)),
+                self.icon_lines)
+
+    @staticmethod
+    def is_media(row):
+        return not row['node'].is_dir and os.path.splitext(row['name'])[1].lower() in MEDIA_SUFFIXES
+
+    def toggle_media_filter(self):
+        self.media_only = not self.media_only
+        self.refresh(self.current_name())
+
+    def move_grid_row(self, direction):
+        if not self.rows or self.selected not in self.grid_positions:
+            return
+        x, y, _, _ = self.grid_positions[self.selected]
+        line = y - 1 if direction < 0 else y + 1
+        while 0 <= line < len(self.grid_lines):
+            entries = self.grid_lines[line][0]
+            if self.grid_positions[entries[0]][1] != y:
+                self.select(min(entries, key=lambda index: abs(self.grid_positions[index][0] - x)))
+                return
+            line += direction
+
+    def move_grid_page(self, direction):
+        if self.selected not in self.grid_positions:
+            return
+        x, y, _, _ = self.grid_positions[self.selected]
+        height = self.files.render_info.window_height if self.files.render_info else 10
+        target = max(0, min(len(self.grid_lines) - 1, y + direction * height))
+        entries = self.grid_lines[target][0]
+        self.select(min(entries, key=lambda index: abs(self.grid_positions[index][0] - x)))
+
+    def toggle_graphics(self):
+        self.graphics_mode = not self.graphics_mode
+        self.start_thumbnails()
+        self.app.invalidate()
+
+    def resize_icons(self, direction):
+        if not self.graphics_mode:
+            return
+        from term_image.utils import get_cell_size
+        _, cell_height = get_cell_size() or (8, 16)
+        lines = max(1, min(max(1, 256 // cell_height), self.icon_lines + direction))
+        if lines != self.icon_lines:
+            self.icon_lines = lines
+            # Keep JPEG resolution independent from the display zoom.
+            self.icon_size = 128 if lines * cell_height <= 128 else 256
+            self.start_thumbnails()
+            self.app.invalidate()
+
+    def start_thumbnails(self):
+        self.thumbnail_epoch += 1
+        self.thumbnails = {}
+        self.thumbnail_errors = 0
+        if self.thumbnail_task is not None and not self.thumbnail_task.done():
+            return  # Existing worker finishes its current conversion, then restarts.
+        if not self.graphics_mode or not self.image_previews or self.app.is_done:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self.thumbnail_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self.thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drive-thumbnails')
+        self.thumbnail_task = self.app.create_background_task(self.generate_thumbnails())
+
+    async def generate_thumbnails(self):
+        from term_image.exceptions import TermImageError
+        epoch = self.thumbnail_epoch
+        size = self.icon_size
+        icon_width, icon_height = self.icon_dimensions()
+        dimensions = (max(14, icon_width + 2) - 2, icon_height)
+        from term_image.utils import get_cell_size
+        cell_width, cell_height = get_cell_size() or (8, 16)
+        cell_ratio = cell_width / cell_height
+        store = ScanStore(self.vfs.db)
+        try:
+            for row in list(self.rows):
+                if epoch != self.thumbnail_epoch or not self.graphics_mode or not self.image_previews:
+                    break
+                node = row['node']
+                if node.is_dir or os.path.splitext(node.name)[1].lower() not in THUMBNAIL_SUFFIXES:
+                    continue
+                try:
+                    item = await asyncio.get_running_loop().run_in_executor(
+                        self.thumbnail_executor, prepare_grid_thumbnail, get_real_path(node.id),
+                        node.id, size, dimensions, cell_ratio)
+                    if epoch != self.thumbnail_epoch:
+                        break
+                    # Attach only complete worker results; keep DB writes on UI thread.
+                    store.put('thumbnail', f'{size}:{node.id}', item['record'])
+                    self.thumbnails[node.id] = item
+                except (OSError, ValueError, Warning, TermImageError):
+                    self.thumbnail_errors += 1
+                    self.thumbnails[node.id] = {'native': None, 'lines': [],
+                                                'dimensions': (0, 0), 'failed': True}
+                self.app.invalidate()  # Append the finished icon without reordering files.
+                await asyncio.sleep(0)
+        finally:
+            self.thumbnail_task = None
+            if self.app.is_done or not self.graphics_mode or not self.image_previews:
+                if self.thumbnail_executor is not None:
+                    self.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
+                    self.thumbnail_executor = None
+            if epoch != self.thumbnail_epoch and self.graphics_mode and self.image_previews and not self.app.is_done:
+                self.start_thumbnails()
+
+    def grid_content(self, width, height, header=False):
+        icon_width, icon_height = self.icon_dimensions()
+        self.grid_tile_width = max(14, icon_width + 2)
+        self.grid_tile_height = icon_height + 2
+        self.grid_columns = max(1, width // self.grid_tile_width)
+        columns, tile_width, tile_height = self.grid_columns, self.grid_tile_width, self.grid_tile_height
+        key = (id(self.rows), len(self.rows), width, columns, tile_width, tile_height)
+        if self.grid_layout_key != key:
+            self.grid_lines, self.grid_positions = [], {}
+            pending = []
+            def flush():
+                if not pending:
+                    return
+                first = len(self.grid_lines)
+                entries = pending.copy()
+                for column, index in enumerate(entries):
+                    self.grid_positions[index] = (column * tile_width, first, tile_width, True)
+                self.grid_lines.extend((entries, offset, True) for offset in range(tile_height))
+                pending.clear()
+            for index, row in enumerate(self.rows):
+                if self.is_media(row):
+                    pending.append(index)
+                    if len(pending) == columns:
+                        flush()
+                else:
+                    flush()
+                    self.grid_positions[index] = (0, len(self.grid_lines), width, False)
+                    self.grid_lines.append(([index], 0, False))
+            flush()
+            self.grid_layout_key = key
+        if header:
+            title = f' Graphics {"media" if self.media_only else "all"} · {self.icon_lines} lines · cache {self.icon_size}x{self.icon_size} · {len(self.thumbnails)} previews'
+            if self.thumbnail_errors:
+                title += f' · {self.thumbnail_errors} unavailable'
+            return UIContent(get_line=lambda _: [('class:table-header', fit(title, width))], line_count=1)
+
+        def line(index):
+            if not self.grid_lines:
+                return [('', '(empty)')]
+            entries, subrow, media = self.grid_lines[index]
+            if not media:
+                row = self.rows[entries[0]]
+                style = 'class:selected' if entries[0] == self.selected else 'class:' + row['color']
+                if not row['node'].is_dir:
+                    style += ' class:muted'
+                return [(style, ' ' + fit_filename(row['name'], max(0, width - 1)))]
+            fragments = []
+            for entry in entries:
+                row = self.rows[entry]
+                style = 'class:selected' if entry == self.selected else 'class:' + row['color']
+                item = self.thumbnails.get(row['node'].id) if self.image_previews else None
+                if subrow == icon_height:
+                    fragments.append((style, ' ' + fit_filename(row['name'], tile_width - 2) + ' '))
+                elif subrow < icon_height:
+                    image_width, image_height = item['dimensions'] if item else (0, 0)
+                    top = (icon_height - image_height) // 2
+                    left = (tile_width - image_width) // 2
+                    image_row = subrow - top
+                    if item and not item['native'] and 0 <= image_row < len(item['lines']):
+                        image_line = item['lines'][image_row]
+                        used = sum(get_cwidth(text) for _, text in image_line)
+                        fragments.append((style, ' ' * left))
+                        fragments.extend((style + ' ' + color, text) for color, text in image_line)
+                        fragments.append((style, ' ' * max(0, tile_width - left - used)))
+                    else:
+                        eligible = (not row['node'].is_dir and
+                                    os.path.splitext(row['name'])[1].lower() in THUMBNAIL_SUFFIXES)
+                        pending = self.image_previews and eligible and item is None
+                        label = '.' if pending and subrow == icon_height // 2 else ''
+                        fragments.append((style, fit(label.center(tile_width), tile_width)))
+                else:
+                    fragments.append((style, ' ' * tile_width))
+            return fragments or [('', '(empty)')]
+
+        x, y, _, _ = self.grid_positions.get(self.selected, (0, 0, 0, False))
+        return UIContent(get_line=line, line_count=max(1, len(self.grid_lines)),
+                         cursor_position=Point(x=x, y=y), show_cursor=False)
+
+    def clear_grid_native(self):
+        if getattr(self, 'grid_native_drawn', None):
+            self.app.output.write_raw('\x1b_Ga=d,d=Z,z=732,q=2;\x1b\\')
+            self.app.output.flush()
+        self.grid_native_drawn = None
+
+    def draw_grid_native(self, app):
+        if not getattr(self, 'graphics_mode', False) or not self.image_previews or self.screen_stack or app.is_done:
+            self.clear_grid_native()
+            return
+        render = self.files.render_info
+        screen = app.renderer._last_screen
+        position = screen.visible_windows_to_write_positions.get(self.files) if screen else None
+        if not render or not position:
+            self.clear_grid_native()
+            return
+        overlays = []
+        visible_inputs = render.input_line_to_visible_line
+        visible_entries = set()
+        for line in visible_inputs:
+            if 0 <= line < len(self.grid_lines):
+                visible_entries.update(self.grid_lines[line][0])
+        for index in sorted(visible_entries):
+            row = self.rows[index]
+            item = self.thumbnails.get(row['node'].id)
+            if not item or not item['native']:
+                continue
+            art, (width, height) = item['native']
+            icon_height = self.grid_tile_height - 2
+            top = (icon_height - height) // 2
+            tile_x, tile_y, _, _ = self.grid_positions[index]
+            first = tile_y + top
+            visible = [render.input_line_to_visible_line.get(first + offset) for offset in range(height)]
+            x = tile_x + (self.grid_tile_width - width) // 2
+            if (any(y is None for y in visible) or visible[-1] >= render.window_height
+                    or x + width > render.window_width - 1):
+                continue
+            overlays.append((art, position.xpos + x, position.ypos + visible[0]))
+        signature = tuple((id(art), x, y) for art, x, y in overlays)
+        if signature == self.grid_native_drawn:
+            return
+        self.clear_grid_native()
+        if overlays:
+            app.output.write_raw('\x1b7' + ''.join(f'\x1b[{y+1};{x+1}H' + native_graphics_payload(art) for art, x, y in overlays) + '\x1b8')
+            app.output.flush()
+            self.grid_native_drawn = signature
+
+
+    def clear_native_preview(self):
+        if self.native_visible:
+            # Delete only this pane's Kitty z-index, retaining other graphics.
+            self.app.output.write_raw('\x1b_Ga=d,d=Z,z=731,q=2;\x1b\\')
+            self.app.output.flush()
+            self.native_visible = False
+        self.native_drawn = None
+        self.video_image_id = None
+
+    def draw_native_preview(self, app):
+        self.draw_grid_native(app)
+        if (getattr(self, 'video_path', None) and not self.video_panel_visible()
+                and any(app.layout.has_focus(control)
+                        for control in (self.play_button, self.stop_button, self.seek_control))):
+            app.layout.focus(self.control)
+        if app.is_done:
+            self.stop_video()
+        if self.screen_stack or not self.native_preview or app.is_done:
+            self.clear_native_preview()
+            return
+        art, (width, height), first_row = self.native_preview
+        window = self.video_area.window if getattr(self, 'video_path', None) else self.info.window
+        render = window.render_info
+        screen = app.renderer._last_screen
+        position = screen.visible_windows_to_write_positions.get(window) if screen else None
+        if not render or not position or width > render.window_width - 1:
+            self.clear_native_preview()
+            return
+        # Only draw when all reserved image rows are visible. This avoids
+        # graphics spilling into borders/metadata during scrolling or resize.
+        rows = [render.input_line_to_visible_line.get(first_row + offset)
+                for offset in range(height)]
+        if any(row is None for row in rows) or rows != list(range(rows[0], rows[0] + height)):
+            self.clear_native_preview()
+            return
+        if rows[-1] >= render.window_height:
+            self.clear_native_preview()
+            return
+        placement = (id(art), position.xpos, position.ypos + rows[0], width, height)
+        if self.native_visible and self.native_drawn == placement:
+            return
+        art = native_graphics_payload(art)
+        video = bool(getattr(self, 'video_path', None))
+        previous_id = getattr(self, 'video_image_id', None)
+        if video:
+            image_id = 731002 if previous_id == 731001 else 731001
+            art = art.replace('\x1b_G', f'\x1b_Gi={image_id},', 1)
+            # Transmit/display the next frame before releasing the previous one.
+            # Never clear the video layer between frames.
+            cleanup = f'\x1b_Ga=d,d=I,i={previous_id},q=2;\x1b\\' if previous_id else ''
+            self.video_image_id = image_id
+        else:
+            self.clear_native_preview()
+            cleanup = ''
+        app.output.write_raw('\x1b7' + f'\x1b[{position.ypos + rows[0] + 1};{position.xpos + 1}H'
+                             + art + cleanup + '\x1b8')
+        app.output.flush()
+        self.native_visible = True
+        self.native_drawn = placement
 
     def style(self):
         # A new Style on each render changes its invalidation hash and forces
@@ -540,7 +1248,7 @@ class DriveBrowser:
 
     def column_header(self):
         name, size, dups = self.columns
-        return [('class:table-header', fit('Name', name) + ' ' + fit(' Size', size) + ' ' + fit(' Dups', dups))]
+        return [('class:table-header', fit('Media' if self.media_only else 'Name', name) + ' ' + fit(' Size', size) + ' ' + fit(' Dups', dups))]
 
     def current_name(self):
         return self.rows[self.selected]['name'] if self.rows else None
@@ -552,6 +1260,9 @@ class DriveBrowser:
             entries.insert(0, ('..', parent))
         self.rows = []
         for name, node in entries:
+            media = not node.is_dir and os.path.splitext(name)[1].lower() in MEDIA_SUFFIXES
+            if self.media_only and not node.is_dir and not media:
+                continue
             status = node.info.get('status', 'tracked') if name != '..' else 'tracked'
             exists = self.vfs.get_full_info(node, True).get('exists', False)
             indicator = 'green' if exists else 'red'
@@ -564,18 +1275,46 @@ class DriveBrowser:
                                   label=f'{marker} {"📁" if node.is_dir else "📄"} {name}',
                                   size=format_size(node.size, int(not node.is_dir)).strip(),
                                   dups=f'({count})'))
+        self.grid_layout_key = None
+        self.grid_positions = {}
         self.metadata_widths = (max([4] + [len(row['size']) for row in self.rows]) + 1,
                                 max([4] + [len(row['dups']) for row in self.rows]) + 3)
         self.selected = next((i for i, row in enumerate(self.rows) if row['name'] == target), 0)
-        self.show_info(directory=True)
+        self.show_info(directory=not self.auto_quick_view or self.current_name() == '..')
         if hasattr(self, 'app'):
+            self.start_thumbnails()
             self.app.invalidate()
 
     def page_size(self):
+        if self.graphics_mode:
+            height = self.files.render_info.window_height if self.files.render_info else 10
+            return max(1, height // self.grid_tile_height) * self.grid_columns
         return max(1, self.files.render_info.window_height - 1) if self.files.render_info else 10
 
+    def select(self, index):
+        selected = max(0, min(max(0, len(self.rows) - 1), index))
+        if selected != self.selected:
+            self.selected = selected
+            row = self.rows[self.selected]
+            if (self.auto_quick_view or
+                    (not row['node'].is_dir and os.path.splitext(row['name'])[1].lower() in VIDEO_SUFFIXES) or
+                    (self.graphics_mode and self.is_media(row))):
+                self.show_info(directory=self.current_name() == '..')
+        self.app.invalidate()
+
     def move(self, delta):
-        self.selected = max(0, min(max(0, len(self.rows) - 1), self.selected + delta))
+        self.select(self.selected + delta)
+
+    def toggle_auto_quick_view(self):
+        self.auto_quick_view = not self.auto_quick_view
+        if self.auto_quick_view:
+            self.show_info(directory=self.current_name() == '..')
+        self.app.invalidate()
+
+    def toggle_image_previews(self):
+        self.image_previews = not self.image_previews
+        self.show_info(directory=self.info_directory)
+        self.start_thumbnails()
         self.app.invalidate()
 
     def open(self):
@@ -608,12 +1347,40 @@ class DriveBrowser:
         self.app.invalidate()
 
     def show_info(self, directory=False):
+        self.stop_video()
+        self.video_epoch += 1
+        self.video_position = self.video_duration = 0.
+        self.video_path = None
+        if hasattr(self, 'app') and any(self.app.layout.has_focus(control)
+                                       for control in (self.play_button, self.stop_button, self.seek_control)):
+            self.app.layout.focus(self.control)
+        self.info_directory = directory
+        self.native_preview = None
         self.info_lexer.colors = {}
+        self.info_lexer.image_lines = {}
         self.info_paths = {}
         if directory and self.vfs.pwd() == "/":
             lines = ["/", "╭────────╮  drive.py v0.98", "│ ━━━━ ● │  File Manager",
                      "╰────────╯  Explore • Compare • Keep", "", "h: Open help view", "",
                      *main_help(self.display_mode)]
+            from term_image.image import KittyImage, auto_image_class
+            if self.image_previews and issubclass(auto_image_class(), KittyImage):
+                render = self.info.window.render_info
+                width = max(1, (render.window_width - 1) // 2) if render else 18
+                height = max(1, (render.window_height - 10) // 2) if render else 7
+
+                def native_logo(art, dimensions):
+                    self.native_preview = (art, dimensions, 1)
+
+                logo = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    'assets', 'info-logo.png')
+                preview_lines = ascii_image_preview(logo, width, height,
+                                                   color=True, native=native_logo)
+                if self.native_preview:
+                    # Keep the title/help below the real logo; no block fallback.
+                    lines = ['/', *preview_lines[1:], '', 'drive.py — File Manager',
+                             'Explore • Compare • Keep', '', 'h: Open help view', '',
+                             *main_help(self.display_mode)]
             self.info.lexer = MarkupLexer()
             self.info.text = plain_markup("\n".join(lines))
             self.info.lexer.fragments = markup_lines(lines)
@@ -642,6 +1409,38 @@ class DriveBrowser:
                  'Modified: ' + timestamp('modified')]
         if not node.is_dir:
             lines.insert(2, 'Name: ' + node.name)
+            if os.path.splitext(node.name)[1].lower() in VIDEO_SUFFIXES:
+                self.video_file_id = node.id
+                self.video_path = os.path.abspath(get_real_path(node.id))
+                self.video_status = 'Press Play'
+                render = self.info.window.render_info
+                width = max(1, min(80, render.window_width - 1)) if render else 36
+                height = max(1, min(30, self.app.output.get_size().rows - 11)) if hasattr(self, 'app') else 10
+                self.video_dimensions = (width, height)
+                self.video_first_row = 0
+                self.video_area.lexer.image_lines = {}
+                self.video_area.text = '\n'.join([' ' * width] * height)
+                if hasattr(self, 'app') and self.image_previews:
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        pass
+                    else:
+                        self.app.create_background_task(self.load_video_poster(self.video_path, self.video_epoch))
+            if self.image_previews and os.path.splitext(node.name)[1].lower() in IMAGE_SUFFIXES:
+                render = self.info.window.render_info
+                width = max(1, render.window_width - 1) if render else 36
+                height = max(1, render.window_height - 10) if render else 14
+                from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+                lines.append('')
+                def native(art, dimensions):
+                    self.native_preview = (art, dimensions, len(lines) + 1)
+                for image_line in ascii_image_preview(get_real_path(node.id), width, height,
+                                                       color=True, native=native):
+                    fragments = to_formatted_text(ANSI(image_line))
+                    self.info_lexer.image_lines[len(lines)] = fragments
+                    lines.append(''.join(text for _, text in fragments))
+                lines.append('')
             hashes = node.info.get('hashinfo') or ''
             lines.extend([', '.join(sorted(hashes)) if isinstance(hashes, set) else str(hashes), '',
                           f'Other Duplicates ({len(info.get("dups", []))}):'])
@@ -655,6 +1454,7 @@ class DriveBrowser:
         self.info.buffer.cursor_position = 0
 
     def push(self, screen):
+        self.stop_video()
         self.screen_stack.append((screen, self.app.layout))
         self.app.layout = Layout(screen.container, focused_element=screen.focus)
         screen.start()
@@ -668,12 +1468,17 @@ class DriveBrowser:
         self.app.invalidate()
 
     def reset_current_map(self):
+        self.video_epoch += 1
+        self.stop_video()
+        self.video_path = None
+        self.native_preview = None
         path = self.vfs.pwd().rstrip('/') or '/'
         store = ScanStore(self.vfs.db)
         store.delete('map', path)
         store.delete('position', path)
         self.info_paths = {}
         self.info_lexer.colors = {}
+        self.info_lexer.image_lines = {}
         self.info.lexer = self.info_lexer
         self.info.text = safe_text(path) + '\n\nSaved map and scan resume positions cleared.'
         self.info.buffer.cursor_position = 0
@@ -741,6 +1546,15 @@ class DriveBrowser:
         try:
             self.app.run()
         finally:
+            self.stop_video()
+            for player in self.video_workers:
+                player.thread.join(timeout=2)
+            self.clear_native_preview()
+            self.clear_grid_native()
+            self.thumbnail_epoch += 1
+            if self.thumbnail_executor is not None:
+                self.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
+                self.thumbnail_executor = None
             # Cancellation also wakes queue-backpressured workers before closing SQLite.
             for scanner in self.scanners:
                 scanner.stop.set()
@@ -782,7 +1596,12 @@ def main_help(display_mode):
         '[red]D[/red] Deleted',
         '', '[bold]Shortcuts[/bold]',
         '[#ff8800]h / Esc[/#ff8800] (in help): Close help',
-        '[#ff8800]Enter[/#ff8800]: Open directory or view file info',
+        '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',
+        'Video quick view: Play / Stop below video; seek bar click/wheel or focused Left/Right (5s)',
+        '[#ff8800]v[/#ff8800]: Toggle media files only / all (images, videos and audio)',
+        '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; +/- display height (minimum 1 line), cache 128/256 pixels',
+        '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
+        '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
         '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
         '[#ff8800]Arrows / Page Up / Page Down[/#ff8800]: Navigate the focused table',
         '[#ff8800]Ctrl+X[/#ff8800]: Copy info panel text to clipboard',

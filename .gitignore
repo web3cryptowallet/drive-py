@@ -29,3 +29,5 @@ TRANSPLIT.md
 
 pack.sh
 
+.cache
+profile.*

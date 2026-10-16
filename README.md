@@ -81,7 +81,7 @@ Pass an optional startup directory, including `~`, relative paths or paths with 
 ./run.sh "/path/with spaces"
 ```
 
-Direct execution requires prompt_toolkit in the Python environment (for example,
+Direct execution requires prompt_toolkit, term-image and Pillow in the Python environment (for example,
 activate `.venv` first); `run.sh` manages dependencies through uv. Without a path,
 the browser starts in the process's current directory. The positional path changes
 only the browsing location; config, log discovery and SQLite cache resolution
@@ -289,6 +289,13 @@ v0.98
 
 v0.99
 
+- TUI: Show the drive.py PNG logo at half size in root quick view on Kitty-compatible graphics terminals
+- TUI: Press `v` to toggle media-only (images, videos, audio) / all files; non-media files use compact gray lines only in graphics mode; directories always remain visible with normal colors
+- TUI: Select a video for a large still preview, then click **Play** (or Tab to Play and press Enter); **Stop** ends playback. Controls sit below the video; seek by clicking/scrolling the bar or focused Left/Right. Requires `python-mpv` and native `libmpv` (`sudo apt-get install libmpv2` on Ubuntu)
+- TUI: Thumbnail WebP, AVIF and additional Pillow image formats; MOV/MP4/MKV/WebM/AVI and other video thumbnails require `ffmpeg` on PATH
+- TUI: Toggle thumbnail graphics mode with `g`; `+`/`-` adjust icon display height down to one line while cached previews use 128 or 256 pixel bounds, centered and fitted, with filenames below; background workers prepare medium-quality cached JPEGs linked in the database
+- TUI: Toggle automatic quick view with `y` (default off) and image previews with `i` (default on); keep opened images stable during cursor movement
+- TUI: Press Enter on an image to show a real image in quick view via term-image AutoImage.draw() on Kitty-compatible terminals (color block fallback elsewhere), with metadata and duplicate links; Tab scrolls the pane
 - TUI: Make prompt_toolkit the main `drive-tui.py`, with `run.sh` and `run-megadisks.sh` launchers using uv
 - TUI: Accept a startup directory such as `./drive-tui.py ~` or `./run.sh ~/mypath`, including paths with spaces and configured drive aliases
 - REFACTOR: Preserve the former Textual application, views, theme, launchers, and dependent tests in `texual.removed/`
