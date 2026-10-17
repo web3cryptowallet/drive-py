@@ -244,6 +244,7 @@ import base64
 from collections import OrderedDict
 from dataclasses import asdict, replace
 import math
+import json
 from queue import Empty, Queue
 import random
 import re
@@ -563,7 +564,10 @@ class FilesControl(UIControl):
             base = 'class:selected' if selected else 'class:' + row['color']
             if row['color'] == 'muted':
                 base += ' class:muted'
-            label = fit(row['label'], name_width)
+            label = row['label']
+            if browser.bookmark_path(row) in browser.bookmarks:
+                label = label[:2] + 'B ' + label[2:]
+            label = fit(label, name_width)
             fragments = []
             if label and browser.display_mode != 3:
                 fragments.append((base + ' class:' + row['indicator'], label[0]))
@@ -675,6 +679,30 @@ THEMES = [
 ]
 
 
+BOOKMARKS_PATH = Path(".bookmarks.json")
+
+
+def normalize_bookmark_path(path):
+    """Use configured VFS identity for aliases, mount paths and report prefixes."""
+    path = os.path.normpath(os.path.expanduser(path))
+    if not path.startswith('/'):
+        return path
+    # An explicit alias is authoritative, including aliases such as /root.
+    for alias in aliases:
+        virtual = '/' + alias.strip('/')
+        if path == virtual or path.startswith(virtual + '/'):
+            return path
+    mappings = [(os.path.abspath(os.path.expanduser(local)), alias)
+                for alias, local in aliases.items() if local != '0']
+    mappings.extend(('/' + prefix.strip('/'), mapping['alias'])
+                    for prefix, mapping in prefixes.items() if mapping.get('local') != '0')
+    for prefix, alias in sorted(mappings, key=lambda item: len(item[0]), reverse=True):
+        prefix = prefix.rstrip('/')
+        if path == prefix or path.startswith(prefix + '/'):
+            return '/' + alias.strip('/') + path[len(prefix):]
+    return path
+
+
 class DriveBrowser:
     def __init__(self, vfs, *, path=None, input=None, output=None):
         import sys
@@ -739,6 +767,22 @@ class DriveBrowser:
         self.history = []
         self.screen_stack = []
         self.actions = []
+        self.bookmark_index = 0
+        try:
+            saved = json.loads(BOOKMARKS_PATH.read_text(encoding='utf-8'))
+            if isinstance(saved, dict):
+                index = saved.get('selected_index', 0)
+                self.bookmark_index = index if type(index) is int else 0
+                saved = saved.get('bookmarks', [])
+            paths = [normalize_bookmark_path(path) for path in saved
+                     if isinstance(path, str) and path.startswith('/')] if isinstance(saved, list) else []
+            selected_path = paths[max(0, min(self.bookmark_index, len(paths) - 1))] if paths else None
+            self.bookmarks = list(dict.fromkeys(paths))
+            self.bookmark_index = self.bookmarks.index(selected_path) if selected_path is not None else 0
+        except (OSError, ValueError):
+            self.bookmarks = []
+        self.bookmark_index = max(0, min(self.bookmark_index, len(self.bookmarks) - 1))
+        self.pending_bookmark = None
         self.info_paths = {}
         self.scanners = []
         self.columns = (20, 8, 4)
@@ -750,6 +794,7 @@ class DriveBrowser:
         self.info = TextArea(read_only=True, scrollbar=True, wrap_lines=True,
                              lexer=self.info_lexer)
         self.info.window.right_margins = [ScrollbarMargin()]
+        self.info.window.cursorline = has_focus(self.info)
         if path is None:
             self.vfs.start_in_current_directory()
         else:
@@ -764,6 +809,8 @@ class DriveBrowser:
             for key in keys:
                 bindings.add(key, filter=main_focused & (kwargs_filter if kwargs_filter is not None else Condition(lambda: True)), **kwargs)(handler)
 
+        bindings.add('b', eager=True)(lambda event: self.toggle_bookmark())
+        bindings.add('j', eager=True)(lambda event: self.push(BookmarksView(self)))
         bindings.add('q', eager=True)(lambda event: event.app.exit())
         bindings.add('c-c')(lambda event: event.app.exit())
         bind(['a'], lambda event: self.push(ActionsView(self)))
@@ -787,6 +834,7 @@ class DriveBrowser:
         bind(['tab'], lambda event: self.focus_main(1))
         bind(['s-tab'], lambda event: self.focus_main(-1))
         bind(['g'], lambda event: self.toggle_graphics())
+        bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
         bind(['v'], lambda event: self.toggle_media_filter())
         bind(['+', '='], lambda event: self.resize_icons(1), filter=files_focused)
         bind(['-'], lambda event: self.resize_icons(-1), filter=files_focused)
@@ -1105,14 +1153,16 @@ class DriveBrowser:
                 style = 'class:selected' if entries[0] == self.selected else 'class:' + row['color']
                 if not row['node'].is_dir:
                     style += ' class:muted'
-                return [(style, ' ' + fit_filename(row['name'], max(0, width - 1)))]
+                prefix = ' B ' if self.bookmark_path(row) in self.bookmarks else ' '
+                return [(style, prefix + fit_filename(row['name'], max(0, width - len(prefix))))]
             fragments = []
             for entry in entries:
                 row = self.rows[entry]
                 style = 'class:selected' if entry == self.selected else 'class:' + row['color']
                 item = self.thumbnails.get(row['node'].id) if self.image_previews else None
                 if subrow == icon_height:
-                    fragments.append((style, ' ' + fit_filename(row['name'], tile_width - 2) + ' '))
+                    prefix = ' B ' if self.bookmark_path(row) in self.bookmarks else ' '
+                    fragments.append((style, prefix + fit_filename(row['name'], max(0, tile_width - len(prefix) - 1)) + ' '))
                 elif subrow < icon_height:
                     image_width, image_height = item['dimensions'] if item else (0, 0)
                     top = (icon_height - image_height) // 2
@@ -1206,10 +1256,10 @@ class DriveBrowser:
         if (getattr(self, 'video_path', None) and not self.video_panel_visible()
                 and any(app.layout.has_focus(control)
                         for control in (self.play_button, self.stop_button, self.seek_control))):
-            app.layout.focus(self.control)
+            app.layout.focus(self.screen_stack[-1][0].table if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView) else self.control)
         if app.is_done:
             self.stop_video()
-        if self.screen_stack or not self.native_preview or app.is_done:
+        if (self.screen_stack and not isinstance(self.screen_stack[-1][0], BookmarksView)) or not self.native_preview or app.is_done:
             self.clear_native_preview()
             return
         art, (width, height), first_row = self.native_preview
@@ -1319,7 +1369,7 @@ class DriveBrowser:
         if selected != self.selected:
             self.selected = selected
             row = self.rows[self.selected]
-            if (self.auto_quick_view or
+            if self.video_player is None and (self.auto_quick_view or
                     (not row['node'].is_dir and os.path.splitext(row['name'])[1].lower() in VIDEO_SUFFIXES) or
                     (self.graphics_mode and self.is_media(row))):
                 self.show_info(directory=self.current_name() == '..')
@@ -1369,21 +1419,21 @@ class DriveBrowser:
         self.theme = (self.theme + 1) % len(THEMES)
         self.app.invalidate()
 
-    def show_info(self, directory=False):
+    def show_info(self, directory=False, preview_node=None):
         self.stop_video()
         self.video_epoch += 1
         self.video_position = self.video_duration = 0.
         self.video_path = None
         if hasattr(self, 'app') and any(self.app.layout.has_focus(control)
                                        for control in (self.play_button, self.stop_button, self.seek_control)):
-            self.app.layout.focus(self.control)
+            self.app.layout.focus(self.screen_stack[-1][0].table if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView) else self.control)
         self.info_directory = directory
         self.native_preview = None
         self.info_lexer.colors = {}
         self.info_lexer.image_lines = {}
         self.info_paths = {}
         if directory and self.vfs.pwd() == "/":
-            lines = ["/", "╭────────╮  drive.py v0.991", "│ ━━━━ ● │  File Manager",
+            lines = ["/", "╭────────╮  drive.py v0.992", "│ ━━━━ ● │  File Manager",
                      "╰────────╯  Explore • Compare • Keep", "", "h: Open help view", "",
                      *main_help(self.display_mode)]
             from term_image.image import KittyImage, auto_image_class
@@ -1410,11 +1460,11 @@ class DriveBrowser:
             self.info.buffer.cursor_position = 0
             return
         self.info.lexer = self.info_lexer
-        if not self.rows and not directory:
+        if not self.rows and not directory and preview_node is None:
             self.info.text = self.vfs.pwd() + '\n\nNo files.'
             return
         row = self.rows[self.selected] if self.rows else None
-        node = self.vfs.get_cwd() if directory else row['node']
+        node = preview_node if preview_node is not None else (self.vfs.get_cwd() if directory else row['node'])
         info = self.vfs.get_full_info(node)
 
         def timestamp(key):
@@ -1425,7 +1475,7 @@ class DriveBrowser:
                 return ''
 
         self.info_lexer.colors[1] = (
-            'green' if info.get('exists') else 'red') if directory else row['indicator']
+            'green' if info.get('exists') else 'red') if directory or preview_node is not None else row['indicator']
         size = format_size(node.size, 0).strip()
         lines = [node.id or '/', '●', 'Size:   ' + size,
                  'Created:  ' + timestamp('created'),
@@ -1486,6 +1536,88 @@ class DriveBrowser:
         self.info.text = '\n'.join(safe_text(line) for line in lines)
         self.info.buffer.cursor_position = 0
 
+    def bookmark_path(self, row):
+        # The parent-navigation row represents the current directory for bookmarks.
+        return normalize_bookmark_path(self.vfs.pwd() if row['name'] == '..' else row['node'].id)
+
+    def save_bookmarks(self):
+        temporary = BOOKMARKS_PATH.with_suffix('.json.tmp')
+        self.bookmark_index = max(0, min(self.bookmark_index, len(self.bookmarks) - 1))
+        state = {'bookmarks': self.bookmarks, 'selected_index': self.bookmark_index}
+        temporary.write_text(json.dumps(state, ensure_ascii=False) + '\n', encoding='utf-8')
+        temporary.replace(BOOKMARKS_PATH)
+
+    def toggle_bookmark(self):
+        if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView):
+            self.screen_stack[-1][0].remove()
+            return
+        path = None
+        for screen, _ in reversed(self.screen_stack):
+            if isinstance(screen, ScannerView) and screen.detail_ids:
+                entry = screen.model.entries[screen.detail_ids[screen.details.index]]
+                path = entry.path
+                break
+        if path is None:
+            if self.main_layout.has_focus(self.info):
+                path = self.info_paths.get(self.info.buffer.document.cursor_position_row)
+            elif self.rows:
+                path = self.bookmark_path(self.rows[self.selected])
+        path = normalize_bookmark_path(path or self.vfs.pwd())
+        if path in self.bookmarks:
+            self.bookmarks.remove(path)
+        else:
+            self.bookmarks.append(path)
+        self.save_bookmarks()
+        for screen, _ in self.screen_stack:
+            if isinstance(screen, BookmarksView):
+                screen.refresh()
+        self.app.invalidate()
+
+    def go_bookmark(self, index):
+        if 0 <= index < len(self.bookmarks):
+            path = normalize_bookmark_path(self.bookmarks[index])
+            if self.vfs.get_from_path(path) is None:
+                if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView):
+                    self.screen_stack[-1][0].details.text = (safe_text(path) +
+                        '\nBookmark unavailable. Check the drive mapping in config.sh or edit its path.')
+                return
+            self.bookmarks[index] = path
+            self.bookmark_index = index
+            self.save_bookmarks()
+            self.pending_bookmark = self.bookmarks[index]
+            self.finish_bookmark()
+
+    def finish_bookmark(self):
+        if self.pending_bookmark is None:
+            return
+        if self.screen_stack:
+            self.screen_stack[-1][0].close()
+            return
+        path = self.pending_bookmark
+        self.pending_bookmark = None
+        node = self.vfs.get_from_path(path)
+        if node is not None:
+            self.vfs.cwd = node if node.is_dir else self.vfs.get_from_path(path.rpartition('/')[0] or '/')
+            self.history.clear()
+            self.media_only = False
+            self.refresh(None if node.is_dir else node.name)
+            if not node.is_dir:
+                self.show_info()
+            self.app.layout.focus(self.control)
+
+    def open_duplicate(self):
+        path = self.selected_path()
+        if not path:
+            return
+        parent, _, name = path.rpartition('/')
+        node = self.vfs.get_from_path(parent or '/')
+        if node is not None and node.is_dir:
+            self.vfs.cwd = node
+            self.history.clear()
+            self.refresh(name)
+            self.show_info()
+            self.app.layout.focus(self.control)
+
     def push(self, screen):
         self.stop_video()
         self.screen_stack.append((screen, self.app.layout))
@@ -1499,6 +1631,7 @@ class DriveBrowser:
         _, layout = self.screen_stack.pop()
         self.app.layout = layout
         self.app.invalidate()
+        self.finish_bookmark()
 
     def reset_current_map(self):
         self.video_epoch += 1
@@ -1628,6 +1761,8 @@ def main_help(display_mode):
         '[red]R[/red] In remove queue',
         '[red]D[/red] Deleted',
         '', '[bold]Shortcuts[/bold]',
+        '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
+        'Info duplicates: Tab to info, arrows or click to select; Enter opens the duplicate location',
         '[#ff8800]h / Esc[/#ff8800] (in help): Close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',
         'Video quick view: Play / Stop below video; seek bar click/wheel or focused Left/Right (5s)',
@@ -1656,6 +1791,7 @@ def main_help(display_mode):
     ]
 
 SCANNER_HELP = [
+    '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks',
     '[#ff8800]q[/#ff8800]: Quit the app from any view',
     '[bold]Scanning[/bold]',
     'On open: lite → medium → heavy once, then all modes stop',
@@ -1671,14 +1807,14 @@ SCANNER_HELP = [
     '[#ff8800]Shift+1 / Shift+2 / Shift+3[/#ff8800] (also [#ff8800]! / @ / #[/#ff8800]): start from cursor bucket',
     '[#ff8800]r[/#ff8800]: Toggle known-file disk metadata reads in lite',
     '[#ff8800]t[/#ff8800]: Toggle heavy new-first/all priority within buckets',
-    '[#ff8800]j[/#ff8800]: Heavy normal (sequential) / expert (selector queue)',
+    '[#ff8800]J[/#ff8800]: Heavy normal (sequential) / expert (selector queue)',
     'Expert tick: pick one random starting bucket, then mark 1–20 following buckets blue',
     '? buckets first; skip blocked/occupied buckets, wrap at end; 1–20 added per tick',
     'Skip fully green buckets until all file buckets are green; mixed ?/green still count',
     'Background additions: random 0.2–1s; empty work queue refills immediately',
     'Add new ranges while earlier ranges scan; total blue can exceed 20',
     'Completed buckets restore their normal background; pause keeps pending work',
-    'Changing j also cancels startup; startup heavy is a finite normal pass',
+    'Changing J also cancels startup; startup heavy is a finite normal pass',
     '', '[bold]Symbols[/bold]',
     '[white]D[/white] Directory',
     '[white]?[/white] Unverified/new file',
@@ -1783,6 +1919,132 @@ class PTScreen:
 
     def invalidate(self):
         self.browser.app.invalidate()
+
+
+class BookmarksView(PTScreen):
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.table = RowsControl(self.rows, changed=self.preview)
+        self.table.index = browser.bookmark_index
+        self.list = TextArea(read_only=True)  # Plain snapshot for accessible text.
+        self.details = browser.info
+        self.original_info_directory = browser.info_directory
+        self.number = TextArea(height=1, multiline=False, prompt='Number: ')
+        self.path = TextArea(height=1, multiline=False, prompt='Path: ')
+        self.focus = self.table
+        self.bind(['escape'], self.close, eager=True)
+        self.bind(['tab'], lambda: browser.app.layout.focus_next())
+        self.bind(['s-tab'], lambda: browser.app.layout.focus_previous())
+        self.bind(['enter'], self.choose, filter=has_focus(self.table) | has_focus(self.number), eager=True)
+        self.bind(['enter'], self.save, filter=has_focus(self.path), eager=True)
+        self.bind(['delete'], self.remove, filter=has_focus(self.table), eager=True)
+        self.bind(['e'], lambda: browser.app.layout.focus(self.path), filter=has_focus(self.table))
+        table_bindings(self, self.table)
+        for digit in '123456789':
+            self.bind([digit], lambda digit=digit: browser.go_bookmark(int(digit) - 1),
+                      eager=True, filter=has_focus(self.table) & Condition(lambda: len(browser.bookmarks) <= 9))
+        self.container = HSplit([
+            VSplit([
+                Frame(Window(self.table, right_margins=[ScrollbarMargin()]), title='Bookmarks'),
+                Frame(HSplit([
+                    ConditionalContainer(browser.video_metadata, filter=Condition(lambda: browser.video_path is not None)),
+                    ConditionalContainer(HSplit([
+                        browser.video_area,
+                        VSplit([browser.play_button, browser.stop_button,
+                                Window(FormattedTextControl(lambda: safe_text(browser.video_status)), height=1)], height=1),
+                        Window(browser.seek_control, height=1),
+                    ]), filter=Condition(browser.video_panel_visible)),
+                    self.details,
+                ]), title='Quick view · e edit path · Delete remove'),
+            ]),
+            self.number, self.path,
+            VSplit([Button('Go', handler=self.choose), Button('Save path', handler=self.save),
+                    Button('Remove', handler=self.remove), Button('Close', handler=self.close)], height=1),
+            Window(FormattedTextControl('Arrows/click: preview · Enter: go · e: edit path · b/Delete: remove · Tab: fields'), height=1),
+        ], key_bindings=self.keys)
+        self.refresh()
+
+    def start(self):
+        self.refresh()
+
+    def close(self):
+        jumping = self.browser.pending_bookmark is not None
+        self.browser.stop_video()
+        self.browser.video_epoch += 1
+        self.browser.pop(self)
+        if not jumping:
+            self.browser.show_info(directory=self.original_info_directory)
+
+    def rows(self):
+        return [[('', f'{i}. {safe_text(path)}')] for i, path in enumerate(self.browser.bookmarks, 1)]
+
+    def refresh(self):
+        self.table.index = max(0, min(self.table.index, len(self.browser.bookmarks) - 1))
+        self.list.text = '\n'.join(f'{i}. {safe_text(path)}' for i, path in enumerate(self.browser.bookmarks, 1)) or 'No bookmarks.'
+        self.preview()
+
+    def preview(self):
+        if self.browser.bookmark_index != self.table.index:
+            self.browser.bookmark_index = self.table.index
+            self.browser.save_bookmarks()
+        if not self.browser.bookmarks:
+            self.browser.stop_video()
+            self.browser.video_epoch += 1
+            self.browser.video_path = None
+            self.browser.native_preview = None
+            self.path.text = ''
+            self.details.text = 'No bookmarks. Select a file and press b.'
+            return
+        path = self.browser.bookmarks[self.table.index]
+        self.path.text = path
+        self.number.text = ''
+        node = self.browser.vfs.get_from_path(path)
+        if node is None:
+            self.browser.stop_video()
+            self.browser.video_epoch += 1
+            self.browser.video_path = None
+            self.browser.native_preview = None
+            self.details.text = safe_text(path) + '\nUnavailable in VFS. Edit the path or remove this bookmark.'
+            return
+        self.browser.show_info(preview_node=node)
+        if not node.is_dir and os.path.splitext(node.name)[1].lower() not in set(IMAGE_SUFFIXES) | set(VIDEO_SUFFIXES):
+            try:
+                local = get_real_path(path)
+                if os.path.isfile(local):
+                    with open(local, 'rb') as source:
+                        data = source.read(8192)
+                    if b'\x00' not in data:
+                        self.details.text += '\n\n' + '\n'.join(safe_text(line) for line in data.decode('utf-8').splitlines()[:60])
+            except (OSError, UnicodeError):
+                pass
+        self.invalidate()
+
+    def remove(self):
+        if self.browser.bookmarks:
+            self.browser.bookmarks.pop(self.table.index)
+            self.browser.save_bookmarks()
+            self.refresh()
+            self.invalidate()
+
+    def save(self):
+        path = normalize_bookmark_path(self.path.text.strip())
+        if not path.startswith('/') or self.browser.vfs.get_from_path(path) is None:
+            self.details.text = 'Enter an existing absolute VFS path (file or directory).'
+            return
+        if path in self.browser.bookmarks and self.browser.bookmarks.index(path) != self.table.index:
+            self.details.text = 'That path is already bookmarked.'
+            return
+        if self.browser.bookmarks:
+            self.browser.bookmarks[self.table.index] = path
+        else:
+            self.browser.bookmarks.append(path)
+        self.browser.save_bookmarks()
+        self.refresh()
+        self.browser.app.layout.focus(self.table)
+
+    def choose(self):
+        index = int(self.number.text) - 1 if self.number.text.isdecimal() else self.table.index
+        self.browser.go_bookmark(index)
 
 
 class HelpView(PTScreen):
@@ -2399,7 +2661,7 @@ class ScannerView(PTScreen):
             self.bind([key], lambda mode=mode: self.start_from(mode), filter=not_input)
         self.bind(['r'], lambda: self.toggle_flag('read_known'), filter=not_input)
         self.bind(['t'], lambda: self.toggle_flag('new_first'), filter=not_input)
-        self.bind(['j'], self.order, filter=not_input)
+        self.bind(['J'], self.order, filter=not_input)
         self.bind(['m'], self.mode, filter=not_input)
         self.bind(['v'], self.view, filter=not_input)
         self.bind(['['], lambda: self.scope(-1), filter=not_input)
@@ -2989,7 +3251,7 @@ class ScannerView(PTScreen):
         for i, (label, running) in enumerate(zip(('Lite', 'Medium', 'Heavy'), self.controls.modes), 1):
             running = self.requested_modes.get(i, running)
             result.extend([('', f'{i} {label} '), ('class:green' if running else 'class:red', 'RUN' if running else 'STOP'), ('', ' · ')])
-        result.append(('', f'r {"on" if self.controls.read_known else "off"} · t {"new" if self.controls.new_first else "all"} · j {self.requested_order or self.controls.heavy_order}'))
+        result.append(('', f'r {"on" if self.controls.read_known else "off"} · t {"new" if self.controls.new_first else "all"} · J {self.requested_order or self.controls.heavy_order}'))
         if (self.requested_order or self.controls.heavy_order) == 'expert':
             result.append(('', f' · Expert selected {self.expert_selected_count} buckets'))
         current, total = self.timing.display_snapshot()

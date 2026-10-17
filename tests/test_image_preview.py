@@ -81,7 +81,10 @@ class ImagePreviewTests(unittest.TestCase):
         output.reset_mock()
         browser.draw_native_preview(app)
         output.write_raw.assert_not_called()  # Unchanged cursor redraw retains graphics.
-        browser.screen_stack = [Mock()]  # A popup must hide existing graphics.
+        browser.screen_stack = [(object.__new__(tui.BookmarksView), None)]
+        browser.draw_native_preview(app)
+        output.write_raw.assert_not_called()  # Bookmarks shares the native quick-view layer.
+        browser.screen_stack = [(Mock(), None)]  # Other popups hide graphics.
         browser.draw_native_preview(app)
         self.assertFalse(browser.native_visible)
         self.assertIn('d=Z,z=731', output.write_raw.call_args.args[0])

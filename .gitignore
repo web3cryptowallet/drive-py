@@ -31,3 +31,7 @@ pack.sh
 
 .cache
 profile.*
+
+# Local persistent bookmarks
+.bookmarks.json
+.bookmarks.json.tmp

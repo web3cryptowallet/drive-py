@@ -343,6 +343,30 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(.06)
                     self.assertIn('FRAME', browser.video_area.text)
                     self.assertEqual(browser.video_status, 'Playing')
+                    # Cursor movement must retain all playback/Info state,
+                    # including the automatic quick-view and graphics triggers.
+                    original = (browser.video_path, browser.video_metadata.text,
+                                browser.info.text, browser.video_epoch,
+                                browser.video_area.text, browser.info_paths.copy())
+                    for suffix, auto, graphics in [('mov', False, False),
+                                                   ('txt', True, False),
+                                                   ('png', False, True)]:
+                        other = SimpleNamespace(id='/disk/other.' + suffix,
+                                                name='other.' + suffix, is_dir=False,
+                                                size=20, info={})
+                        browser.rows.append({'name': other.name, 'node': other,
+                                             'indicator': 'green', 'color': 'white',
+                                             'label': other.name, 'size': '20', 'dups': '0'})
+                        browser.auto_quick_view = auto
+                        browser.graphics_mode = graphics
+                        browser.select(len(browser.rows) - 1)
+                        self.assertEqual(browser.current_name(), other.name)
+                        self.assertIs(browser.video_player, fake)
+                        fake.close.assert_not_called()
+                        self.assertEqual((browser.video_path, browser.video_metadata.text,
+                                          browser.info.text, browser.video_epoch,
+                                          browser.video_area.text, browser.info_paths), original)
+                    browser.auto_quick_view = browser.graphics_mode = False
                     browser.video_duration = 30
                     browser.seek_video(12)
                     fake.seek.assert_called_with(12)
