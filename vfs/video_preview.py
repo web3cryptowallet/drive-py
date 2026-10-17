@@ -8,6 +8,8 @@ from queue import Queue, Empty, Full
 from threading import Event, Thread
 import time
 
+from .thumbnails import AUDIO_SUFFIXES
+
 
 def video_rotation_filter(path):
     """Read the display matrix without libmpv's failing software auto-rotation."""
@@ -58,6 +60,7 @@ def _decode(path, size, connection, library):
         context = mpv.MpvRenderContext(player, 'sw')
         player.play(path)
         started = False
+        pending_seek = None
         deadline = time.monotonic() + 15
         while True:
             while connection.poll():
@@ -65,7 +68,10 @@ def _decode(path, size, connection, library):
                 if command == 'stop':
                     return
                 if command == 'seek':
-                    player.command('seek', value, 'absolute+exact')
+                    pending_seek = value
+            if pending_seek is not None and player.time_pos is not None:
+                player.command('seek', pending_seek, 'absolute+exact')
+                pending_seek = None
             if context.update():
                 context.render(sw_size=ctypes.cast(dimensions, ctypes.c_void_p),
                                sw_format='rgb0',
@@ -91,6 +97,60 @@ def _decode(path, size, connection, library):
         finally:
             if player is not None:
                 player.terminate()
+        try:
+            connection.send(('end', None))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        connection.close()
+
+
+def _decode_audio(path, size, connection, library):
+    """Play audio without allocating a software video renderer."""
+    with open(os.devnull, 'w') as sink:
+        os.dup2(sink.fileno(), 2)
+    player = None
+    try:
+        import ctypes.util
+        original = ctypes.util.find_library
+        ctypes.util.find_library = lambda name: library if name == 'mpv' else original(name)
+        try:
+            import mpv
+        finally:
+            ctypes.util.find_library = original
+        player = mpv.MPV(vo='null', vid='no', idle=True, keep_open=False,
+                         input_default_bindings=False, input_vo_keyboard=False,
+                         osc=False, config=False, load_scripts=False)
+        player.play(path)
+        started = False
+        pending_seek = None
+        deadline = time.monotonic() + 15
+        while True:
+            while connection.poll():
+                command, value = connection.recv()
+                if command == 'stop':
+                    return
+                if command == 'seek':
+                    pending_seek = value
+            position, duration = player.time_pos, player.duration
+            if pending_seek is not None and position is not None:
+                player.command('seek', pending_seek, 'absolute+exact')
+                pending_seek = None
+            if position is not None:
+                started = True
+                connection.send(('progress', (float(position), float(duration or 0))))
+            if started and player.idle_active:
+                break
+            if not started and time.monotonic() > deadline:
+                raise RuntimeError('Audio did not start within 15 seconds')
+            time.sleep(.1)
+    except (Exception, SystemExit) as exc:
+        try:
+            connection.send(('error', f'Audio playback unavailable: {exc}'))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        if player is not None:
+            player.terminate()
         try:
             connection.send(('end', None))
         except (BrokenPipeError, EOFError, OSError):
@@ -138,7 +198,8 @@ class VideoPreview:
             from PIL import Image
             spawn = multiprocessing.get_context('spawn')
             connection, child = spawn.Pipe()
-            process = spawn.Process(target=_decode,
+            decode = _decode_audio if os.path.splitext(self.path)[1].lower() in AUDIO_SUFFIXES else _decode
+            process = spawn.Process(target=decode,
                                     args=(self.path, self.pixels, child, mpv.backend._name), daemon=True)
             process.start()
             child.close()
@@ -159,6 +220,8 @@ class VideoPreview:
                         frame = self.serialize(Image.frombytes('RGB', size, raw, 'raw', 'RGBX'))
                         frame['_position'], frame['_duration'] = position, duration
                         self.publish('frame', frame)
+                    elif kind == 'progress':
+                        self.publish(kind, value)
                     elif kind == 'error':
                         self.publish(kind, value)
                     elif kind == 'end':
@@ -168,7 +231,8 @@ class VideoPreview:
                     break
             if not ended and not self.stop.is_set():
                 process.join(timeout=.2)
-                self.publish('error', f'Video decoder stopped unexpectedly (exit {process.exitcode})')
+                label = 'Audio' if os.path.splitext(self.path)[1].lower() in AUDIO_SUFFIXES else 'Video'
+                self.publish('error', f'{label} decoder stopped unexpectedly (exit {process.exitcode})')
         except (Exception, SystemExit) as exc:
             self.publish('error', f'Video preview unavailable: {exc}')
         finally:

@@ -151,6 +151,14 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             browser.refresh('a.txt')
             def rendered():
                 content = browser.control.create_content(60, 24)
+                fragments = [part for i in range(content.line_count) for part in content.get_line(i)]
+                markers = [(style, text) for style, text in fragments if text == 'B']
+                if browser.bookmarks:
+                    self.assertTrue(markers)
+                    for style, _ in markers:
+                        attrs = browser.style().get_attrs_for_style_str(style)
+                        self.assertEqual(attrs.color, '00ffff')
+                        self.assertTrue(attrs.bold)
                 return '\n'.join(''.join(part[1] for part in content.get_line(i))
                                  for i in range(content.line_count))
             for mode in (1, 2, 3):

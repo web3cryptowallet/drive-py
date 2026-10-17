@@ -41,6 +41,16 @@ class ImagePreviewTests(unittest.TestCase):
                 self.assertLessEqual(len(rows), 4)
                 self.assertTrue(all(len(row) <= 10 for row in rows))
 
+    def test_small_image_keeps_pixel_size_and_large_image_fills_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'size.png'
+            for size, expected in [((16, 16), (2, 1)), ((1600, 800), (20, 5)),
+                                   ((800, 1600), (8, 8))]:
+                Image.new('RGB', size, 'white').save(path)
+                with patch('term_image.utils.get_cell_size', return_value=(8, 16)):
+                    rows = tui.ascii_image_preview(path, 20, 8)[1:]
+                self.assertEqual((len(rows[0]), len(rows)), expected)
+
     def test_native_draw_emits_kitty_protocol_outside_text(self):
         tui.configure_image_terminal()
         from term_image.image import KittyImage
@@ -77,7 +87,7 @@ class ImagePreviewTests(unittest.TestCase):
         browser.app = app
         browser.draw_native_preview(app)
         self.assertTrue(browser.native_visible)
-        self.assertIn('\x1b[7;41H\x1b_G,C=1,q=2;KITTY_PAYLOAD', output.write_raw.call_args.args[0])
+        self.assertIn('\x1b[7;48H\x1b_G,C=1,q=2;KITTY_PAYLOAD', output.write_raw.call_args.args[0])
         output.reset_mock()
         browser.draw_native_preview(app)
         output.write_raw.assert_not_called()  # Unchanged cursor redraw retains graphics.
@@ -116,6 +126,29 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertNotIn('╭────────╮', browser.info.text)
         browser.reset_current_map()
         self.assertIsNone(browser.native_preview)
+
+    def test_auto_landscape_to_portrait_uses_outer_viewport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fs = VirtualFS({'files': {}})
+            with patch.object(fs, 'start_in_current_directory'):
+                browser = tui.DriveBrowser(fs, input=DummyInput(), output=DummyOutput())
+            browser.auto_quick_view = True
+            browser.graphics_mode = True
+            browser.rows = []
+            for name, size in [('landscape.png', (800, 100)), ('portrait.png', (100, 800))]:
+                path = Path(directory) / name
+                Image.new('RGB', size, 'white').save(path)
+                node = SimpleNamespace(id=str(path), name=name, size=10, is_dir=False, info={})
+                browser.rows.append(dict(node=node, name=name, indicator='green'))
+            # Simulate the small preferred height left behind by landscape art.
+            browser.info.window.render_info = SimpleNamespace(window_width=41, window_height=13)
+            with patch.object(fs, 'get_full_info', return_value={'exists': True, 'size': 10}), \
+                    patch.object(tui, 'ascii_image_preview', wraps=tui.ascii_image_preview) as decode:
+                browser.show_info()
+                browser.move(1)
+            self.assertEqual(decode.call_args.args[2], browser.app.output.get_size().rows - 20)
+            self.assertGreater(decode.call_args.args[2], 3)
+            self.assertIn('portrait.png', browser.info.text)
 
     def test_auto_selection_and_image_disable_skip_decoding(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -156,6 +189,35 @@ class ImagePreviewTests(unittest.TestCase):
                 second_text = browser.info.text
                 browser.move(-1)
                 self.assertEqual(browser.info.text, second_text)
+
+    def test_y_controls_all_file_types_and_modes(self):
+        fs = VirtualFS({'files': {}})
+        with patch.object(fs, 'start_in_current_directory'):
+            browser = tui.DriveBrowser(fs, input=DummyInput(), output=DummyOutput())
+        browser.rows = [dict(name=name, node=SimpleNamespace(name=name, id='/disk/' + name,
+                            is_dir=name in ('folder', '..')))
+                        for name in ['notes.txt', 'photo.png', 'clip.mov', 'song.mp3', 'folder', '..']]
+        for graphics in (False, True):
+            for mode in (1, 2, 3):
+                with self.subTest(graphics=graphics, mode=mode), patch.object(browser, 'show_info') as show:
+                    browser.graphics_mode, browser.display_mode = graphics, mode
+                    browser.auto_quick_view = False
+                    for index in range(len(browser.rows)):
+                        browser.select(index)
+                    show.assert_not_called()
+                    for index in range(4):
+                        browser.select(index)
+                        browser.open()
+                    self.assertEqual(show.call_count, 4)  # Enter still opens every media type.
+                    browser.toggle_auto_quick_view()
+                    show.reset_mock()
+                    for index in range(len(browser.rows)):
+                        browser.select(index)
+                        show.assert_called_once_with(directory=index == 5)
+                        show.reset_mock()
+                    browser.toggle_auto_quick_view()
+                    browser.select(0)
+                    show.assert_not_called()
 
     def test_missing_corrupt_and_oversized(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -269,7 +269,7 @@ try:
     from prompt_toolkit.output import ColorDepth
     from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
     from prompt_toolkit.layout.margins import ScrollbarMargin
-    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.mouse_events import MouseEventType, MouseButton
     from prompt_toolkit.styles import DynamicStyle, Style
     from prompt_toolkit.utils import get_cwidth
     from prompt_toolkit.widgets import Button, Frame, TextArea
@@ -281,7 +281,7 @@ from livelog2 import LiveLog
 from vfs import VirtualFS, aliases, disabled_prefixes, format_size, prefixes, get_stat_info
 from vfs.video_preview import VideoPreview
 from vfs.paths import get_real_path
-from vfs.thumbnails import thumbnail, IMAGE_SUFFIXES, THUMBNAIL_SUFFIXES, MEDIA_SUFFIXES, VIDEO_SUFFIXES
+from vfs.thumbnails import thumbnail, IMAGE_SUFFIXES, THUMBNAIL_SUFFIXES, MEDIA_SUFFIXES, VIDEO_SUFFIXES, AUDIO_SUFFIXES
 from vfs.scanner import (DriveScanner, FileMap, Pagination, ScanControls, ScanEntry,
                          ScanStats, ScanStore, ScanTiming)
 
@@ -352,7 +352,7 @@ def ascii_image_preview(path, width=60, height=24, *, color=False, native=None, 
     from term_image.exceptions import TermImageError
     from PIL import Image, ImageOps, UnidentifiedImageError
 
-    width, height = max(1, min(120, width)), max(1, min(40, height))
+    width, height = max(1, width), max(1, height)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('error', Image.DecompressionBombWarning)
@@ -362,9 +362,12 @@ def ascii_image_preview(path, width=60, height=24, *, color=False, native=None, 
                 if source.width * source.height > 20_000_000:
                     return ['Image preview unavailable: image exceeds 20 megapixels.']
                 image = ImageOps.exif_transpose(source).convert('RGBA')
-                scale = min(width / image.width, height * 2 / image.height, 1)
-                target = (max(1, int(image.width * scale)),
-                          max(1, int(image.height * scale / 2)))
+                from term_image.utils import get_cell_size
+                cell_width, cell_height = get_cell_size() or (8, 16)
+                scale = min(width * cell_width / image.width,
+                            height * cell_height / image.height, 1.)
+                target = (max(1, int(image.width * scale / cell_width)),
+                          max(1, int(image.height * scale / cell_height)))
                 with AutoImage(image, width=target[0], height=target[1]) as preview:
                     is_native = isinstance(preview, KittyImage) and native is not None
                     # Graphics protocols cannot pass through the text lexer.
@@ -525,6 +528,14 @@ def fit(text, width):
     return ''.join(result) + ' ' * max(0, width - used)
 
 
+def bookmark_label(style, text, marked, offset=1):
+    """Highlight only the bookmark marker, retaining row background and widths."""
+    if not marked or len(text) <= offset or text[offset] != 'B':
+        return [(style, text)]
+    return [(style, text[:offset]), (style + ' class:bookmark', 'B'),
+            (style, text[offset + 1:])]
+
+
 class TitleControl(UIControl):
     def create_content(self, width, height):
         title = 'drive.py — file manager'
@@ -564,16 +575,21 @@ class FilesControl(UIControl):
             base = 'class:selected' if selected else 'class:' + row['color']
             if row['color'] == 'muted':
                 base += ' class:muted'
+            expanded = row['node'].is_dir and row['node'].id in browser.expanded_dirs
+            if expanded and not selected:
+                base += ' class:expanded-dir'
+            name_style = base + (' class:expanded-dir-name' if expanded else '')
             label = row['label']
-            if browser.bookmark_path(row) in browser.bookmarks:
+            marked = browser.bookmark_path(row) in browser.bookmarks
+            if marked:
                 label = label[:2] + 'B ' + label[2:]
             label = fit(label, name_width)
             fragments = []
             if label and browser.display_mode != 3:
                 fragments.append((base + ' class:' + row['indicator'], label[0]))
-                fragments.append((base, label[1:]))
+                fragments.extend(bookmark_label(name_style, label[1:], marked))
             else:
-                fragments.append((base, label))
+                fragments.extend(bookmark_label(name_style, label, marked, 2))
             fragments.append((base, ' ' + fit(' ' + row['size'], size_width) +
                               ' ' + fit(' ' + row['dups'], dups_width)))
             return fragments
@@ -596,7 +612,7 @@ class FilesControl(UIControl):
                 if event.position.y >= len(browser.grid_lines):
                     return
                 entries, _, media = browser.grid_lines[event.position.y]
-                column = min(len(entries) - 1, event.position.x // browser.grid_tile_width) if media else 0
+                column = min(len(entries) - 1, event.position.x // (browser.grid_tile_width + 1)) if media else 0
                 index = entries[column]
             browser.select(min(index, max(0, len(browser.rows) - 1)))
         else:
@@ -714,15 +730,20 @@ class DriveBrowser:
         self.image_previews = True
         self.info_directory = True
         self.graphics_mode = False
+        self.files_scrollbar_dragging = False
+        self.expanded_dirs = set()
+        self.expansion_cwd = None
+        self.expand_all_levels = False
         self.media_only = False
+        self.hide_dotfiles = False
         self.video_path = None
         self.video_epoch = 0
         self.video_position = 0.
         self.video_duration = 0.
         self.video_image_id = None
         self.video_area = TextArea(read_only=True, wrap_lines=False, lexer=InfoLexer(),
-                                   height=lambda: Dimension(min=1, preferred=self.video_dimensions[1],
-                                                            max=self.video_dimensions[1]))
+                                   height=lambda: Dimension(min=1, preferred=self.video_frame_height(),
+                                                            max=self.video_frame_height()))
         self.seek_control = VideoSeekControl(self)
         self.video_player = None
         self.video_status = ''
@@ -730,7 +751,7 @@ class DriveBrowser:
         self.video_dimensions = (1, 1)
         self.video_render_dimensions = (1, 1)
         self.video_metadata = TextArea(read_only=True, wrap_lines=True,
-                                       height=Dimension(min=1, preferred=6, max=6))
+                                       height=Dimension(min=1, preferred=7, max=7))
         self.video_task = None
         self.video_workers = []
         self.play_button = Button('Play', handler=self.play_video)
@@ -762,6 +783,8 @@ class DriveBrowser:
             'scan-input': theme['table-header'] + ' #ffffff nobold noreverse',
             'scan-input-focused': theme['selected'],
             'yellow': '#ffff55', 'white': '#ffffff', 'muted': '#aaaaaa',
+            'audio-play': '#bb66ff bold', 'bookmark': '#00ffff bold',
+            'expanded-dir': 'bg:#707090', 'expanded-dir-name': '#e0b0ff bold',
         }) for theme in THEMES]
         self.rows = []
         self.history = []
@@ -793,6 +816,8 @@ class DriveBrowser:
         self.info_lexer = InfoLexer()
         self.info = TextArea(read_only=True, scrollbar=True, wrap_lines=True,
                              lexer=self.info_lexer)
+        self.info.window.height = lambda: Dimension(min=4 if self.video_path and
+            hasattr(self, 'app') and self.app.output.get_size().rows >= 18 else 1)
         self.info.window.right_margins = [ScrollbarMargin()]
         self.info.window.cursorline = has_focus(self.info)
         if path is None:
@@ -813,6 +838,10 @@ class DriveBrowser:
         bindings.add('j', eager=True)(lambda event: self.push(BookmarksView(self)))
         bindings.add('q', eager=True)(lambda event: event.app.exit())
         bindings.add('c-c')(lambda event: event.app.exit())
+        bindings.add('p', filter=Condition(lambda: (not self.screen_stack or
+            isinstance(self.screen_stack[-1][0], BookmarksView)) and bool(self.video_path) and
+            not (self.screen_stack and (self.app.layout.has_focus(self.screen_stack[-1][0].path) or
+                                       self.app.layout.has_focus(self.screen_stack[-1][0].number)))))(lambda event: self.toggle_playback())
         bind(['a'], lambda event: self.push(ActionsView(self)))
         bind(['s'], lambda event: self.push(ScannerView(self)))
         bind(['R'], lambda event: self.reset_current_map())
@@ -834,8 +863,11 @@ class DriveBrowser:
         bind(['tab'], lambda event: self.focus_main(1))
         bind(['s-tab'], lambda event: self.focus_main(-1))
         bind(['g'], lambda event: self.toggle_graphics())
+        bind(['u'], lambda event: self.expand_subdirs(), eager=True)
+        bind(['o'], lambda event: self.toggle_expansion_depth(), eager=True)
         bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
         bind(['v'], lambda event: self.toggle_media_filter())
+        bind(['.'], lambda event: self.toggle_dotfiles(), filter=files_focused)
         bind(['+', '='], lambda event: self.resize_icons(1), filter=files_focused)
         bind(['-'], lambda event: self.resize_icons(-1), filter=files_focused)
         bind(['y'], lambda event: self.toggle_auto_quick_view())
@@ -861,12 +893,12 @@ class DriveBrowser:
                     VSplit([
                         Window(width=1),
                         HSplit([
-                            Window(FormattedTextControl(lambda: f' Info · y:auto {"on" if self.auto_quick_view else "off"} · i:images {"on" if self.image_previews else "off"}'), height=1,
+                            Window(FormattedTextControl(self.info_title), height=1,
                                    style='class:info-header'),
                             ConditionalContainer(self.video_metadata,
                                                  filter=Condition(lambda: self.video_path is not None)),
                             ConditionalContainer(HSplit([
-                                self.video_area,
+                                ConditionalContainer(self.video_area, filter=Condition(lambda: not self.audio_selected())),
                                 VSplit([self.play_button, self.stop_button,
                                         Window(FormattedTextControl(lambda: safe_text(self.video_status)), height=1)], height=1),
                                 Window(self.seek_control, height=1),
@@ -887,6 +919,20 @@ class DriveBrowser:
                                after_render=self.draw_native_preview)
         if hasattr(self.app.input, 'vt100_parser'):
             self.app.input.vt100_parser = KittyReplyFilter(self.app.input.vt100_parser)
+
+    def info_title(self):
+        return (f' Info · y:{"auto" if self.auto_quick_view else "off"}'
+                f' · o:{"all" if self.expand_all_levels else "one"}'
+                f' · .:{"hide" if self.hide_dotfiles else "show"}'
+                f' · i:{"on" if self.image_previews else "off"}')
+
+    def video_frame_height(self):
+        # Keep controls, hashes, duplicate heading and its first row below frames.
+        rows = self.app.output.get_size().rows if hasattr(self, 'app') else 27
+        return max(1, min(self.video_dimensions[1], rows - 18))
+
+    def audio_selected(self):
+        return bool(self.video_path and os.path.splitext(self.video_path)[1].lower() in AUDIO_SUFFIXES)
 
     def video_panel_visible(self):
         if not self.video_path or not hasattr(self, 'app'):
@@ -933,7 +979,8 @@ class DriveBrowser:
         if value['native']:
             art, dimensions = value['native']
             # Grid serialization uses its own layer; posters belong to quick view.
-            self.native_preview = (art.replace('z=732', 'z=731'), dimensions, 0)
+            self.native_preview = (art.replace('z=732', 'z=731'), dimensions,
+                                   max(0, (self.video_dimensions[1] - dimensions[1]) // 2))
         else:
             self.native_preview = None
             self.video_area.lexer.image_lines = dict(enumerate(value['lines']))
@@ -947,9 +994,18 @@ class DriveBrowser:
         if hasattr(self, 'app'):
             self.app.invalidate()
 
+    def toggle_playback(self):
+        if self.video_player is None:
+            self.play_video()
+        else:
+            self.stop_video()
+
     def play_video(self):
         if not self.video_path or self.video_player is not None:
             return
+        if self.video_status == 'Finished' or (self.video_duration and
+                self.video_position >= self.video_duration - .1):
+            self.video_position = 0.
         self.video_epoch += 1  # Ignore an unfinished still-preview request.
         width, height = self.video_dimensions
         from term_image.utils import get_cell_size
@@ -983,6 +1039,9 @@ class DriveBrowser:
                         self.video_status = 'Finished'
                     self.video_player = None
                     break
+                elif kind == 'progress':
+                    self.video_status = 'Playing'
+                    self.video_position, self.video_duration = value
                 elif kind == 'frame':
                     self.video_status = 'Playing'
                     self.video_position = value.get('_position', self.video_position)
@@ -1006,6 +1065,10 @@ class DriveBrowser:
     @staticmethod
     def is_media(row):
         return not row['node'].is_dir and os.path.splitext(row['name'])[1].lower() in MEDIA_SUFFIXES
+
+    def toggle_dotfiles(self):
+        self.hide_dotfiles = not self.hide_dotfiles
+        self.refresh(self.current_name(), update_info=self.video_player is None)
 
     def toggle_media_filter(self):
         self.media_only = not self.media_only
@@ -1034,8 +1097,43 @@ class DriveBrowser:
 
     def toggle_graphics(self):
         self.graphics_mode = not self.graphics_mode
-        self.start_thumbnails()
+        self.refresh(self.current_name(), update_info=False)
         self.app.invalidate()
+
+    def toggle_expansion_depth(self):
+        self.app.layout.focus(self.control)
+        self.expand_all_levels = not self.expand_all_levels
+        self.app.invalidate()
+
+    def expand_subdirs(self):
+        if not self.rows:
+            return
+        row = self.rows[self.selected]
+        if not row['node'].is_dir:
+            return
+        self.app.layout.focus(self.control)
+        roots = (self.vfs.list_nodes() if row['name'] == '..' else [row['node']])
+        roots = [node for node in roots if node.is_dir]
+        if roots and all(node.id in self.expanded_dirs for node in roots):
+            # Collapsing a subtree clears its descendant expansion state as well.
+            prefixes = [node.id.rstrip('/') + '/' for node in roots]
+            root_ids = {node.id for node in roots}
+            self.expanded_dirs = {path for path in self.expanded_dirs
+                                  if path not in root_ids and not any(path.startswith(prefix) for prefix in prefixes)}
+            self.refresh(row['name'], update_info=False)
+            return
+        pending = roots.copy()
+        visited = set()
+        while pending:
+            node = pending.pop()
+            # Directory symlinks stay visible but never recurse into cycles or aliases.
+            if node.id in visited or os.path.islink(get_real_path(node.id)):
+                continue
+            visited.add(node.id)
+            self.expanded_dirs.add(node.id)
+            if self.expand_all_levels:
+                pending.extend(child for child in self.vfs.list_nodes(node) if child.is_dir)
+        self.refresh(row['name'], update_info=False)
 
     def resize_icons(self, direction):
         if not self.graphics_mode:
@@ -1112,7 +1210,7 @@ class DriveBrowser:
         icon_width, icon_height = self.icon_dimensions()
         self.grid_tile_width = max(14, icon_width + 2)
         self.grid_tile_height = icon_height + 2
-        self.grid_columns = max(1, width // self.grid_tile_width)
+        self.grid_columns = max(1, (width + 1) // (self.grid_tile_width + 1))
         columns, tile_width, tile_height = self.grid_columns, self.grid_tile_width, self.grid_tile_height
         key = (id(self.rows), len(self.rows), width, columns, tile_width, tile_height)
         if self.grid_layout_key != key:
@@ -1124,7 +1222,7 @@ class DriveBrowser:
                 first = len(self.grid_lines)
                 entries = pending.copy()
                 for column, index in enumerate(entries):
-                    self.grid_positions[index] = (column * tile_width, first, tile_width, True)
+                    self.grid_positions[index] = (column * (tile_width + 1), first, tile_width, True)
                 self.grid_lines.extend((entries, offset, True) for offset in range(tile_height))
                 pending.clear()
             for index, row in enumerate(self.rows):
@@ -1139,7 +1237,7 @@ class DriveBrowser:
             flush()
             self.grid_layout_key = key
         if header:
-            title = f' Graphics {"media" if self.media_only else "all"} · {self.icon_lines} lines · cache {self.icon_size}x{self.icon_size} · {len(self.thumbnails)} previews'
+            title = f' Graphics u:show/hide o:{"all" if self.expand_all_levels else "one"} · {"media" if self.media_only else "all"} · {self.icon_lines} lines · cache {self.icon_size}x{self.icon_size} · {len(self.thumbnails)} previews'
             if self.thumbnail_errors:
                 title += f' · {self.thumbnail_errors} unavailable'
             return UIContent(get_line=lambda _: [('class:table-header', fit(title, width))], line_count=1)
@@ -1154,15 +1252,23 @@ class DriveBrowser:
                 if not row['node'].is_dir:
                     style += ' class:muted'
                 prefix = ' B ' if self.bookmark_path(row) in self.bookmarks else ' '
-                return [(style, prefix + fit_filename(row['name'], max(0, width - len(prefix))))]
+                label = prefix + fit_filename(row['name'] + ('/' if row['node'].is_dir and row['name'] != '..' else ''), max(0, width - len(prefix)))
+                if row['node'].is_dir and row['node'].id in self.expanded_dirs:
+                    if entries[0] != self.selected:
+                        style += ' class:expanded-dir'
+                    name = label.rstrip()
+                    return bookmark_label(style + ' class:expanded-dir-name', name, prefix == ' B ') + [(style, ' ' * (width - get_cwidth(name)))]
+                return bookmark_label(style, label, prefix == ' B ')
             fragments = []
-            for entry in entries:
+            for column, entry in enumerate(entries):
+                if column:
+                    fragments.append(('', ' '))
                 row = self.rows[entry]
                 style = 'class:selected' if entry == self.selected else 'class:' + row['color']
                 item = self.thumbnails.get(row['node'].id) if self.image_previews else None
                 if subrow == icon_height:
                     prefix = ' B ' if self.bookmark_path(row) in self.bookmarks else ' '
-                    fragments.append((style, prefix + fit_filename(row['name'], max(0, tile_width - len(prefix) - 1)) + ' '))
+                    fragments.extend(bookmark_label(style, prefix + fit_filename(row['name'], max(0, tile_width - len(prefix) - 1)) + ' ', prefix == ' B '))
                 elif subrow < icon_height:
                     image_width, image_height = item['dimensions'] if item else (0, 0)
                     top = (icon_height - image_height) // 2
@@ -1178,13 +1284,17 @@ class DriveBrowser:
                         eligible = (not row['node'].is_dir and
                                     os.path.splitext(row['name'])[1].lower() in THUMBNAIL_SUFFIXES)
                         pending = self.image_previews and eligible and item is None
-                        label = '.' if pending and subrow == icon_height // 2 else ''
-                        fragments.append((style, fit(label.center(tile_width), tile_width)))
+                        audio = os.path.splitext(row['name'])[1].lower() in AUDIO_SUFFIXES
+                        label = '▶' if audio and subrow == icon_height // 2 else ('.' if pending and subrow == icon_height // 2 else '')
+                        fragments.append((style + (' class:audio-play' if audio else ''), fit(label.center(tile_width), tile_width)))
                 else:
                     fragments.append((style, ' ' * tile_width))
             return fragments or [('', '(empty)')]
 
-        x, y, _, _ = self.grid_positions.get(self.selected, (0, 0, 0, False))
+        x, y, _, media = self.grid_positions.get(self.selected, (0, 0, 0, False))
+        # Keep the filename visible when scrolling to the final tile row.
+        if media:
+            y += icon_height
         return UIContent(get_line=line, line_count=max(1, len(self.grid_lines)),
                          cursor_position=Point(x=x, y=y), show_cursor=False)
 
@@ -1245,7 +1355,73 @@ class DriveBrowser:
         self.native_drawn = None
         self.video_image_id = None
 
+    def install_files_scrollbar(self, app):
+        """Margins have no default PT mouse handler; bind the painted column."""
+        screen = app.renderer._last_screen
+        position = screen.visible_windows_to_write_positions.get(self.files) if screen else None
+        if not position or self.screen_stack or not self.files.render_info or app.is_done:
+            self.files_scrollbar_dragging = False
+            return
+        def click(event):
+            active = self.files_scrollbar_dragging
+            if event.event_type == MouseEventType.MOUSE_DOWN:
+                if event.button != MouseButton.LEFT:
+                    return NotImplemented
+                self.files_scrollbar_dragging = True
+                # Capture immediately, even if more input arrives before redraw.
+                self.install_files_scrollbar(app)
+            elif event.event_type == MouseEventType.MOUSE_MOVE:
+                if not active:
+                    return NotImplemented
+                if event.button != MouseButton.LEFT:
+                    self.files_scrollbar_dragging = False
+                    app.invalidate()
+                    return
+            elif event.event_type == MouseEventType.MOUSE_UP:
+                if not active:
+                    return NotImplemented
+                self.files_scrollbar_dragging = False
+            else:
+                return NotImplemented
+            y = max(0, min(position.height - 1, event.position.y - position.ypos))
+            if self.graphics_mode and self.grid_lines:
+                line = round(y * (len(self.grid_lines) - 1) / max(1, position.height - 1))
+                entries = self.grid_lines[line][0]
+                index = entries[-1] if y == position.height - 1 else entries[0]
+            else:
+                index = round(y * max(0, len(self.rows) - 1) / max(1, position.height - 1))
+            app.layout.focus(self.control)
+            self.select(index)
+        if self.files_scrollbar_dragging:
+            size = app.output.get_size()
+            # Keep the drag captured when the pointer leaves the narrow track.
+            bounds = dict(x_min=0, x_max=size.columns, y_min=0, y_max=size.rows)
+        else:
+            bounds = dict(x_min=position.xpos + position.width - 1,
+                          x_max=position.xpos + position.width,
+                          y_min=position.ypos, y_max=position.ypos + position.height)
+        app.renderer.mouse_handlers.set_mouse_handler_for_range(**bounds, handler=click)
+
+    def refit_image_on_resize(self, app):
+        node = getattr(self, 'image_preview_node', None)
+        if node is None or app.is_done or (self.screen_stack and
+                not isinstance(self.screen_stack[-1][0], BookmarksView)):
+            return False
+        size = app.output.get_size()
+        render = self.info.window.render_info
+        geometry = (size.columns, size.rows, render.window_width if render else 37)
+        if geometry == getattr(self, 'image_preview_geometry', None):
+            return False
+        self.show_info(preview_node=node)
+        app.invalidate()
+        return True
+
     def draw_native_preview(self, app):
+        if hasattr(self, 'files'):
+            self.install_files_scrollbar(app)
+        if self.refit_image_on_resize(app):
+            self.clear_native_preview()
+            return
         self.draw_grid_native(app)
         if getattr(self, 'video_path', None) and self.video_area.window.render_info:
             visible = self.video_area.window.render_info
@@ -1270,6 +1446,7 @@ class DriveBrowser:
         if getattr(self, 'video_path', None) and render and position:
             available_width = max(1, render.window_width - 1)
             available_height = max(1, render.window_height)
+            first_row = max(0, (available_height - height) // 2)
             scale = min(1., available_width / width, available_height / height)
             fitted = (max(1, int(width * scale)), max(1, int(height * scale)))
             if fitted != (width, height):
@@ -1292,7 +1469,8 @@ class DriveBrowser:
         if rows[-1] >= render.window_height:
             self.clear_native_preview()
             return
-        placement = (id(art), position.xpos, position.ypos + rows[0], width, height)
+        left = max(0, (render.window_width - 1 - width) // 2)
+        placement = (id(art), position.xpos + left, position.ypos + rows[0], width, height)
         if self.native_visible and self.native_drawn == placement:
             return
         art = native_graphics_payload(art)
@@ -1308,7 +1486,7 @@ class DriveBrowser:
         else:
             self.clear_native_preview()
             cleanup = ''
-        app.output.write_raw('\x1b7' + f'\x1b[{position.ypos + rows[0] + 1};{position.xpos + 1}H'
+        app.output.write_raw('\x1b7' + f'\x1b[{position.ypos + rows[0] + 1};{position.xpos + left + 1}H'
                              + art + cleanup + '\x1b8')
         app.output.flush()
         self.native_visible = True
@@ -1326,8 +1504,24 @@ class DriveBrowser:
     def current_name(self):
         return self.rows[self.selected]['name'] if self.rows else None
 
-    def refresh(self, target=None):
-        entries = [(node.name, node) for node in self.vfs.list_nodes()]
+    def refresh(self, target=None, *, update_info=True):
+        if self.expansion_cwd != self.vfs.pwd():
+            self.expanded_dirs.clear()
+            self.expansion_cwd = self.vfs.pwd()
+        entries = []
+        pending = [(node.name, node) for node in reversed(self.vfs.list_nodes())]
+        seen = set()
+        while pending:
+            name, node = pending.pop()
+            if self.hide_dotfiles and node.name.startswith('.'):
+                continue
+            if node.id in seen:
+                continue
+            seen.add(node.id)
+            entries.append((name, node))
+            if node.is_dir and node.id in self.expanded_dirs:
+                pending.extend((name + '/' + child.name, child)
+                               for child in reversed(self.vfs.list_nodes(node)))
         parent = self.vfs.get('..')
         if parent is not None:
             entries.insert(0, ('..', parent))
@@ -1353,7 +1547,10 @@ class DriveBrowser:
         self.metadata_widths = (max([4] + [len(row['size']) for row in self.rows]) + 1,
                                 max([4] + [len(row['dups']) for row in self.rows]) + 3)
         self.selected = next((i for i, row in enumerate(self.rows) if row['name'] == target), 0)
-        self.show_info(directory=not self.auto_quick_view or self.current_name() == '..')
+        if update_info:
+            self.show_info(directory=not self.auto_quick_view or self.current_name() == '..')
+        else:
+            self.update_listing_stats()
         if hasattr(self, 'app'):
             self.start_thumbnails()
             self.app.invalidate()
@@ -1368,10 +1565,7 @@ class DriveBrowser:
         selected = max(0, min(max(0, len(self.rows) - 1), index))
         if selected != self.selected:
             self.selected = selected
-            row = self.rows[self.selected]
-            if self.video_player is None and (self.auto_quick_view or
-                    (not row['node'].is_dir and os.path.splitext(row['name'])[1].lower() in VIDEO_SUFFIXES) or
-                    (self.graphics_mode and self.is_media(row))):
+            if self.video_player is None and self.auto_quick_view:
                 self.show_info(directory=self.current_name() == '..')
         self.app.invalidate()
 
@@ -1380,7 +1574,7 @@ class DriveBrowser:
 
     def toggle_auto_quick_view(self):
         self.auto_quick_view = not self.auto_quick_view
-        if self.auto_quick_view:
+        if self.auto_quick_view and self.video_player is None:
             self.show_info(directory=self.current_name() == '..')
         self.app.invalidate()
 
@@ -1396,7 +1590,7 @@ class DriveBrowser:
             self.parent()
         elif name is not None and self.rows[self.selected]['node'].is_dir:
             self.history.append((self.vfs.pwd(), name))
-            self.vfs.enter(name)
+            self.vfs.cwd = self.rows[self.selected]['node']
             self.refresh()
         else:
             self.show_info()
@@ -1419,6 +1613,26 @@ class DriveBrowser:
         self.theme = (self.theme + 1) % len(THEMES)
         self.app.invalidate()
 
+    def listing_stats(self):
+        visible = [row for row in self.rows if row['name'] != '..']
+        directories = sum(row['node'].is_dir for row in visible)
+        files = len(visible) - directories
+        return f'Dirs: {directories} · Files: {files}'
+
+    def update_listing_stats(self):
+        # Update a fixed logical row without replacing the opened preview/player.
+        for area in (self.info, self.video_metadata):
+            lines = area.text.split('\n')
+            for index, line in enumerate(lines):
+                if line.startswith('Dirs: '):
+                    text = self.listing_stats()
+                    if line != text:
+                        cursor = area.buffer.cursor_position
+                        lines[index] = text
+                        area.text = '\n'.join(lines)
+                        area.buffer.cursor_position = min(cursor, len(area.text))
+                    break
+
     def show_info(self, directory=False, preview_node=None):
         self.stop_video()
         self.video_epoch += 1
@@ -1428,6 +1642,7 @@ class DriveBrowser:
                                        for control in (self.play_button, self.stop_button, self.seek_control)):
             self.app.layout.focus(self.screen_stack[-1][0].table if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView) else self.control)
         self.info_directory = directory
+        self.image_preview_node = None
         self.native_preview = None
         self.info_lexer.colors = {}
         self.info_lexer.image_lines = {}
@@ -1477,24 +1692,24 @@ class DriveBrowser:
         self.info_lexer.colors[1] = (
             'green' if info.get('exists') else 'red') if directory or preview_node is not None else row['indicator']
         size = format_size(node.size, 0).strip()
-        lines = [node.id or '/', '●', 'Size:   ' + size,
+        lines = [node.id or '/', '●', 'Size:   ' + size, self.listing_stats(),
                  'Created:  ' + timestamp('created'),
                  'Modified: ' + timestamp('modified')]
         if not node.is_dir:
             lines.insert(2, 'Name: ' + node.name)
-            if os.path.splitext(node.name)[1].lower() in VIDEO_SUFFIXES:
+            if os.path.splitext(node.name)[1].lower() in VIDEO_SUFFIXES | AUDIO_SUFFIXES:
                 self.video_file_id = node.id
                 self.video_path = os.path.abspath(get_real_path(node.id))
                 self.video_status = 'Press Play'
                 render = self.info.window.render_info
                 width = max(1, min(80, render.window_width - 1)) if render else 36
-                height = max(1, min(30, self.app.output.get_size().rows - 11)) if hasattr(self, 'app') else 10
+                height = max(1, min(30, self.app.output.get_size().rows - 18)) if hasattr(self, 'app') else 10
                 self.video_dimensions = (width, height)
                 self.video_render_dimensions = (width, height)
                 self.video_first_row = 0
                 self.video_area.lexer.image_lines = {}
                 self.video_area.text = '\n'.join([' ' * width] * height)
-                if hasattr(self, 'app') and self.image_previews:
+                if hasattr(self, 'app') and self.image_previews and not self.audio_selected():
                     try:
                         asyncio.get_running_loop()
                     except RuntimeError:
@@ -1502,16 +1717,27 @@ class DriveBrowser:
                     else:
                         self.app.create_background_task(self.load_video_poster(self.video_path, self.video_epoch))
             if self.image_previews and os.path.splitext(node.name)[1].lower() in IMAGE_SUFFIXES:
+                self.image_preview_node = node
+                size = self.app.output.get_size()
                 render = self.info.window.render_info
+                self.image_preview_geometry = (size.columns, size.rows, render.window_width if render else 37)
                 width = max(1, render.window_width - 1) if render else 36
-                height = max(1, render.window_height - 10) if render else 14
+                # Reserve bottom metadata and the first duplicate as well as chrome.
+                height = max(1, self.app.output.get_size().rows - 20) if hasattr(self, 'app') else 14
                 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
                 lines.append('')
                 def native(art, dimensions):
-                    self.native_preview = (art, dimensions, len(lines) + 1)
-                for image_line in ascii_image_preview(get_real_path(node.id), width, height,
-                                                       color=True, native=native):
+                    self.native_preview = (art, dimensions, len(lines) + 1 + max(0, (height - dimensions[1]) // 2))
+                preview_lines = ascii_image_preview(get_real_path(node.id), width, height,
+                                                    color=True, native=native)
+                image_height = len(preview_lines) - 1
+                top = max(0, (height - image_height) // 2)
+                preview_lines = preview_lines[:1] + [''] * top + preview_lines[1:] + [''] * max(0, height - image_height - top)
+                for index, image_line in enumerate(preview_lines):
                     fragments = to_formatted_text(ANSI(image_line))
+                    if index and not self.native_preview:
+                        used = sum(get_cwidth(text) for _, text in fragments)
+                        fragments.insert(0, ('', ' ' * max(0, (width - used) // 2)))
                     self.info_lexer.image_lines[len(lines)] = fragments
                     lines.append(''.join(text for _, text in fragments))
                 lines.append('')
@@ -1526,7 +1752,7 @@ class DriveBrowser:
                 lines.append(f'Current disk size: {info.get("size")} bytes')
         if self.video_path:
             # Path/status/name/size/created/modified stay above the video.
-            boundary = 6
+            boundary = next(index for index, line in enumerate(lines) if line.startswith('Modified:')) + 1
             self.video_metadata.text = '\n'.join(safe_text(line) for line in lines[:boundary])
             lines = lines[boundary:]
             self.info_paths = {index - boundary: path for index, path in self.info_paths.items()
@@ -1619,6 +1845,7 @@ class DriveBrowser:
             self.app.layout.focus(self.control)
 
     def push(self, screen):
+        self.files_scrollbar_dragging = False
         self.stop_video()
         self.screen_stack.append((screen, self.app.layout))
         self.app.layout = Layout(screen.container, focused_element=screen.focus)
@@ -1638,6 +1865,7 @@ class DriveBrowser:
         self.stop_video()
         self.video_path = None
         self.native_preview = None
+        self.image_preview_node = None
         path = self.vfs.pwd().rstrip('/') or '/'
         store = ScanStore(self.vfs.db)
         store.delete('map', path)
@@ -1765,9 +1993,11 @@ def main_help(display_mode):
         'Info duplicates: Tab to info, arrows or click to select; Enter opens the duplicate location',
         '[#ff8800]h / Esc[/#ff8800] (in help): Close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',
-        'Video quick view: Play / Stop below video; seek bar click/wheel or focused Left/Right (5s)',
+        'Media quick view: p toggles Play / Stop; seek bar click/wheel or focused Left/Right (5s)',
         '[#ff8800]v[/#ff8800]: Toggle media files only / all (images, videos and audio)',
+        '[#ff8800].[/#ff8800]: Toggle dotfiles and hidden directories (shown by default)',
         '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; +/- display height (minimum 1 line), cache 128/256 pixels',
+        '[#ff8800]u / o[/#ff8800]: Table/graphics: show/hide selected subtree (..: all current subdirs) / toggle one or all levels',
         '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
         '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
         '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
@@ -1949,7 +2179,7 @@ class BookmarksView(PTScreen):
                 Frame(HSplit([
                     ConditionalContainer(browser.video_metadata, filter=Condition(lambda: browser.video_path is not None)),
                     ConditionalContainer(HSplit([
-                        browser.video_area,
+                        ConditionalContainer(browser.video_area, filter=Condition(lambda: not browser.audio_selected())),
                         VSplit([browser.play_button, browser.stop_button,
                                 Window(FormattedTextControl(lambda: safe_text(browser.video_status)), height=1)], height=1),
                         Window(browser.seek_control, height=1),
@@ -1992,6 +2222,7 @@ class BookmarksView(PTScreen):
             self.browser.video_epoch += 1
             self.browser.video_path = None
             self.browser.native_preview = None
+            self.browser.image_preview_node = None
             self.path.text = ''
             self.details.text = 'No bookmarks. Select a file and press b.'
             return
@@ -2004,10 +2235,11 @@ class BookmarksView(PTScreen):
             self.browser.video_epoch += 1
             self.browser.video_path = None
             self.browser.native_preview = None
+            self.browser.image_preview_node = None
             self.details.text = safe_text(path) + '\nUnavailable in VFS. Edit the path or remove this bookmark.'
             return
         self.browser.show_info(preview_node=node)
-        if not node.is_dir and os.path.splitext(node.name)[1].lower() not in set(IMAGE_SUFFIXES) | set(VIDEO_SUFFIXES):
+        if not node.is_dir and os.path.splitext(node.name)[1].lower() not in IMAGE_SUFFIXES | VIDEO_SUFFIXES | AUDIO_SUFFIXES:
             try:
                 local = get_real_path(path)
                 if os.path.isfile(local):
@@ -2434,7 +2666,7 @@ class MapControl(UIControl):
             symbol, color = '>', '#ffffff'
         style = f'fg:{color} bg:{background}'
         if index == screen.selected:
-            style += ' underline'
+            style += ' bg:#00ffff fg:#000000 underline'
         return (style, symbol), deadline
 
     def dirty_cell(self, index):

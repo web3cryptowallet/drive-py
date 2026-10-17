@@ -121,7 +121,7 @@ print(connection.frames)
         browser.video_image_id = None
         window = Mock()
         window.render_info = SimpleNamespace(window_width=20, window_height=5,
-                                             input_line_to_visible_line={0: 0, 1: 1})
+                                             input_line_to_visible_line={i: i for i in range(5)})
         browser.video_area = SimpleNamespace(window=window)
         browser.native_preview = ('\x1b_Ga=T,z=731;FIRST\x1b\\', (10, 2), 0)
         output = Mock()
@@ -251,6 +251,7 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
             fs = VirtualFS({'files': {}})
             with patch.object(fs, 'start_in_current_directory'):
                 browser = tui.DriveBrowser(fs, input=pipe, output=output)
+            browser.auto_quick_view = True
             browser.rows = []
             for name in ('notes.txt', 'clip.mov'):
                 node = SimpleNamespace(id='/disk/' + name, name=name, is_dir=False, size=10, info={})
@@ -301,6 +302,7 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(fs, 'get_full_info', return_value={'exists': True, 'size': 10}), \
                     patch.object(tui, 'prepare_grid_thumbnail', return_value=item) as prepare, \
                     patch.object(tui, 'VideoPreview') as player:
+                browser.auto_quick_view = True
                 browser.select(1)
                 for _ in range(100):
                     if 'POSTER' in browser.video_area.text:
@@ -323,7 +325,7 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
             browser.rows = [{'name': node.name, 'node': node, 'indicator': 'green',
                              'color': 'white', 'label': node.name, 'size': '10', 'dups': '0'}]
             fake = SimpleNamespace(events=Queue(), thread=Mock(), start=Mock(), close=Mock(), seek=Mock())
-            with patch.object(fs, 'get_full_info', return_value={'exists': True, 'size': 10}), \
+            with patch.object(fs, 'get_full_info', return_value={'exists': True, 'size': 10, 'dups': ['/first-copy.mov'], 'dups_states': [{'exists': True}]}), \
                     patch.object(tui, 'VideoPreview', return_value=fake) as factory:
                 browser.open()
                 factory.assert_not_called()
@@ -385,6 +387,15 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('Other Duplicates', browser.info.text)
                     self.assertLess(metadata_position.ypos, video_position.ypos)
                     self.assertGreater(duplicates_position.ypos, play_position.ypos)
+                    first_duplicate = next(iter(browser.info_paths))
+                    self.assertIn(first_duplicate, browser.info.window.render_info.input_line_to_visible_line)
+                    with patch.object(browser.app.output, 'get_size', return_value=Size(rows=22, columns=80)):
+                        browser.app._on_resize()
+                        await asyncio.sleep(.06)
+                        self.assertIn(first_duplicate, browser.info.window.render_info.input_line_to_visible_line)
+                        positions = browser.app.renderer._last_screen.visible_windows_to_write_positions
+                        self.assertIn(browser.play_button.window, positions)
+                        self.assertLessEqual(positions[browser.video_area.window].height, 5)
                     pipe.send_text('\t\r')  # Stop button.
                     await asyncio.sleep(.04)
                     fake.close.assert_called()

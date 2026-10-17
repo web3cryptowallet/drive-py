@@ -161,6 +161,76 @@ class CacheTests(unittest.TestCase):
                     self.assertLessEqual(height, 4)
                     self.assertTrue(width == 12 or height == 4)
 
+    def test_expand_subdirs_levels_scope_and_nested_navigation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ['1/2/3/deep.png', '1/2/two.txt', '1/a/a.txt', 'other/o.txt']:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('fixture')
+            (root / '1' / 'loop').symlink_to(root / '1', target_is_directory=True)
+            fs = VirtualFS({'files': {}})
+            browser = tui.DriveBrowser(fs, path=str(root), input=DummyInput(), output=DummyOutput())
+            browser.toggle_graphics()
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == '1')
+            original_cwd = fs.pwd()
+            browser.expand_subdirs()
+            names = [row['name'] for row in browser.rows]
+            self.assertIn('1/2', names)
+            self.assertNotIn('1/2/3', names)
+            self.assertNotIn('other/o.txt', names)
+            self.assertEqual(fs.pwd(), original_cwd)
+            browser.expand_subdirs()  # Same directory toggles closed.
+            self.assertNotIn('1/2', [row['name'] for row in browser.rows])
+            browser.expand_subdirs()
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == '1/2')
+            browser.expand_subdirs()
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == '1/a')
+            browser.expand_subdirs()
+            names = [row['name'] for row in browser.rows]
+            self.assertIn('1/2/3', names)
+            self.assertIn('1/a/a.txt', names)
+            self.assertLess(names.index('1/2/two.txt'), names.index('1/a'))
+            self.assertNotIn('1/2/3/deep.png', names)
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == '1/2/3')
+            browser.expand_subdirs()
+            self.assertIn('1/2/3/deep.png', [row['name'] for row in browser.rows])
+            content = browser.grid_content(60, 20)
+            index = next(i for i, row in enumerate(browser.rows) if row['name'] == '1/2')
+            fragments = content.get_line(browser.grid_positions[index][1])
+            self.assertIn('class:expanded-dir-name', fragments[0][0])
+            self.assertTrue(all('class:expanded-dir' in style for style, _ in fragments))
+            self.assertEqual(sum(tui.get_cwidth(text) for _, text in fragments), 60)
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == '..')
+            browser.toggle_expansion_depth()
+            browser.expand_subdirs()
+            self.assertIn('other/o.txt', [row['name'] for row in browser.rows])
+            self.assertFalse(any('/loop/' in row['name'] for row in browser.rows))
+            browser.toggle_graphics()
+            self.assertIn('1/2', [row['name'] for row in browser.rows])
+            browser.toggle_graphics()
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == '1/2/3')
+            browser.open()
+            self.assertEqual(fs.pwd(), original_cwd + '/1/2/3')
+            self.assertFalse(browser.expanded_dirs)
+
+    def test_grid_gutter_and_purple_audio_play_icon(self):
+        fs = VirtualFS({'files': {}})
+        with patch.object(fs, 'start_in_current_directory'):
+            browser = tui.DriveBrowser(fs, input=DummyInput(), output=DummyOutput())
+        browser.graphics_mode = True
+        browser.rows = [dict(name=name, node=SimpleNamespace(id=name, is_dir=False), color='white')
+                        for name in ['first.png', 'song.mp3', 'last.png']]
+        with patch.object(browser, 'icon_dimensions', return_value=(8, 4)):
+            content = browser.grid_content(44, 20)
+        self.assertEqual([browser.grid_positions[i][0] for i in range(3)], [0, 15, 30])
+        fragments = content.get_line(2)
+        self.assertTrue(any('class:audio-play' in style and '▶' in text for style, text in fragments))
+        for line in range(content.line_count):
+            text = ''.join(text for _, text in content.get_line(line))
+            self.assertEqual(text[14], ' ')
+            self.assertEqual(text[29], ' ')
+
     def test_centered_grid_pending_and_filename_only_items(self):
         fs = VirtualFS({'files': {}})
         with patch.object(fs, 'start_in_current_directory'):
@@ -176,9 +246,12 @@ class CacheTests(unittest.TestCase):
             lines = [''.join(part[1] for part in content.get_line(i)) for i in range(content.line_count)]
             self.assertEqual(lines[1][:14], '     ****     ')
             self.assertIn(' photo.png ', lines[4])
-            self.assertEqual(lines[6].strip(), 'folder')
+            self.assertEqual(lines[6].strip(), 'folder/')
             self.assertEqual(lines[7].strip(), 'notes.txt')
             self.assertEqual(content.line_count, 8)
+            self.assertEqual(content.cursor_position.y, 4)  # Include filename in scroll metrics.
+            browser.select(2)
+            self.assertEqual(browser.grid_content(42, 20).cursor_position.y, 7)
             self.assertIn('class:muted', content.get_line(7)[0][0])
             self.assertNotIn('[DIR]', ''.join(lines))
             self.assertNotIn('[FILE]', ''.join(lines))
@@ -193,6 +266,55 @@ class CacheTests(unittest.TestCase):
 
 
 class GridTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expansion_key_bindings(self):
+        with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
+            root = Path(directory)
+            (root / 'one' / 'two').mkdir(parents=True)
+            (root / 'one' / 'two' / 'file.txt').write_text('test')
+            fs = VirtualFS({'files': {}})
+            browser = tui.DriveBrowser(fs, path=str(root), input=pipe, output=DummyOutput())
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == 'one')
+            task = asyncio.create_task(browser.app.run_async())
+            try:
+                await asyncio.sleep(.05)
+                browser.app.layout.focus(browser.info)
+                pipe.send_text('ou')
+                for _ in range(100):
+                    if any(row['name'] == 'one/two/file.txt' for row in browser.rows):
+                        break
+                    await asyncio.sleep(.01)
+                self.assertFalse(browser.graphics_mode)
+                self.assertTrue(browser.expand_all_levels)
+                self.assertIn('one/two/file.txt', [row['name'] for row in browser.rows])
+                self.assertEqual(browser.current_name(), 'one')
+                directory_index = browser.selected
+                browser.selected = 0
+                for mode in (1, 2, 3):
+                    browser.display_mode = mode
+                    content = browser.control.create_content(60, 20)
+                    fragments = content.get_line(directory_index)
+                    self.assertTrue(any('class:expanded-dir-name' in style for style, _ in fragments))
+                    self.assertTrue(all('class:expanded-dir' in style for style, _ in fragments))
+                browser.selected = directory_index
+                browser.app.layout.focus(browser.info)
+                pipe.send_text('u')
+                for _ in range(100):
+                    if not browser.expanded_dirs:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertFalse(browser.expanded_dirs)
+                self.assertTrue(browser.app.layout.has_focus(browser.control))
+                browser.app.layout.focus(browser.info)
+                pipe.send_text('u')
+                for _ in range(100):
+                    if any(row['name'] == 'one/two/file.txt' for row in browser.rows):
+                        break
+                    await asyncio.sleep(.01)
+                self.assertIn('one/two/file.txt', [row['name'] for row in browser.rows])
+            finally:
+                browser.app.exit()
+                await task
+
     async def test_grid_conversion_keys_and_sqlite_reopen(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)

@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.992
+drive.py v0.993
 
-v0.992 - persistent editable bookmarks, media quick view, remembered selection and Info fixes
+v0.993 - directory expansion, audio playback, draggable scrolling and consistent quick view
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -311,7 +311,22 @@ v0.99
 - PERFORMANCE: Move expert map projection and mode/order transitions off the UI thread; reduce SQLite processing overhead by grouping metadata writes and skipping empty expert checkpoints
 
 
-v0.992 — 2026-10-17
+v0.991
+
+- TUI: Show the drive.py PNG logo at half size in root quick view on Kitty-compatible graphics terminals
+- TUI: Press `v` to toggle media-only (images, videos, audio) / all files; non-media files use compact gray lines only in graphics mode; directories always remain visible with normal colors
+- TUI: Select a video for a large still preview, then click **Play** (or Tab to Play and press Enter); **Stop** ends playback. Video sits after Modified and before Other Duplicates, with controls below it; seek by clicking/scrolling the bar or focused Left/Right. Uses `ffprobe` (from FFmpeg) for video rotation and requires `python-mpv` and native `libmpv` (`sudo apt-get install libmpv2` on Ubuntu)
+- TUI: Thumbnail WebP, AVIF and additional Pillow image formats; MOV/MP4/MKV/WebM/AVI and other video thumbnails require `ffmpeg` on PATH
+- TUI: Toggle thumbnail graphics mode with `g`; `+`/`-` adjust icon display height down to one line while cached previews use 128 or 256 pixel bounds, centered and fitted, with filenames below; background workers prepare medium-quality cached JPEGs linked in the database
+- TUI: Press Enter on an image to show a real image in quick view via term-image AutoImage.draw() on Kitty-compatible terminals (color block fallback elsewhere), with metadata and duplicate links; Tab scrolls the pane
+- VIDEO: Play/Stop controls and a clickable, scrollable seek bar appear after Modified and before Other Duplicates; opening a video loads a large still without autoplay (selection with `y` on, Enter with `y` off)
+- FIX: Suppress and filter Kitty graphics replies so they cannot navigate to root or toggle previews off
+- FIX: Fit native video frames to smaller terminal viewports and keep the file list usable when video controls cannot fit
+- FIX: Reduce playback blinking by displaying each new native frame before releasing the previous frame
+- FIX: Apply video rotation explicitly before scaling to fix the portrait MOV crop assertion; isolate decoding in a child process so native failures cannot terminate the browser
+- STORAGE: Cache medium-quality JPEG thumbnails at 128/256 pixel bounds, link cache IDs to source files in the database, and invalidate previews when source metadata or JPEG quality changes
+
+v0.992
 
 - BOOKMARKS: Press `b` from any screen to toggle the selected file or directory; on `..`, bookmark the current directory. Bookmarked entries show `B` in both the file table and graphics view.
 - BOOKMARKS: Press `j` to open the editable numbered list. Arrows or clicks select and preview; Enter opens the item. With up to nine entries, press its number directly; for larger lists, Tab to the number field, type the number and press Enter.
@@ -319,25 +334,23 @@ v0.992 — 2026-10-17
 - BOOKMARKS: Press `e` to edit the selected bookmark's VFS path, then Enter or Save path to save. Press `b` in bookmarks, Delete while the list is focused, or Remove to delete the bookmark. Tab moves between the list, preview, fields and buttons; Esc closes.
 - BOOKMARKS: Save changes and cursor selection immediately to `.bookmarks.json` in the app's working directory. Restore bookmarks and the selected row/preview after reopening or restarting; accept older bookmark path-array files. Bookmark paths resolve configured aliases, local mount paths and original report prefixes; unavailable targets stay open for correction. File bookmarks open their parent directory, select the file and show its Info.
 - TUI: Keep `g` for thumbnail graphics mode; use `J` (Shift+j) for scanner heavy normal/expert order.
-- FIX: Moving file selection while a video plays retains its Info, preview and controls, including automatic quick view and graphics mode. Enter still explicitly opens another entry.
 - FIX: Highlight the selected Info row. Tab to Info, select a duplicate with arrows or a click, then Enter to open its directory and select the file. Delete queues the selected duplicate.
 
-v0.991 — 2026-10-16
+v0.993
 
-- TUI: Show the drive.py PNG logo at half size in root quick view on Kitty-compatible graphics terminals
-- TUI: Press `v` to toggle media-only (images, videos, audio) / all files; non-media files use compact gray lines only in graphics mode; directories always remain visible with normal colors
-- TUI: Select a video for a large still preview, then click **Play** (or Tab to Play and press Enter); **Stop** ends playback. Video sits after Modified and before Other Duplicates, with controls below it; seek by clicking/scrolling the bar or focused Left/Right. Uses `ffprobe` (from FFmpeg) for video rotation and requires `python-mpv` and native `libmpv` (`sudo apt-get install libmpv2` on Ubuntu)
-- TUI: Thumbnail WebP, AVIF and additional Pillow image formats; MOV/MP4/MKV/WebM/AVI and other video thumbnails require `ffmpeg` on PATH
-- TUI: Toggle thumbnail graphics mode with `g`; `+`/`-` adjust icon display height down to one line while cached previews use 128 or 256 pixel bounds, centered and fitted, with filenames below; background workers prepare medium-quality cached JPEGs linked in the database
-- TUI: Toggle automatic quick view with `y` (default off) and image previews with `i` (default on); keep opened images stable during cursor movement
-- TUI: Press Enter on an image to show a real image in quick view via term-image AutoImage.draw() on Kitty-compatible terminals (color block fallback elsewhere), with metadata and duplicate links; Tab scrolls the pane
-- VIDEO: Play/Stop controls and a clickable, scrollable seek bar appear after Modified and before Other Duplicates; selecting a video loads a large still without autoplay
-- FIX: Suppress and filter Kitty graphics replies so they cannot navigate to root or toggle previews off
-- FIX: Fit native video frames to smaller terminal viewports and keep the file list usable when video controls cannot fit
-- FIX: Reduce playback blinking by displaying each new native frame before releasing the previous frame
-- FIX: Apply video rotation explicitly before scaling to fix the portrait MOV crop assertion; isolate decoding in a child process so native failures cannot terminate the browser
-- STORAGE: Cache medium-quality JPEG thumbnails at 128/256 pixel bounds, link cache IDs to source files in the database, and invalidate previews when source metadata or JPEG quality changes
-
+- TUI: Press `.` with Files focused to hide/show dotfiles and dot-prefixed directories, including expanded subtrees. `..` remains visible; files are shown by default.
+- FIX: Media replay defers saved seeks until loading completes; replay after EOF starts at zero. Bookmark `B` markers are bright cyan and bold in table and graphics modes.
+- TUI: MP3 and other supported audio files show a purple ▶ in graphics mode. Select one and press **Play** or `p` in quick view; **Stop** and seeking use the same player controls as video; `p` toggles playback in main and bookmark previews. Native libmpv is required.
+- TUI: Graphics tiles have a one-cell gutter. Preview height reserves bottom controls, the duplicates heading and the first duplicate row.
+- TUI: In table or graphics mode, `u` toggles the selected directory subtree open/closed from Files, Info or player focus; select `..` to target all current subdirectories. Select a child to expand deeper, or press `o` to toggle one/all levels. Expanded directory names are bold over a lighter full-row background. Nested rows show relative paths; Enter opens a directory. Directory symlinks are not expanded.
+- TUI: Info shows directory/file counts after Size, based on current visible entries including expanded subdirectories and active filters; `..` is excluded.
+- TUI: Info header shows `y:auto/off`, `o:one/all`, `.:show/hide` (dotfile visibility) and `i:on/off`.
+- TUI: Toggle automatic quick view with `y` (default off): on previews every selected file type in table and graphics modes; off requires Enter. Toggle image previews with `i` (default on); keep opened images stable during cursor movement
+- TUI: Click or drag the Files scrollbar to move through the listing in table or graphics mode; the top and bottom select the first and last entry.
+- FIX: Image quick view automatically rescales when terminal height or width changes, keeping the whole image visible.
+- FIX: Graphics scrolling includes the final filename row. Automatic image quick view recalculates from stable viewport bounds when moving between landscape and portrait; previews preserve aspect ratio, with small images centered at natural pixel size.
+- FIX: Moving file selection while a video plays retains its Info, preview and controls, including automatic quick view and graphics mode. Enter still explicitly opens another entry.
+- LIVE MAP: Highlight the bucket cursor, including end-follow `>`, with a cyan background and black text.
 
 ## Recomended projects
 
