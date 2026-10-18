@@ -269,6 +269,7 @@ try:
     from prompt_toolkit.output import ColorDepth
     from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
     from prompt_toolkit.layout.margins import ScrollbarMargin
+    from prompt_toolkit.layout.screen import Char
     from prompt_toolkit.mouse_events import MouseEventType, MouseButton
     from prompt_toolkit.styles import DynamicStyle, Style
     from prompt_toolkit.utils import get_cwidth
@@ -284,6 +285,49 @@ from vfs.paths import get_real_path
 from vfs.thumbnails import thumbnail, IMAGE_SUFFIXES, THUMBNAIL_SUFFIXES, MEDIA_SUFFIXES, VIDEO_SUFFIXES, AUDIO_SUFFIXES
 from vfs.scanner import (DriveScanner, FileMap, Pagination, ScanControls, ScanEntry,
                          ScanStats, ScanStore, ScanTiming)
+
+
+NUMBER_TEXT = re.compile(r'\d+(?:[.,]\d+)*')
+
+
+class NumberHighlight(HSplit):
+    """Color final visible numeric text across every widget and screen."""
+
+    def __init__(self, container):
+        super().__init__([container])
+
+    def write_to_screen(self, screen, mouse_handlers, write_position,
+                        parent_style, erase_bg, z_index):
+        super().write_to_screen(screen, mouse_handlers, write_position,
+                                parent_style, erase_bg, z_index)
+        screen.draw_with_z_index(10**9, lambda: self.highlight(screen))
+
+    @staticmethod
+    def highlight(screen):
+        for row in screen.data_buffer.values():
+            columns = sorted(row)
+            text = ''
+            positions = []
+            previous = None
+            for column in columns:
+                # Separate nonadjacent cells; keep wide/combining glyph offsets.
+                if previous is not None and column != previous + 1:
+                    text += '\n'
+                    positions.append(None)
+                cell = row[column]
+                char = cell.char
+                if 'class:literal' in cell.style:
+                    char = ' ' * len(char)
+                if 'class:hash' in cell.style:
+                    row[column] = Char(cell.char, cell.style + ' fg:#ffd700')
+                text += char
+                positions.extend([column] * len(char))
+                previous = column
+            for match in NUMBER_TEXT.finditer(text):
+                for column in set(positions[match.start():match.end()]):
+                    if column is not None:
+                        cell = row[column]
+                        row[column] = Char(cell.char, cell.style + ' fg:#ffd700')
 
 
 async def background_call(function, *args, **kwargs):
@@ -531,7 +575,8 @@ def fit(text, width):
 def bookmark_label(style, text, marked, offset=1):
     """Highlight only the bookmark marker, retaining row background and widths."""
     if not marked or len(text) <= offset or text[offset] != 'B':
-        return [(style, text)]
+        return [(style + ' class:literal', text)]
+    style += ' class:literal'
     return [(style, text[:offset]), (style + ' class:bookmark', 'B'),
             (style, text[offset + 1:])]
 
@@ -578,7 +623,7 @@ class FilesControl(UIControl):
             expanded = row['node'].is_dir and row['node'].id in browser.expanded_dirs
             if expanded and not selected:
                 base += ' class:expanded-dir'
-            name_style = base + (' class:expanded-dir-name' if expanded else '')
+            name_style = base + ' class:literal' + (' class:expanded-dir-name' if expanded else '')
             label = row['label']
             marked = browser.bookmark_path(row) in browser.bookmarks
             if marked:
@@ -661,22 +706,28 @@ class InfoLexer(Lexer):
     def __init__(self):
         self.colors = {}
         self.image_lines = {}
+        self.hash_lines = set()
 
     def lex_document(self, document):
         colors = self.colors.copy()
         image_lines = self.image_lines.copy()
+        hash_lines = self.hash_lines.copy()
 
         def line(index):
             if index >= len(document.lines):
                 return []
             text = document.lines[index]
-            if index == 0:
-                return [('class:selected', text)]
+            if index in hash_lines:
+                return [('class:hash', text)]
+            if index == 0 and not text.startswith(('Other Duplicates', 'Current disk size:')):
+                return [('class:selected class:literal', text)]
             if index in image_lines:
                 return image_lines[index]
             if index in colors and text.startswith('●'):
-                return [('class:' + colors[index], text[:1]), ('', text[1:])]
-            return [('', text)]
+                return [('class:' + colors[index], text[:1]), ('class:literal', text[1:])]
+            generated = text.startswith(('Size:', 'Dirs:', 'Created:', 'Modified:',
+                                         'Image:', 'Other Duplicates', 'Current disk size:'))
+            return [('' if generated else 'class:literal', text)]
 
         return line
 
@@ -750,7 +801,7 @@ class DriveBrowser:
         self.video_first_row = 0
         self.video_dimensions = (1, 1)
         self.video_render_dimensions = (1, 1)
-        self.video_metadata = TextArea(read_only=True, wrap_lines=True,
+        self.video_metadata = TextArea(read_only=True, wrap_lines=True, lexer=InfoLexer(),
                                        height=Dimension(min=1, preferred=7, max=7))
         self.video_task = None
         self.video_workers = []
@@ -911,7 +962,7 @@ class DriveBrowser:
                       width=lambda: Dimension.exact((get_app().output.get_size().columns + 1) // 2)),
             ]),
         ])
-        self.main_layout = Layout(layout, focused_element=self.control)
+        self.main_layout = Layout(NumberHighlight(layout), focused_element=self.control)
         self.app = Application(layout=self.main_layout,
                                key_bindings=bindings, full_screen=True, mouse_support=True,
                                style=DynamicStyle(self.style), color_depth=ColorDepth.DEPTH_24_BIT,
@@ -1644,6 +1695,7 @@ class DriveBrowser:
         self.info_directory = directory
         self.image_preview_node = None
         self.native_preview = None
+        self.info_lexer.hash_lines = set()
         self.info_lexer.colors = {}
         self.info_lexer.image_lines = {}
         self.info_paths = {}
@@ -1741,6 +1793,7 @@ class DriveBrowser:
                     self.info_lexer.image_lines[len(lines)] = fragments
                     lines.append(''.join(text for _, text in fragments))
                 lines.append('')
+            self.info_lexer.hash_lines.add(len(lines))
             hashes = node.info.get('hashinfo') or ''
             lines.extend([', '.join(sorted(hashes)) if isinstance(hashes, set) else str(hashes), '',
                           f'Other Duplicates ({len(info.get("dups", []))}):'])
@@ -1755,6 +1808,7 @@ class DriveBrowser:
             boundary = next(index for index, line in enumerate(lines) if line.startswith('Modified:')) + 1
             self.video_metadata.text = '\n'.join(safe_text(line) for line in lines[:boundary])
             lines = lines[boundary:]
+            self.info_lexer.hash_lines = {index - boundary for index in self.info_lexer.hash_lines if index >= boundary}
             self.info_paths = {index - boundary: path for index, path in self.info_paths.items()
                                if index >= boundary}
             self.info_lexer.colors = {index - boundary: color for index, color in self.info_lexer.colors.items()
@@ -1848,7 +1902,7 @@ class DriveBrowser:
         self.files_scrollbar_dragging = False
         self.stop_video()
         self.screen_stack.append((screen, self.app.layout))
-        self.app.layout = Layout(screen.container, focused_element=screen.focus)
+        self.app.layout = Layout(NumberHighlight(screen.container), focused_element=screen.focus)
         screen.start()
         self.app.invalidate()
 
@@ -1871,6 +1925,7 @@ class DriveBrowser:
         store.delete('map', path)
         store.delete('position', path)
         self.info_paths = {}
+        self.info_lexer.hash_lines = set()
         self.info_lexer.colors = {}
         self.info_lexer.image_lines = {}
         self.info.lexer = self.info_lexer
@@ -2160,7 +2215,7 @@ class BookmarksView(PTScreen):
         self.details = browser.info
         self.original_info_directory = browser.info_directory
         self.number = TextArea(height=1, multiline=False, prompt='Number: ')
-        self.path = TextArea(height=1, multiline=False, prompt='Path: ')
+        self.path = TextArea(height=1, multiline=False, prompt='Path: ', style='class:literal')
         self.focus = self.table
         self.bind(['escape'], self.close, eager=True)
         self.bind(['tab'], lambda: browser.app.layout.focus_next())
@@ -2206,7 +2261,7 @@ class BookmarksView(PTScreen):
             self.browser.show_info(directory=self.original_info_directory)
 
     def rows(self):
-        return [[('', f'{i}. {safe_text(path)}')] for i, path in enumerate(self.browser.bookmarks, 1)]
+        return [[('', f'{i}. '), ('class:literal', safe_text(path))] for i, path in enumerate(self.browser.bookmarks, 1)]
 
     def refresh(self):
         self.table.index = max(0, min(self.table.index, len(self.browser.bookmarks) - 1))
@@ -2480,7 +2535,7 @@ class ActionsView(PTScreen):
         for op, path in self.browser.actions:
             exists = get_stat_info(path).get('exists')
             result.append([('', f'{op:<10} '), ('class:green' if exists else 'class:red', '●'),
-                           ('', ' ' + safe_text(path))])
+                           ('class:literal', ' ' + safe_text(path))])
         self.cached_rows = result
 
     def clear(self):
@@ -2926,15 +2981,15 @@ class ScannerView(PTScreen):
         self.bind(['enter'], self.settings, filter=has_focus(self.limit) | has_focus(self.byte_limit))
         self.container = HSplit([
             Frame(HSplit([
-                Window(FormattedTextControl('Drive map — ' + safe_text(self.path)), height=1, style='class:header'),
+                Window(FormattedTextControl([('', 'Drive map — '), ('class:literal', safe_text(self.path))]), height=1, style='class:header'),
                 Window(FormattedTextControl(self.controls_text), height=1),
                 Window(FormattedTextControl(self.summary), height=1),
-                Window(FormattedTextControl(self.stats_text), height=2),
+                Window(FormattedTextControl(lambda: self.path_fragments(self.stats_text())), height=2),
                 VSplit([Window(FormattedTextControl(' Paths/bucket '), width=len(' Paths/bucket ')),
                         self.limit, Window(FormattedTextControl(' MiB/bucket '), width=len(' MiB/bucket ')),
                         self.byte_limit, Window()], height=1),
                 self.map_window,
-                Window(FormattedTextControl(self.bucket_summary), height=lambda: 2 if self.scope_path else 1),
+                Window(FormattedTextControl(lambda: self.path_fragments(self.bucket_summary())), height=lambda: 2 if self.scope_path else 1),
                 Window(self.filters, height=1, wrap_lines=False, always_hide_cursor=True),
                 Window(FormattedTextControl('Name / path    Size'), height=1, style='class:table-header'),
                 self.detail_window,
@@ -3247,8 +3302,8 @@ class ScannerView(PTScreen):
                     prefix = scope
             result.append([('', progress), ('fg:' + color, symbol), ('', ' '),
                 ('fg:#ffd700', safe_text(prefix)),
-                ('', safe_text(path[len(prefix):]) +
-                 ('' if entry.is_dir else '  ' + format_size(entry.size, 0).strip()))])
+                ('class:literal', safe_text(path[len(prefix):])),
+                ('', '' if entry.is_dir else '  ' + format_size(entry.size, 0).strip())])
         return result
 
     def set_page(self, page):
@@ -3493,6 +3548,13 @@ class ScannerView(PTScreen):
     def summary(self):
         return (f'{self.phase} | {self.model.mode} | {"fixed" if self.model.fixed else "scroll"} | '
                 f'{len(self.model.entries)} paths · {len(self.model.buckets)} buckets')
+
+    def path_fragments(self, text):
+        for path in (safe_text(self.stats.path), safe_text(self.scope_path or '')):
+            if path and path in text:
+                before, after = text.split(path, 1)
+                return [('', before), ('class:literal', path), ('', after)]
+        return [('', text)]
 
     def stats_text(self):
         rate = self.stats.mb_per_second

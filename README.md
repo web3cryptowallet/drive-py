@@ -66,6 +66,13 @@ Requires uv and generated `log-megadisks/` data.
 
 ## Main TUI (prompt_toolkit)
 
+Startup directories and configured mount roots may be symlinks; their resolved
+targets are used to match catalog drive aliases.
+
+All screens highlight program-generated numbers in gold (`40` in `40 MB`,
+`1.25` in `1.25 GiB/s`); units keep their normal colors. Complete hashes are gold. Numbers in filenames and paths
+keep their normal colors. See [number highlighting](FEATURE-number-highlighting.md).
+
 ```bash
 ./run.sh -d /path/to/logs
 ./run.sh -c sqlite

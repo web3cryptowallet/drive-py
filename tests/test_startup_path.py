@@ -16,6 +16,25 @@ spec.loader.exec_module(tui)
 
 
 class StartupPathTests(unittest.TestCase):
+    def test_symlink_startup_and_symlink_mount_reuse_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mount = root / 'disk'
+            target = mount / 'folder'
+            target.mkdir(parents=True)
+            link = root / 'shortcut'
+            link.symlink_to(target, target_is_directory=True)
+            mount_link = root / 'mounted-link'
+            mount_link.symlink_to(mount, target_is_directory=True)
+            cwd = os.getcwd()
+            for configured in [mount, mount_link]:
+                with self.subTest(configured=configured), patch.dict(aliases, {'disk': str(configured)}, clear=True):
+                    fs = VirtualFS({'files': {'/disk/folder/catalog.txt': {'MD5:abc:4'}}})
+                    fs.start_in_current_directory(str(link))
+                    self.assertEqual(fs.pwd(), '/disk/folder')
+                    self.assertIn('catalog.txt', [node.name for node in fs.list_nodes()])
+                    self.assertEqual(os.getcwd(), cwd)
+
     def test_local_paths_and_aliases_without_chdir(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

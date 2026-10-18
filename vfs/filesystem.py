@@ -58,8 +58,12 @@ class VirtualFS:
         path = os.path.abspath(os.path.expanduser(os.fspath(path))) if explicit else os.getcwd()
         if explicit and not os.path.isdir(path):
             raise ValueError(f'Startup path is not a directory: {path}')
-        for alias, local in sorted(aliases.items(), key=lambda item: len(item[1]), reverse=True):
-            local = os.path.abspath(local)
+        # Match physical targets so symlinked startup paths and mount roots
+        # reuse the catalog alias instead of opening an unindexed local tree.
+        path = os.path.realpath(path)
+        mounts = [(alias, os.path.realpath(os.path.expanduser(local)))
+                  for alias, local in aliases.items()]
+        for alias, local in sorted(mounts, key=lambda item: len(item[1]), reverse=True):
             if path == local or path.startswith(local.rstrip('/') + '/'):
                 path = '/' + alias + path[len(local):]
                 break
