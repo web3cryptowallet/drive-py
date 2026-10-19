@@ -623,7 +623,7 @@ class FilesControl(UIControl):
             expanded = row['node'].is_dir and row['node'].id in browser.expanded_dirs
             if expanded and not selected:
                 base += ' class:expanded-dir'
-            name_style = base + ' class:literal' + (' class:expanded-dir-name' if expanded else '')
+            name_style = base + ' class:literal' + (' class:expanded-dir-name' if expanded else '') + browser.scan_row_style(row)
             label = row['label']
             marked = browser.bookmark_path(row) in browser.bookmarks
             if marked:
@@ -823,6 +823,7 @@ class DriveBrowser:
         self.thumbnail_errors = 0
         self.vfs = vfs
         self.selected = 0
+        self.scan_selection = set()
         self.display_mode = 1
         self.theme = 0
         self.styles = [Style.from_dict({**theme,
@@ -895,6 +896,10 @@ class DriveBrowser:
                                        self.app.layout.has_focus(self.screen_stack[-1][0].number)))))(lambda event: self.toggle_playback())
         bind(['a'], lambda event: self.push(ActionsView(self)))
         bind(['s'], lambda event: self.push(ScannerView(self)))
+        bind([' '], lambda event: self.toggle_scan_selection(), filter=files_focused)
+        bind(['insert'], lambda event: self.toggle_scan_selection(True), filter=files_focused)
+        bind(['*'], lambda event: self.invert_scan_selection(), filter=files_focused)
+        bind(['-'], lambda event: self.clear_scan_selection(), filter=files_focused)
         bind(['R'], lambda event: self.reset_current_map())
         bind(['h'], lambda event: self.push(HelpView(self, 'File manager help', main_help(self.display_mode))))
         bind(['delete'], lambda event: self.queue_remove())
@@ -920,7 +925,7 @@ class DriveBrowser:
         bind(['v'], lambda event: self.toggle_media_filter())
         bind(['.'], lambda event: self.toggle_dotfiles(), filter=files_focused)
         bind(['+', '='], lambda event: self.resize_icons(1), filter=files_focused)
-        bind(['-'], lambda event: self.resize_icons(-1), filter=files_focused)
+        bind(['_'], lambda event: self.resize_icons(-1), filter=files_focused)
         bind(['y'], lambda event: self.toggle_auto_quick_view())
         bind(['i'], lambda event: self.toggle_image_previews())
         bind(['n'], lambda event: self.cycle_mode())
@@ -1308,8 +1313,8 @@ class DriveBrowser:
                     if entries[0] != self.selected:
                         style += ' class:expanded-dir'
                     name = label.rstrip()
-                    return bookmark_label(style + ' class:expanded-dir-name', name, prefix == ' B ') + [(style, ' ' * (width - get_cwidth(name)))]
-                return bookmark_label(style, label, prefix == ' B ')
+                    return bookmark_label(style + ' class:expanded-dir-name' + self.scan_row_style(row), name, prefix == ' B ') + [(style, ' ' * (width - get_cwidth(name)))]
+                return bookmark_label(style + self.scan_row_style(row), label, prefix == ' B ')
             fragments = []
             for column, entry in enumerate(entries):
                 if column:
@@ -1557,6 +1562,7 @@ class DriveBrowser:
 
     def refresh(self, target=None, *, update_info=True):
         if self.expansion_cwd != self.vfs.pwd():
+            self.scan_selection.clear()
             self.expanded_dirs.clear()
             self.expansion_cwd = self.vfs.pwd()
         entries = []
@@ -1622,6 +1628,27 @@ class DriveBrowser:
 
     def move(self, delta):
         self.select(self.selected + delta)
+
+    def scan_row_style(self, row):
+        return ' fg:#ffd700' if row['node'].id in self.scan_selection and row['name'] != '..' else ''
+
+    def toggle_scan_selection(self, advance=False):
+        if self.rows:
+            row = self.rows[self.selected]
+            if row['name'] != '..' and row['node'].is_dir:
+                self.scan_selection.symmetric_difference_update([row['node'].id])
+        if advance:
+            self.move(1)
+        self.app.invalidate()
+
+    def invert_scan_selection(self):
+        self.scan_selection.symmetric_difference_update(
+            row['node'].id for row in self.rows if row['name'] != '..' and row['node'].is_dir)
+        self.app.invalidate()
+
+    def clear_scan_selection(self):
+        self.scan_selection.clear()
+        self.app.invalidate()
 
     def toggle_auto_quick_view(self):
         self.auto_quick_view = not self.auto_quick_view
@@ -2051,7 +2078,7 @@ def main_help(display_mode):
         'Media quick view: p toggles Play / Stop; seek bar click/wheel or focused Left/Right (5s)',
         '[#ff8800]v[/#ff8800]: Toggle media files only / all (images, videos and audio)',
         '[#ff8800].[/#ff8800]: Toggle dotfiles and hidden directories (shown by default)',
-        '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; +/- display height (minimum 1 line), cache 128/256 pixels',
+        '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; +/_ display height (minimum 1 line), cache 128/256 pixels',
         '[#ff8800]u / o[/#ff8800]: Table/graphics: show/hide selected subtree (..: all current subdirs) / toggle one or all levels',
         '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
         '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
@@ -2060,7 +2087,8 @@ def main_help(display_mode):
         '[#ff8800]Ctrl+X[/#ff8800]: Copy info panel text to clipboard',
         '[#ff8800]t[/#ff8800]: Cycle MC Default, MC Blue and Textual Dark themes',
         '[#ff8800]n[/#ff8800]: Cycle circles, colored names and monochrome display',
-        '[#ff8800]s[/#ff8800]: Open scanner/map for the current directory',
+        '[#ff8800]Space / Insert / * / -[/#ff8800]: Toggle folder / toggle and down / invert folders / clear marks',
+        '[#ff8800]s[/#ff8800]: Scan marked folders, or the current directory',
         '[#ff8800]Shift+R[/#ff8800]: Clear saved map and resume positions for the current directory',
         '[#ff8800]q[/#ff8800]: Quit',
         '', '[bold]Removal queue[/bold]',
@@ -2857,9 +2885,11 @@ class ScannerView(PTScreen):
         super().__init__(browser)
         self.vfs = browser.vfs
         self.path = self.vfs.pwd().rstrip('/') or '/'
+        self.scan_roots = tuple(sorted(browser.scan_selection))
+        self.storage_path = self.path + '::selection:' + json.dumps(self.scan_roots) if self.scan_roots else self.path
         self.return_name = browser.current_name()
         self.store = ScanStore(self.vfs.db)
-        saved = self.store.get('map', self.path, {})
+        saved = self.store.get('map', self.storage_path, {})
         self.timing = ScanTiming(saved.get('mode_elapsed', (0., 0., 0.)))
         self.controls = ScanControls(saved.get('modes', (True, False, False)),
             saved.get('read_known', False), saved.get('new_first', True), startup=startup,
@@ -3048,7 +3078,7 @@ class ScannerView(PTScreen):
         self.browser.scanners.append(self)
         self.start_projection()
         scanner = DriveScanner(self.vfs.db, self.path, self.events, self.stop, controls=self.controls,
-            timing=self.timing,
+            timing=self.timing, scan_roots=self.scan_roots, storage_path=self.storage_path,
             entries=self.model.entries.values(),
             root_names=tuple(node.name for node in self.vfs.list_nodes(self.vfs.db.get_root())) if self.path == '/' else ())
         self.worker = Thread(target=scanner.run, name='drive-pt-scanner', daemon=True)
@@ -3235,7 +3265,7 @@ class ScannerView(PTScreen):
             follow_end=self.follow_end, file_filter=self.filter, heavy_order=self.controls.heavy_order,
             scope_path=self.scope_path, scope_color=self.scope_color, fixed_colors=self.fixed_colors)
         snapshot['mode_elapsed'] = self.timing.snapshot()[1]
-        self.store.put('map', self.path, snapshot)
+        self.store.put('map', self.storage_path, snapshot)
 
     def selected_bucket(self):
         return self.model.buckets[self.selected] if not self.follow_end and 0 <= self.selected < len(self.model.buckets) else None

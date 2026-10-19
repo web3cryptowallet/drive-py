@@ -447,10 +447,12 @@ class ScanControls:
 
 class DriveScanner:
     """One disk worker with independently enabled discovery/metadata/hash passes."""
-    def __init__(self, db, path, events, stop, interval=5, controls=None, entries=(), root_names=(), timing=None):
+    def __init__(self, db, path, events, stop, interval=5, controls=None, entries=(), root_names=(), timing=None, scan_roots=(), storage_path=None):
         self.source = db
         self.root_names = tuple(root_names)
         self.path = path.rstrip('/')
+        self.scan_roots = tuple(scan_roots)
+        self.storage_path = storage_path or self.path or '/'
         self.events, self.stop, self.interval = events, stop, interval
         self.controls = controls or ScanControls()
         self.timing = timing if timing is not None else ScanTiming()
@@ -532,13 +534,13 @@ class DriveScanner:
             if mode in (1, 2):
                 frontier = self.discovery_frontier(paths)
                 self.checkpoints['1' if mode == 1 else '2-discovery'] = {
-                    'stack': list(reversed(frontier or [self.path])),
+                    'stack': list(reversed(frontier or list(self.scan_roots or (self.path,)))),
                     'seen': [], 'partial': True}
             if mode != 1:
                 self.checkpoints[key] = {'remaining': paths, 'first': anchor}
         if self.checkpoints.get(key) is None:
             self.checkpoints[key] = (
-                {'stack': [self.path], 'seen': [], 'partial': False} if mode == 1
+                {'stack': list(self.scan_roots or (self.path,)), 'seen': [], 'partial': False} if mode == 1
                 else {'remaining': ([] if mode == 3 and self.controls.heavy_order == 'expert'
                                     and self.controls.startup_mode is None else list(self.entries)),
                       'first': None})
@@ -566,7 +568,7 @@ class DriveScanner:
             self.controls.advance_startup(mode)
 
     def save_positions(self):
-        self.store.put('position', self.path or '/', self.checkpoints)
+        self.store.put('position', self.storage_path, self.checkpoints)
 
     def select_buckets(self):
         exhausted = None
@@ -704,7 +706,7 @@ class DriveScanner:
     def _scan_once(self, db):
         self.store = ScanStore(db)
         if self.checkpoints is None:
-            self.checkpoints = self.store.get('position', self.path or '/', {})
+            self.checkpoints = self.store.get('position', self.storage_path, {})
         self.current_mode = 0
         self.started = time.monotonic()
         expert_only = (self.controls.modes == (False, False, True) and
@@ -832,11 +834,14 @@ class DriveScanner:
     def discover(self, db, mode=1, new_only=False):
         key = '1' if mode == 1 else '2-discovery'
         checkpoint = self.checkpoints.get(key)
-        stack = list(checkpoint['stack']) if checkpoint else [self.path]
+        stack = list(checkpoint['stack']) if checkpoint else list(self.scan_roots or (self.path,))
         seen = set(checkpoint['seen']) if checkpoint else set()
         partial = bool(checkpoint and checkpoint.get('partial'))
         while stack and self.enabled(mode):
             path = stack[-1]
+            if self.scan_roots and not any(path == root or path.startswith(root + '/') for root in self.scan_roots):
+                stack.pop()
+                continue
             if new_only and path in self.entries and not self.entries[path].is_dir:
                 seen.add(path)
                 stack.pop()

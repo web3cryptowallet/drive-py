@@ -352,7 +352,7 @@ class GridTests(unittest.IsolatedAsyncioTestCase):
                     pipe.send_text('++++++')
                     await asyncio.sleep(.08)
                     self.assertEqual(browser.icon_size, 256)
-                    pipe.send_text('------')
+                    pipe.send_text('______')
                     await asyncio.sleep(.08)
                     self.assertEqual(browser.icon_size, 128)
                     pipe.send_text('g')

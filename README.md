@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.993
+drive.py v0.994
 
-v0.993 - directory expansion, audio playback, draggable scrolling and consistent quick view
+v0.994 - folder selection for scoped scans
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -102,6 +102,14 @@ non-directory paths produce a command-line error. `-d` selects log input.
 
 In the main view, **Backspace** or **Esc** goes to the parent directory and
 restores the child selection, including when the info pane has focus.
+
+Mark folders for scanning with **Space** (toggle without moving) or **Insert**
+(toggle and move down). **\*** inverts marks on all listed folders; **-** clears
+all marks. Marked folder names are gold, including under the cursor. **s** scans
+marked folders, or the current directory when none are marked. Entering another
+directory clears marks. Files and `..` cannot be marked. Marks are session-only;
+scoped maps/resume positions are saved separately for each folder set.
+Thumbnail height uses **+** / **_** (Shift+-).
 
 Press **q** from any view (including help, Actions and scanner inputs) to quit
 the app. Scanner shutdown retains the existing cancellation and save behavior.
@@ -358,6 +366,13 @@ v0.993
 - FIX: Graphics scrolling includes the final filename row. Automatic image quick view recalculates from stable viewport bounds when moving between landscape and portrait; previews preserve aspect ratio, with small images centered at natural pixel size.
 - FIX: Moving file selection while a video plays retains its Info, preview and controls, including automatic quick view and graphics mode. Enter still explicitly opens another entry.
 - LIVE MAP: Highlight the bucket cursor, including end-follow `>`, with a cyan background and black text.
+
+v0.994
+
+- TUI: Mark folders with `Space` without moving the cursor, or `Insert` to toggle and move down. `*` inverts marks on listed folders; `-` clears all marks. Files and `..` cannot be marked.
+- TUI: Marked folder names appear gold in table and graphics views, including under the cursor. Entering another directory clears marks.
+- SCANNER: `s` scans marked folders and their subtrees, or the current directory when nothing is marked. Save maps and resume positions separately for each folder set; marks remain session-only.
+- CONTROLS: Thumbnail height now uses `+` to grow and `_` (Shift+-) to shrink, freeing `-` to clear folder marks.
 
 ## Recomended projects
 
