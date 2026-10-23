@@ -1,5 +1,6 @@
 """Regression coverage for the public VFS package and its storage adapters."""
 
+# IMPORT TEST VFS DEPENDENCIES [
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,9 +8,10 @@ from unittest.mock import patch
 
 import vfs
 from vfs import paths
-
-
+# IMPORT TEST VFS DEPENDENCIES ]
+# VERIFY VIRTUAL FS BEHAVIOR [
 class VirtualFSTests(unittest.TestCase):
+    # PREPARE TEST FIXTURES FOR VIRTUAL FSTESTS [
     def setUp(self):
         self.data = {
             'files': {
@@ -22,7 +24,8 @@ class VirtualFSTests(unittest.TestCase):
                 'empty:0': {'disk/empty.txt'},
             },
         }
-
+    # PREPARE TEST FIXTURES FOR VIRTUAL FSTESTS ]
+    # CHECK NAVIGATION FOR VIRTUAL FSTESTS [
     def check_navigation(self, fs):
         self.assertEqual(fs.pwd(), '/')
         self.assertEqual(fs.listdir(), [('disk', True)])
@@ -47,10 +50,12 @@ class VirtualFSTests(unittest.TestCase):
         fs.enter('..')
         fs.enter('..')
         self.assertEqual(fs.pwd(), '/')
-
+    # CHECK NAVIGATION FOR VIRTUAL FSTESTS ]
+    # VERIFY MEMORY NAVIGATION [
     def test_memory_navigation(self):
         self.check_navigation(vfs.VirtualFS(self.data))
-
+    # VERIFY MEMORY NAVIGATION ]
+    # VERIFY SQLITE NAVIGATION AND REOPEN [
     def test_sqlite_navigation_and_reopen(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = str(Path(directory) / 'vfs.db')
@@ -64,7 +69,8 @@ class VirtualFSTests(unittest.TestCase):
                 self.check_navigation(fs)
             finally:
                 fs.db.conn.close()
-
+    # VERIFY SQLITE NAVIGATION AND REOPEN ]
+    # VERIFY SHARED DRIVE MAPPINGS AND LOCAL METADATA [
     def test_shared_drive_mappings_and_local_metadata(self):
         self.assertIs(vfs.aliases, paths.aliases)
         self.assertIs(vfs.prefixes, paths.prefixes)
@@ -78,7 +84,7 @@ class VirtualFSTests(unittest.TestCase):
                 self.assertEqual(vfs.path_update_prefix('original/item'), 'mapped/item')
                 self.assertEqual(vfs.get_real_path('/mapped/item'), directory + '/item')
                 self.assertEqual(vfs.get_stat_info('/mapped/item')['size'], 3)
-                self.assertEqual(vfs.get_stat_info('/mapped/missing'), {'exists': False})
+                self.assertEqual(vfs.get_stat_info('/mapped/missing'), {'exists': False, 'is_symlink': False})
                 fs = vfs.VirtualFS({'files': {'original/item': {'hash:3'}}, 'hashes': {}})
                 self.assertEqual(fs.listdir(), [('mapped', True)])
                 self.assertEqual(fs.get_full_info(fs.get_from_path('/mapped/item'), True)['size'], 3)
@@ -87,7 +93,8 @@ class VirtualFSTests(unittest.TestCase):
             vfs.aliases.update(old_aliases)
             vfs.prefixes.clear()
             vfs.prefixes.update(old_prefixes)
-
+    # VERIFY SHARED DRIVE MAPPINGS AND LOCAL METADATA ]
+    # VERIFY DISK OVERLAY AND REFRESH [
     def test_disk_overlay_and_refresh(self):
         for backend in ('memory', 'sqlite'):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as cache:
@@ -123,7 +130,8 @@ class VirtualFSTests(unittest.TestCase):
                 finally:
                     if backend == 'sqlite':
                         fs.db.conn.close()
-
+    # VERIFY DISK OVERLAY AND REFRESH ]
+    # VERIFY STARTUP USES DRIVE ALIAS [
     def test_startup_uses_drive_alias(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict(vfs.aliases, {'mapped': directory}, clear=True):
@@ -131,13 +139,16 @@ class VirtualFSTests(unittest.TestCase):
                 with patch('vfs.filesystem.os.getcwd', return_value=directory):
                     fs.start_in_current_directory()
                 self.assertEqual(fs.pwd(), '/mapped')
-
+    # VERIFY STARTUP USES DRIVE ALIAS ]
+    # VERIFY PUBLIC EXPORTS [
     def test_public_exports(self):
         for name in vfs.__all__:
             self.assertIsNotNone(getattr(vfs, name))
         with self.assertRaisesRegex(ValueError, 'Unknown db_type'):
             vfs.VirtualFS(self.data, db_type='unsupported')
-
-
+    # VERIFY PUBLIC EXPORTS ]
+# VERIFY VIRTUAL FS BEHAVIOR ]
+# RUN TEST VFS ENTRY POINT [
 if __name__ == '__main__':
     unittest.main()
+# RUN TEST VFS ENTRY POINT ]

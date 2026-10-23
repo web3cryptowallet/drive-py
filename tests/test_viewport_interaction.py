@@ -1,4 +1,5 @@
 """Actual resize and SGR scrollbar input against the rendered main layout."""
+# IMPORT TEST VIEWPORT INTERACTION DEPENDENCIES [
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -12,28 +13,32 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.data_structures import Size
 from vfs import VirtualFS
-
+# IMPORT TEST VIEWPORT INTERACTION DEPENDENCIES ]
+# PREPARE TEST VIEWPORT INTERACTION SHARED STATE [
 spec = importlib.util.spec_from_file_location('viewport_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST VIEWPORT INTERACTION SHARED STATE ]
+# MANAGE RESIZABLE OUTPUT [
 class ResizableOutput(DummyOutput):
     size = Size(rows=40, columns=120)
 
+    # RESOLVE SIZE FOR RESIZABLE OUTPUT [
     def get_size(self):
         return self.size
-
-
+    # RESOLVE SIZE FOR RESIZABLE OUTPUT ]
+# MANAGE RESIZABLE OUTPUT ]
+# WAIT UNTIL THE EXPECTED UI STATE IS READY [
 async def until(predicate):
     for _ in range(100):
         if predicate():
             return
         await asyncio.sleep(.01)
     raise AssertionError('UI did not reach expected state')
-
-
+# WAIT UNTIL THE EXPECTED UI STATE IS READY ]
+# VERIFY VIEWPORT INTERACTION BEHAVIOR [
 class ViewportInteractionTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY IMAGE REFITS SHRINK AND GROW NATIVE AND BLOCK [
     async def test_image_refits_shrink_and_grow_native_and_block(self):
         tui.configure_image_terminal()
         from term_image.image import KittyImage, BlockImage
@@ -81,7 +86,8 @@ class ViewportInteractionTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         browser.app.exit()
                         await task
-
+    # VERIFY IMAGE REFITS SHRINK AND GROW NATIVE AND BLOCK ]
+    # VERIFY SCROLLBAR CLICK AND DRAG TABLE AND GRID [
     async def test_scrollbar_click_and_drag_table_and_grid(self):
         fs = VirtualFS({'files': {f'/folder/file{i:03}.{"png" if i % 3 else "txt"}': {'MD5:test:1'} for i in range(80)}})
         fs.enter('folder')
@@ -127,3 +133,5 @@ class ViewportInteractionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
+    # VERIFY SCROLLBAR CLICK AND DRAG TABLE AND GRID ]
+# VERIFY VIEWPORT INTERACTION BEHAVIOR ]

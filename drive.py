@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+# IMPORT DRIVE DEPENDENCIES [
 import os
 from os.path import isfile, isdir, islink, join
 from multiprocessing import Process, Manager, Value, Pool
@@ -11,19 +12,23 @@ import argparse
 
 from livelog import LiveLog
 from livelog2 import LiveLog as LiveLog2
-
+# IMPORT DRIVE DEPENDENCIES ]
+# PREPARE DRIVE SHARED STATE [
 SRC_PATHS=[]
 DST_PATHS=[]
 
 NO_FILE_TREE=False
-
+# PREPARE DRIVE SHARED STATE ]
+# ADD PATH FOR THE DRIVE WORKFLOW [
 def add_path(src, dst):
     SRC_PATHS.append(src)
     if dst:
         DST_PATHS.append(dst)
+# ADD PATH FOR THE DRIVE WORKFLOW ]
 
 #add_path('t0', 't1')
 
+# PREPARE DRIVE SHARED STATE [
 src_total_files = 0
 src_total_dirs = 0
 src_total_size = 0
@@ -31,9 +36,11 @@ src_total_size = 0
 dst_total_files = 0
 dst_total_dirs = 0
 dst_total_size = 0
-
+# PREPARE DRIVE SHARED STATE ]
+# IMPORT DRIVE DEPENDENCIES [
 import sys
-
+# IMPORT DRIVE DEPENDENCIES ]
+# MD5 FOR THE DRIVE WORKFLOW [
 def md5(fname):
     size = 0
     hash_md5 = hashlib.md5()
@@ -43,7 +50,8 @@ def md5(fname):
             size += len(chunk)
 
     return hash_md5.hexdigest(), size
-
+# MD5 FOR THE DRIVE WORKFLOW ]
+# HASH FILES1 FOR THE DRIVE WORKFLOW [
 def hash_files1(RES, SIZES, i, src, fmap):
     total_size = 0
 #    print "hash_files", i
@@ -58,9 +66,11 @@ def hash_files1(RES, SIZES, i, src, fmap):
     SIZES[i] = total_size
 
     return fmap
-
+# HASH FILES1 FOR THE DRIVE WORKFLOW ]
+# PREPARE DRIVE SHARED STATE [
 THREADS=1
-
+# PREPARE DRIVE SHARED STATE ]
+# PROCESS FILE FOR THE DRIVE WORKFLOW [
 def process_file(args):
     try:
         f, src = args
@@ -70,7 +80,8 @@ def process_file(args):
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)  # Exit the program with a status code (1 indicates an error)
-
+# PROCESS FILE FOR THE DRIVE WORKFLOW ]
+# HASH FILES FOR THE DRIVE WORKFLOW [
 def hash_files(RES, SIZES, i, src, fmap):
     # Create arguments list for files only
     file_args = [(f, src) for f in fmap.keys() if fmap[f]['type'] == 'file']
@@ -112,6 +123,7 @@ def hash_files(RES, SIZES, i, src, fmap):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import sys
 
+    # PROCESS ALL FOR HASH FILES [
     def process_all(file_args):
         results = []
 
@@ -127,6 +139,7 @@ def hash_files(RES, SIZES, i, src, fmap):
             sys.exit(1)
 
         return results
+    # PROCESS ALL FOR HASH FILES ]
 
     results.extend(process_all(file_args))
 
@@ -140,7 +153,8 @@ def hash_files(RES, SIZES, i, src, fmap):
     SIZES[i] = total_size
 
     return fmap
-    
+# HASH FILES FOR THE DRIVE WORKFLOW ]
+# HASH FILES X [
 def hash_filesX(RES, SIZES, i, src, fmap):
     # Create arguments list for files only
     file_args = [(f, src) for f in fmap.keys() if fmap[f]['type'] == 'file']
@@ -163,6 +177,7 @@ def hash_filesX(RES, SIZES, i, src, fmap):
     SIZES[i] = total_size
 
     return fmap
+# HASH FILES X ]
 
 
 #def hash_files_thread_start(i, src, fmap):
@@ -170,18 +185,20 @@ def hash_filesX(RES, SIZES, i, src, fmap):
 #    p.start()
 #    return p
 
+# HASH FILES THREAD START [
 def hash_files_thread_start(i, src, fmap):
     # Replace Process with Thread
     t = Thread(target=hash_files, args=(RES, SIZES, i, src, fmap))
     t.start()
     return t
-
-
+# HASH FILES THREAD START ]
+# LLOG FILES FOR THE DRIVE WORKFLOW [
 def llog_files(src, fmap):
     for f in fmap:
         if fmap[f]['type'] == 'file':
             llogfiles.put("MD5 " + fmap[f]['md5'] + ' "' + src + '/' + f + '" ' + str(fmap[f]['size']))
-
+# LLOG FILES FOR THE DRIVE WORKFLOW ]
+# HUMAN READABLE SIZE [
 def human_readable_size(size_in_bytes):
     # Define size units
     units = ["Bytes", "KB", "MB", "GB", "TB"]
@@ -199,12 +216,15 @@ def human_readable_size(size_in_bytes):
         return f"{int(size_in_bytes)} {units[unit_index]}"
     else:
         return f"{size_in_bytes:.2f} {units[unit_index]}"
-
+# HUMAN READABLE SIZE ]
+# PROCESS ROOT FOR THE DRIVE WORKFLOW [
 def process_root(src, dst):
     process_dir(src, dst)
-
+# PROCESS ROOT FOR THE DRIVE WORKFLOW ]
+# IMPORT DRIVE DEPENDENCIES [
 import time
-
+# IMPORT DRIVE DEPENDENCIES ]
+# PROCESS FOR THE DRIVE WORKFLOW [
 def process():
     llog.begin('pwd')
     llog.put(os.getcwd())
@@ -240,8 +260,8 @@ def process():
     llog.end()
 
     print(f'Processed {src_total_files} files {src_total_dirs} dirs {human_readable_size(src_total_size)} size in {hours:02}:{minutes:02}:{seconds:02}')
-
-
+# PROCESS FOR THE DRIVE WORKFLOW ]
+# PROCESS DIR FOR THE DRIVE WORKFLOW [
 def process_dir(src, dst):
     global src_total_files, src_total_dirs, src_total_size
     global dst_total_files, dst_total_dirs, dst_total_size
@@ -348,9 +368,11 @@ def process_dir(src, dst):
                     continue
                 dst_new = join(dst, f)
             process_dir(join(src, f), dst_new)
+# PROCESS DIR FOR THE DRIVE WORKFLOW ]
 
 #import shlex
 
+# PARSE LINE LLOG [
 def parse_line_llog(line):
     p1 = line.find(' ')
     p2 = line.find(' ', p1 + 1)
@@ -368,7 +390,8 @@ def parse_line_llog(line):
         size = int(line[p3 + 1:])
 
     return hashtype, hashvalue, filepath, size
-
+# PARSE LINE LLOG ]
+# LOAD LOG PARSE LINE [
 def load_log_parse_line(ctx, line):
 #    parts = line.split(maxsplit=3)  # Split into 4 parts (hashtype, hash, file, size)
 #    hashtype, hash_value, file, size 
@@ -400,9 +423,8 @@ def load_log_parse_line(ctx, line):
         # Error
         msg = f"Can't parse line: {line}"
         print(f"\033[91mError: {msg}\033[0m")
-
-
-# PROCESS COMPARE [
+# LOAD LOG PARSE LINE ]
+# PROCESS COMPARE FOR THE DRIVE WORKFLOW [
 
 from datetime import datetime
 import time
@@ -538,7 +560,7 @@ def load_log(ctx, filename):
 #    pp.pprint(ctx)
 
 
-# PROCESS COMPARE ]
+# PROCESS COMPARE FOR THE DRIVE WORKFLOW ]
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(

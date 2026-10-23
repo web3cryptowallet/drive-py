@@ -1,4 +1,5 @@
 """Thumbnail cache invalidation, durable links and actual grid controls."""
+# IMPORT TEST THUMBNAILS DEPENDENCIES [
 import asyncio
 from functools import partial
 import importlib.util
@@ -19,13 +20,15 @@ from vfs import VirtualFS
 from vfs.adapter.sqlite import SQLiteDBAdapter
 from vfs.scanner import ScanStore
 from vfs.thumbnails import thumbnail
-
+# IMPORT TEST THUMBNAILS DEPENDENCIES ]
+# PREPARE TEST THUMBNAILS SHARED STATE [
 spec = importlib.util.spec_from_file_location('thumbnail_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST THUMBNAILS SHARED STATE ]
+# VERIFY CACHE BEHAVIOR [
 class CacheTests(unittest.TestCase):
+    # VERIFY SIZES UNIQUE IDS REUSE AND SOURCE CHANGES [
     def test_sizes_unique_ids_reuse_and_source_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -52,7 +55,8 @@ class CacheTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     thumbnail(source, '/drive/source.png', invalid, root / '.cache')
             self.assertFalse(list((root / '.cache').rglob('tmp*')))
-
+    # VERIFY SIZES UNIQUE IDS REUSE AND SOURCE CHANGES ]
+    # VERIFY WEBP AVIF AND ADDITIONAL IMAGE FORMATS [
     def test_webp_avif_and_additional_image_formats(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -66,7 +70,8 @@ class CacheTests(unittest.TestCase):
                         self.assertEqual(cached.size, (128, 64))
                         self.assertEqual(cached.format, 'JPEG')
                     self.assertIn('.' + suffix, tui.THUMBNAIL_SUFFIXES)
-
+    # VERIFY WEBP AVIF AND ADDITIONAL IMAGE FORMATS ]
+    # VERIFY REAL MOV MP4 FRAMES AND INVALID VIDEO [
     @unittest.skipUnless(shutil.which('ffmpeg'), 'Requires ffmpeg')
     def test_real_mov_mp4_frames_and_invalid_video(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -89,7 +94,8 @@ class CacheTests(unittest.TestCase):
             with patch('vfs.thumbnails.shutil.which', return_value=None):
                 with self.assertRaisesRegex(ValueError, 'ffmpeg'):
                     thumbnail(source, str(source), 256, cache_root=root / '.cache')
-
+    # VERIFY REAL MOV MP4 FRAMES AND INVALID VIDEO ]
+    # VERIFY MEDIA FILTER AUDIO AND MIXED HEIGHT NAVIGATION [
     def test_media_filter_audio_and_mixed_height_navigation(self):
         fs = VirtualFS({'files': {'/disk/photo.png': {'MD5:one:1'},
                                   '/disk/song.mp3': {'MD5:two:1'},
@@ -131,7 +137,8 @@ class CacheTests(unittest.TestCase):
             browser.refresh('folder')
             self.assertIn('folder', [row['name'] for row in browser.rows])
             browser.media_only = False
-
+    # VERIFY MEDIA FILTER AUDIO AND MIXED HEIGHT NAVIGATION ]
+    # VERIFY DISPLAY ZOOM MINIMUM ONE LINE PRESERVES CACHE RESOLUTION [
     def test_display_zoom_minimum_one_line_preserves_cache_resolution(self):
         fs = VirtualFS({'files': {}})
         with patch.object(fs, 'start_in_current_directory'):
@@ -146,7 +153,8 @@ class CacheTests(unittest.TestCase):
                 browser.resize_icons(1)
             self.assertEqual(browser.icon_dimensions(), (32, 16))
             self.assertEqual(browser.icon_size, 256)
-
+    # VERIFY DISPLAY ZOOM MINIMUM ONE LINE PRESERVES CACHE RESOLUTION ]
+    # VERIFY FIT SMALL WIDE AND TALL IMAGES WITHOUT STDOUT [
     def test_fit_small_wide_and_tall_images_without_stdout(self):
         tui.configure_image_terminal()
         with tempfile.TemporaryDirectory() as directory:
@@ -160,7 +168,8 @@ class CacheTests(unittest.TestCase):
                     self.assertLessEqual(width, 12)
                     self.assertLessEqual(height, 4)
                     self.assertTrue(width == 12 or height == 4)
-
+    # VERIFY FIT SMALL WIDE AND TALL IMAGES WITHOUT STDOUT ]
+    # VERIFY EXPAND SUBDIRS LEVELS SCOPE AND NESTED NAVIGATION [
     def test_expand_subdirs_levels_scope_and_nested_navigation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -213,7 +222,8 @@ class CacheTests(unittest.TestCase):
             browser.open()
             self.assertEqual(fs.pwd(), original_cwd + '/1/2/3')
             self.assertFalse(browser.expanded_dirs)
-
+    # VERIFY EXPAND SUBDIRS LEVELS SCOPE AND NESTED NAVIGATION ]
+    # VERIFY GRID GUTTER AND PURPLE AUDIO PLAY ICON [
     def test_grid_gutter_and_purple_audio_play_icon(self):
         fs = VirtualFS({'files': {}})
         with patch.object(fs, 'start_in_current_directory'):
@@ -230,7 +240,8 @@ class CacheTests(unittest.TestCase):
             text = ''.join(text for _, text in content.get_line(line))
             self.assertEqual(text[14], ' ')
             self.assertEqual(text[29], ' ')
-
+    # VERIFY GRID GUTTER AND PURPLE AUDIO PLAY ICON ]
+    # VERIFY CENTERED GRID PENDING AND FILENAME ONLY ITEMS [
     def test_centered_grid_pending_and_filename_only_items(self):
         fs = VirtualFS({'files': {}})
         with patch.object(fs, 'start_in_current_directory'):
@@ -263,9 +274,11 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(tui.fit_filename('0123456789.png', 8), '…789.png')
         self.assertEqual(tui.fit_filename('abc.png', 8), 'abc.png ')
         self.assertEqual(tui.get_cwidth(tui.fit_filename('猫猫猫猫.png', 8)), 8)
-
-
+    # VERIFY CENTERED GRID PENDING AND FILENAME ONLY ITEMS ]
+# VERIFY CACHE BEHAVIOR ]
+# VERIFY GRID BEHAVIOR [
 class GridTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY EXPANSION KEY BINDINGS [
     async def test_expansion_key_bindings(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)
@@ -314,7 +327,8 @@ class GridTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
-
+    # VERIFY EXPANSION KEY BINDINGS ]
+    # VERIFY GRID CONVERSION KEYS AND SQLITE REOPEN [
     async def test_grid_conversion_keys_and_sqlite_reopen(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)
@@ -328,9 +342,11 @@ class GridTests(unittest.IsolatedAsyncioTestCase):
             fs.cwd = fs.get_from_path(str(root))
             browser.refresh(source.name)
             worker_threads = []
+            # CONVERT FOR TEST GRID CONVERSION KEYS AND SQLITE REOPEN [
             def convert(*args):
                 worker_threads.append(threading.get_ident())
                 return thumbnail(*args, cache_root=root / '.cache')
+            # CONVERT FOR TEST GRID CONVERSION KEYS AND SQLITE REOPEN ]
             with patch.object(tui, 'thumbnail', convert):
                 task = asyncio.create_task(browser.app.run_async())
                 try:
@@ -369,3 +385,5 @@ class GridTests(unittest.IsolatedAsyncioTestCase):
             reopened = SQLiteDBAdapter(db_path)
             self.assertEqual(ScanStore(reopened).get('thumbnail', '128:' + str(source)), record)
             reopened.conn.close()
+    # VERIFY GRID CONVERSION KEYS AND SQLITE REOPEN ]
+# VERIFY GRID BEHAVIOR ]

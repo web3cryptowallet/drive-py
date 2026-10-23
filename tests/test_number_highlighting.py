@@ -1,4 +1,5 @@
 """Final-cell highlighting preserves layout, backgrounds and widget contents."""
+# IMPORT TEST NUMBER HIGHLIGHTING DEPENDENCIES [
 import importlib.util
 from pathlib import Path
 import unittest
@@ -8,13 +9,15 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.mouse_handlers import MouseHandlers
 from prompt_toolkit.layout.screen import Char, Screen, WritePosition
 from prompt_toolkit.widgets import TextArea
-
+# IMPORT TEST NUMBER HIGHLIGHTING DEPENDENCIES ]
+# PREPARE TEST NUMBER HIGHLIGHTING SHARED STATE [
 spec = importlib.util.spec_from_file_location('number_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST NUMBER HIGHLIGHTING SHARED STATE ]
+# VERIFY NUMBER HIGHLIGHT BEHAVIOR [
 class NumberHighlightTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY NUMBERS UNITS AND ORIGINAL STYLES [
     def test_numbers_units_and_original_styles(self):
         text = '界 file42: 40 MB · 1.25 GiB/s · 99% · 2026-10-17 · 01:23 · abc'
         screen = Screen()
@@ -35,7 +38,8 @@ class NumberHighlightTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(cell.style.startswith('bg:#123456 bold')
                             for cell in screen.data_buffer[0].values()))
         self.assertNotIn('fg:#ffd700', screen.data_buffer[0][text.index('abc')].style)
-
+    # VERIFY NUMBERS UNITS AND ORIGINAL STYLES ]
+    # VERIFY FINAL RENDER INCLUDES WIDGETS AND DEFERRED WINDOWS [
     async def test_final_render_includes_widgets_and_deferred_windows(self):
         field = TextArea(text='40 MB', height=1)
         wrapped = tui.NumberHighlight(HSplit([
@@ -51,7 +55,8 @@ class NumberHighlightTests(unittest.IsolatedAsyncioTestCase):
             for column in range(length):
                 self.assertIn('fg:#ffd700', screen.data_buffer[row][column].style)
         self.assertEqual(field.text, '40 MB')
-
+    # VERIFY FINAL RENDER INCLUDES WIDGETS AND DEFERRED WINDOWS ]
+    # VERIFY LITERAL NAMES AND COMPLETE HASH [
     def test_literal_names_and_complete_hash(self):
         from prompt_toolkit.document import Document
         screen = Screen()
@@ -73,3 +78,5 @@ class NumberHighlightTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('class:literal', line(2)[0][0])
         self.assertIn('class:hash', line(3)[0][0])
         self.assertIn('class:literal', line(4)[1][0])
+    # VERIFY LITERAL NAMES AND COMPLETE HASH ]
+# VERIFY NUMBER HIGHLIGHT BEHAVIOR ]

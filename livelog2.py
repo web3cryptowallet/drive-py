@@ -1,19 +1,25 @@
+# WRITE NESTED LIVELOG BLOCKS [
 class LiveLogBasic:
+    # INITIALIZE LIVE LOG BASIC [
     def __init__(self, filename):
         self._path = ""
         self._stack = []
         self._filename = filename
-
+    # INITIALIZE LIVE LOG BASIC ]
+    # RELEASE LIVE LOG BASIC [
     def __del__(self):
         if hasattr(self, '_fs'):
             self._fs.close()
-
+    # RELEASE LIVE LOG BASIC ]
+    # OPEN NEW FOR LIVE LOG BASIC [
     def open_new(self):
         self._fs = open(self._filename, 'w', encoding='utf-8')
+    # OPEN NEW FOR LIVE LOG BASIC ]
 
 #    def get_path(self):
 #        return self._stack.
 
+    # OPEN A NESTED LIVELOG BLOCK [
     def begin(self, path):
         # Check many: list or strings
         if isinstance(path, list):
@@ -30,7 +36,8 @@ class LiveLogBasic:
         
         if many:
             self.begin(path)
-
+    # OPEN A NESTED LIVELOG BLOCK ]
+    # CLOSE A LIVELOG BLOCK OR FOLLOW THE MAP END [
     def end(self):
         # todo: end_subs many
         
@@ -39,60 +46,74 @@ class LiveLogBasic:
 
         if self._stack:
             self._path = self._stack.pop()
-
+    # CLOSE A LIVELOG BLOCK OR FOLLOW THE MAP END ]
+    # BEGIN SUBS FOR LIVE LOG BASIC [
     def begin_subs(self, path):
         self.begin(path.split('/'))
-
+    # BEGIN SUBS FOR LIVE LOG BASIC ]
+    # END SUBS FOR LIVE LOG BASIC [
     def end_subs(self, path):
         self.end(path.split('/'))
-
+    # END SUBS FOR LIVE LOG BASIC ]
+    # WRITE A LIVELOG RECORD OR STORED VALUE [
     def put(self, s):
         self._fs.write(f"{s}\n")
-
+    # WRITE A LIVELOG RECORD OR STORED VALUE ]
+    # FLUSH BUFFERED OUTPUT AND PENDING UPDATES [
     def flush(self):
         self._fs.flush()
-
-
+    # FLUSH BUFFERED OUTPUT AND PENDING UPDATES ]
+# WRITE NESTED LIVELOG BLOCKS ]
+# MANAGE LCNODE FOR THE LIVELOG2 WORKFLOW [
 class LCNode:
+    # INITIALIZE LCNODE FOR LCNODE [
     def __init__(self, name):
         self._name = name
         self._items = {}
         self._items_index = []
         self._ss = []
-
+    # INITIALIZE LCNODE FOR LCNODE ]
+    # READ THE LIVELOG NODE NAME [
     @property
     def name(self):
         return self._name
-
+    # READ THE LIVELOG NODE NAME ]
+    # READ THE LIVELOG NODE TEXT [
     @property
     def text(self):
         return "\n".join(self._ss)
-
+    # READ THE LIVELOG NODE TEXT ]
+    # ITERATE STORED LIVELOG OR SCANNER RECORDS [
     @property
     def items(self):
         return self._items
-
+    # ITERATE STORED LIVELOG OR SCANNER RECORDS ]
+    # ITEMS INDEX FOR LCNODE [
     @property
     def items_index(self):
         return self._items_index
-
+    # ITEMS INDEX FOR LCNODE ]
+    # CLEAR LCNODE FOR LCNODE [
     def clear(self):
         for node in self._items.values():
             del node
         self._items.clear()
         self._items_index.clear()
-
+    # CLEAR LCNODE FOR LCNODE ]
+    # APPEND TEXT TO A LIVELOG PATH [
     def log(self, path, s):
         node = self.alloc_node(path, 0)
         if node:
             node.put(s)
-
+    # APPEND TEXT TO A LIVELOG PATH ]
+    # WRITE A LIVELOG RECORD OR STORED VALUE [
     def put(self, s):
         if isinstance(s, (list, tuple, set)):  # Check if list, tuple or set
             self._ss.extend(s)  # Add multiple elements
         else:
             self._ss.append(s)
-
+    # WRITE A LIVELOG RECORD OR STORED VALUE ]
+    # ALLOC NODE FOR LCNODE [
     def alloc_node(self, path, i):
         if len(path) <= i:
             return self
@@ -106,30 +127,37 @@ class LCNode:
             node = self._items[name]
 
         return node.alloc_node(path, i + 1)
-
+    # ALLOC NODE FOR LCNODE ]
+    # DELETE NODE FOR LCNODE [
     def delete_node(self, path):
         pass
-
-
+    # DELETE NODE FOR LCNODE ]
+# MANAGE LCNODE FOR THE LIVELOG2 WORKFLOW ]
+# READ AND WRITE HIERARCHICAL LIVELOG RECORDS [
 class LiveLog(LiveLogBasic):
+    # INITIALIZE LIVE LOG [
     def __init__(self, filename):
         super().__init__(filename)
         self._tree = LCNode("LiveLog++")
         self._filename = filename
-
+    # INITIALIZE LIVE LOG ]
+    # APPEND TEXT TO A LIVELOG PATH [
     def log(self, path, s):
         if isinstance(path, str):
             vstrings = path.split('/')
         else:
             vstrings = path
         self._tree.log(vstrings, s)
-
+    # APPEND TEXT TO A LIVELOG PATH ]
+    # REPLACE FOR LIVE LOG [
     def replace(self, path, s):
         pass
-
+    # REPLACE FOR LIVE LOG ]
+    # REMOVE STORED LIVELOG CONTENT [
     def erase(self, path):
         pass
-
+    # REMOVE STORED LIVELOG CONTENT ]
+    # FLUSH BUFFERED OUTPUT AND PENDING UPDATES [
     def flush(self):
         # Clear and reopen file
         if hasattr(self, '_fs'):
@@ -137,7 +165,8 @@ class LiveLog(LiveLogBasic):
         self._fs = open(self._filename, 'w', encoding='utf-8')
         self.flush_node(self._tree)
         self._fs.flush()
-
+    # FLUSH BUFFERED OUTPUT AND PENDING UPDATES ]
+    # FLUSH NODE FOR LIVE LOG [
     def flush_node(self, node):
         if not node:
             return
@@ -149,7 +178,8 @@ class LiveLog(LiveLogBasic):
             self.flush_node(child)
 
         self.end()
-
+    # FLUSH NODE FOR LIVE LOG ]
+    # LOAD LIVE LOG [
     def load(self):
         # Clear existing tree
         self._tree.clear()
@@ -196,7 +226,9 @@ class LiveLog(LiveLogBasic):
 
         except FileNotFoundError:
             print(f"Can't open file {self._filename}")
-
+    # LOAD LIVE LOG ]
+# READ AND WRITE HIERARCHICAL LIVELOG RECORDS ]
+# EXERCISE LIVELOG READ AND WRITE OPERATIONS [
 def test():
     # Create a new log file
     log = LiveLog("test.log")
@@ -216,6 +248,8 @@ def test():
     log2.load()
     log2.log("root/child3", "This is a new message after loading")
     log2.flush()
-
+# EXERCISE LIVELOG READ AND WRITE OPERATIONS ]
+# RUN LIVELOG2 ENTRY POINT [
 if __name__ == "__main__":
-    test() 
+    test()
+# RUN LIVELOG2 ENTRY POINT ]

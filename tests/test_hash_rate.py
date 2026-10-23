@@ -1,4 +1,5 @@
 """Hash throughput is visible before a large file completes."""
+# IMPORT TEST HASH RATE DEPENDENCIES [
 import hashlib
 from pathlib import Path
 from queue import Queue
@@ -9,9 +10,10 @@ from unittest.mock import patch
 
 from vfs import VirtualFS
 from vfs.scanner import DriveScanner, ScanControls, ScanEntry, ScanStats
-
-
+# IMPORT TEST HASH RATE DEPENDENCIES ]
+# VERIFY HASH RATE BEHAVIOR [
 class HashRateTests(unittest.TestCase):
+    # VERIFY CHUNK PROGRESS REPORTS SPEED BEFORE COMPLETION AND EXPIRES [
     def test_chunk_progress_reports_speed_before_completion_and_expires(self):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory) / 'large'
@@ -22,15 +24,20 @@ class HashRateTests(unittest.TestCase):
             clock = [100.]
             digest = hashlib.md5()
 
+            # TIMED HASHER FOR TEST CHUNK PROGRESS REPORTS SPEED BEFORE COMPLETION AND EXPIRES [
             class TimedHasher:
                 digest_size = digest.digest_size
 
+                # UPDATE FOR TIMED HASHER [
                 def update(self, chunk):
                     clock[0] += .25  # Deterministic hashing/read time per chunk.
                     digest.update(chunk)
-
+                # UPDATE FOR TIMED HASHER ]
+                # HEXDIGEST FOR TIMED HASHER [
                 def hexdigest(self):
                     return digest.hexdigest()
+                # HEXDIGEST FOR TIMED HASHER ]
+            # TIMED HASHER FOR TEST CHUNK PROGRESS REPORTS SPEED BEFORE COMPLETION AND EXPIRES ]
 
             with patch('vfs.scanner.time.monotonic', side_effect=lambda: clock[0]), patch(
                     'vfs.scanner.hashlib.new', return_value=TimedHasher()):
@@ -52,7 +59,8 @@ class HashRateTests(unittest.TestCase):
                 clock[0] += 1.1
                 self.assertEqual(final.mb_per_second, 0)
                 self.assertEqual(final.bytes_read, 3 * 1024 * 1024)
-
+    # VERIFY CHUNK PROGRESS REPORTS SPEED BEFORE COMPLETION AND EXPIRES ]
+    # VERIFY METADATA COMPLETIONS DO NOT COUNT AS HASHED BYTES [
     def test_metadata_completions_do_not_count_as_hashed_bytes(self):
         fs = VirtualFS({'files': {}})
         events = Queue()
@@ -63,9 +71,12 @@ class HashRateTests(unittest.TestCase):
             stats = events.get_nowait()[1]
             self.assertEqual(stats.mb_per_second, 0)
             self.assertEqual(stats.paths_per_second, .2)
-
+    # VERIFY METADATA COMPLETIONS DO NOT COUNT AS HASHED BYTES ]
+    # VERIFY LEGACY STATISTICS STILL ACCEPT PREVIOUS FIELDS [
     def test_legacy_statistics_still_accept_previous_fields(self):
         with patch('vfs.scanner.time.monotonic', return_value=100.):
             stats = ScanStats(rate_samples=((100., 5, 10_000_000),))
             self.assertEqual(stats.mb_per_second, 2.)
             self.assertEqual(stats.paths_per_second, 1.)
+    # VERIFY LEGACY STATISTICS STILL ACCEPT PREVIOUS FIELDS ]
+# VERIFY HASH RATE BEHAVIOR ]

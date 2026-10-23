@@ -1,4 +1,5 @@
 """Bookmark keys and duplicate activation through real terminal input."""
+# IMPORT TEST BOOKMARKS DEPENDENCIES [
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -7,12 +8,15 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
-
+# IMPORT TEST BOOKMARKS DEPENDENCIES ]
+# PREPARE TEST BOOKMARKS SHARED STATE [
 spec = importlib.util.spec_from_file_location('bookmarks_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
+# PREPARE TEST BOOKMARKS SHARED STATE ]
+# VERIFY BOOKMARK BEHAVIOR [
 class BookmarkTests(unittest.IsolatedAsyncioTestCase):
+    # PREPARE TEST FIXTURES FOR BOOKMARK TESTS [
     def setUp(self):
         import tempfile
         self.storage = tempfile.TemporaryDirectory()
@@ -21,16 +25,19 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
         patcher = patch.object(tui, 'BOOKMARKS_PATH', self.bookmark_file)
         patcher.start()
         self.addCleanup(patcher.stop)
-
+    # PREPARE TEST FIXTURES FOR BOOKMARK TESTS ]
+    # VERIFY KEYS AND DUPLICATE [
     async def test_keys_and_duplicate(self):
         fs = VirtualFS({'files': {'one/a.txt': {'same:3'}, 'two/b.txt': {'same:3'}}, 'hashes': {'same:3': {'one/a.txt', 'two/b.txt'}}})
         fs.enter('one')
         with create_pipe_input() as pipe, patch.object(fs, 'start_in_current_directory'):
             browser = tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
             task = asyncio.create_task(browser.app.run_async())
+            # SEND KEYBOARD INPUT TO THE RUNNING TEST APPLICATION [
             async def send(keys):
                 pipe.send_text(keys)
                 await asyncio.sleep(.08)
+            # SEND KEYBOARD INPUT TO THE RUNNING TEST APPLICATION ]
             try:
                 await asyncio.sleep(.03)
                 for view in [None, tui.HelpView(browser, 'Help', ['help']), tui.ActionsView(browser)]:
@@ -82,7 +89,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
-
+    # VERIFY KEYS AND DUPLICATE ]
+    # VERIFY FILE BOOKMARK PREVIEW EDIT REMOVE AND JUMP [
     async def test_file_bookmark_preview_edit_remove_and_jump(self):
         fs = VirtualFS({'files': {'one/a.txt': {'same:3'}, 'two/b.txt': {'same:3'}},
                         'hashes': {'same:3': {'one/a.txt', 'two/b.txt'}}})
@@ -91,9 +99,11 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             browser = tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
             browser.refresh('a.txt')
             task = asyncio.create_task(browser.app.run_async())
+            # SEND KEYBOARD INPUT TO THE RUNNING TEST APPLICATION [
             async def send(keys):
                 pipe.send_text(keys)
                 await asyncio.sleep(.08)
+            # SEND KEYBOARD INPUT TO THE RUNNING TEST APPLICATION ]
             try:
                 await asyncio.sleep(.03)
                 await send('b')
@@ -117,7 +127,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
-
+    # VERIFY FILE BOOKMARK PREVIEW EDIT REMOVE AND JUMP ]
+    # VERIFY LOCAL TEXT AND IMAGE PREVIEWS [
     async def test_local_text_and_image_previews(self):
         import tempfile
         from PIL import Image
@@ -142,13 +153,15 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             menu.save()
             self.assertEqual(browser.bookmarks, [str(image)])
             self.assertIn('existing absolute VFS path', menu.details.text)
-
+    # VERIFY LOCAL TEXT AND IMAGE PREVIEWS ]
+    # VERIFY BOOKMARK MARKER IN TABLE AND GRID UPDATES AFTER EDITS [
     async def test_bookmark_marker_in_table_and_grid_updates_after_edits(self):
         fs = VirtualFS({'files': {'one/a.txt': {'same:3'}, 'one/picture.png': {'image:4'}}})
         fs.enter('one')
         with create_pipe_input() as pipe, patch.object(fs, 'start_in_current_directory'):
             browser = tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
             browser.refresh('a.txt')
+            # RENDERED FOR TEST BOOKMARK MARKER IN TABLE AND GRID UPDATES AFTER EDITS [
             def rendered():
                 content = browser.control.create_content(60, 24)
                 fragments = [part for i in range(content.line_count) for part in content.get_line(i)]
@@ -161,31 +174,35 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(attrs.bold)
                 return '\n'.join(''.join(part[1] for part in content.get_line(i))
                                  for i in range(content.line_count))
+            # RENDERED FOR TEST BOOKMARK MARKER IN TABLE AND GRID UPDATES AFTER EDITS ]
             for mode in (1, 2, 3):
                 browser.display_mode = mode
                 browser.refresh('a.txt')
                 browser.toggle_bookmark()
-                self.assertIn('B 📄 a.txt', rendered())
+                self.assertIn('B 📄 ' + 'a.txt', rendered())
                 browser.toggle_bookmark()
-                self.assertNotIn('B 📄 a.txt', rendered())
+                self.assertNotIn('B 📄 ' + 'a.txt', rendered())
             browser.graphics_mode = True
             browser.toggle_bookmark()
-            self.assertIn('B a.txt', rendered())
+            self.assertIn('B ' + 'a.txt', rendered())
             menu = tui.BookmarksView(browser)
             browser.push(menu)
             menu.path.text = '/one/picture.png'
             menu.save()
-            self.assertNotIn('B a.txt', rendered())
-            self.assertIn('B picture.png', rendered())
+            self.assertNotIn('B ' + 'a.txt', rendered())
+            self.assertIn('B ' + tui.fit_filename('picture.png', browser.grid_tile_width - 4), rendered())
             menu.remove()
-            self.assertNotIn('B picture.png', rendered())
-
+            self.assertNotIn('B ' + tui.fit_filename('picture.png', browser.grid_tile_width - 4), rendered())
+    # VERIFY BOOKMARK MARKER IN TABLE AND GRID UPDATES AFTER EDITS ]
+    # VERIFY PERSISTENCE AFTER NEW BROWSER [
     async def test_persistence_after_new_browser(self):
+        # BUILD A BROWSER TEST FIXTURE [
         def make():
             fs = VirtualFS({'files': {'one/a.txt': {'same:3'}}})
             fs.enter('one')
             with patch.object(fs, 'start_in_current_directory'):
                 return tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
+        # BUILD A BROWSER TEST FIXTURE ]
         with create_pipe_input() as pipe:
             browser = make()
             browser.refresh('a.txt')
@@ -196,7 +213,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             restored.push(menu)
             menu.remove()
             self.assertEqual(make().bookmarks, [])
-
+    # VERIFY PERSISTENCE AFTER NEW BROWSER ]
+    # VERIFY BOOKMARK VIDEO USES QUICKVIEW PLAYER AND CONTROLS [
     async def test_bookmark_video_uses_quickview_player_and_controls(self):
         from queue import Queue
         from types import SimpleNamespace
@@ -236,7 +254,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     browser.app.exit()
                     await task
-
+    # VERIFY BOOKMARK VIDEO USES QUICKVIEW PLAYER AND CONTROLS ]
+    # VERIFY PARENT ROW BOOKMARKS CURRENT DIRECTORY AND MARKS IT [
     async def test_parent_row_bookmarks_current_directory_and_marks_it(self):
         fs = VirtualFS({'files': {'one/child/a.txt': {'same:3'}}})
         fs.enter('one')
@@ -268,7 +287,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
-
+    # VERIFY PARENT ROW BOOKMARKS CURRENT DIRECTORY AND MARKS IT ]
+    # VERIFY CURSOR RESTORED ON REOPEN RESTART AND DELETION [
     async def test_cursor_restored_on_reopen_restart_and_deletion(self):
         import json
         fs = VirtualFS({'files': {'one/a.txt': {'a:3'}, 'one/b.txt': {'b:3'}}})
@@ -276,8 +296,10 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
         with create_pipe_input() as pipe, patch.object(fs, 'start_in_current_directory'):
             # Legacy list files still load.
             self.bookmark_file.write_text(json.dumps(['/one/a.txt', '/one/b.txt']))
+            # BUILD A BROWSER TEST FIXTURE [
             def make():
                 return tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
+            # BUILD A BROWSER TEST FIXTURE ]
             browser = make()
             menu = tui.BookmarksView(browser)
             browser.push(menu)
@@ -297,7 +319,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(make().bookmark_index, 0)
             restarted.go_bookmark(0)
             self.assertEqual(make().bookmark_index, 0)
-
+    # VERIFY CURSOR RESTORED ON REOPEN RESTART AND DELETION ]
+    # VERIFY CONFIG ALIAS BOOKMARK LOADING EDITING AND NAVIGATION [
     async def test_config_alias_bookmark_loading_editing_and_navigation(self):
         import json
         root = Path(self.storage.name) / 'mounted disk'
@@ -330,7 +353,8 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
-
+    # VERIFY CONFIG ALIAS BOOKMARK LOADING EDITING AND NAVIGATION ]
+    # VERIFY UNAVAILABLE BOOKMARK STAYS OPEN AND ALIAS BOUNDARIES [
     async def test_unavailable_bookmark_stays_open_and_alias_boundaries(self):
         with patch.dict(tui.aliases, {'disk': '/mount/data', 'nested': '/mount/data/sub'}, clear=True), \
                 patch.dict(tui.prefixes, {}, clear=True), create_pipe_input() as pipe:
@@ -347,3 +371,5 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(browser.screen_stack[-1][0], menu)
             self.assertIn('config.sh', menu.details.text)
             self.assertEqual(fs.pwd(), '/')
+    # VERIFY UNAVAILABLE BOOKMARK STAYS OPEN AND ALIAS BOUNDARIES ]
+# VERIFY BOOKMARK BEHAVIOR ]

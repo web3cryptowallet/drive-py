@@ -5,6 +5,7 @@ The server uses a temporary Unix socket, disables persistence, and never connect
 to an existing Redis database.
 """
 
+# IMPORT TEST REDIS DEPENDENCIES [
 import os
 import shutil
 import subprocess
@@ -17,9 +18,10 @@ from unittest.mock import patch
 import vfs
 from vfs.adapter.redis import redis
 import test_vfs
-
-
+# IMPORT TEST REDIS DEPENDENCIES ]
+# VERIFY REDIS BEHAVIOR [
 class RedisTests(unittest.TestCase):
+    # UPDATE UP CLASS [
     @classmethod
     def setUpClass(cls):
         executable = os.environ.get('REDIS_SERVER') or shutil.which('redis-server')
@@ -36,6 +38,7 @@ class RedisTests(unittest.TestCase):
             stdout=log, stderr=subprocess.STDOUT,
         )
 
+        # STOP REDIS TESTS [
         def stop():
             if server.poll() is None:
                 server.terminate()
@@ -44,6 +47,7 @@ class RedisTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait()
+        # STOP REDIS TESTS ]
         cls.addClassCleanup(stop)
         cls.client = redis.Redis(unix_socket_path=socket, decode_responses=True)
         cls.addClassCleanup(cls.client.close)
@@ -62,7 +66,8 @@ class RedisTests(unittest.TestCase):
         if server.poll() is not None:
             log.seek(0)
             raise RuntimeError(f'Test Redis exited: {log.read()}')
-
+    # UPDATE UP CLASS ]
+    # PREPARE TEST FIXTURES FOR REDIS TESTS [
     def setUp(self):
         # Only the private server started above is ever cleared.
         self.client.flushdb()
@@ -71,14 +76,16 @@ class RedisTests(unittest.TestCase):
         self.factory.start()
         self.addCleanup(self.factory.stop)
         test_vfs.VirtualFSTests.setUp(self)
-
+    # PREPARE TEST FIXTURES FOR REDIS TESTS ]
+    # VERIFY NAVIGATION AND REOPEN [
     def test_navigation_and_reopen(self):
         fs = vfs.VirtualFS(self.data, db_type='redis', rebuild_db=True)
         test_vfs.VirtualFSTests.check_navigation(self, fs)
         reopened = vfs.VirtualFS({}, db_type='redis')
         self.assertIsNot(reopened.db, fs.db)
         test_vfs.VirtualFSTests.check_navigation(self, reopened)
-
+    # VERIFY NAVIGATION AND REOPEN ]
+    # VERIFY TREE MATCHES SQLITE [
     def test_tree_matches_sqlite(self):
         with tempfile.TemporaryDirectory() as directory:
             sql = vfs.VirtualFS(self.data, db_type='sqlite', rebuild_db=True,
@@ -86,15 +93,18 @@ class RedisTests(unittest.TestCase):
             self.addCleanup(sql.db.conn.close)
             actual = vfs.VirtualFS(self.data, db_type='redis', rebuild_db=True)
 
+            # SNAPSHOT FOR TEST TREE MATCHES SQLITE [
             def snapshot(db, node):
                 return (vars(node), [snapshot(db, child) for child in
                         sorted(db.get_children(node), key=lambda child: child.id)])
+            # SNAPSHOT FOR TEST TREE MATCHES SQLITE ]
 
             self.assertEqual(snapshot(actual.db, actual.db.get_root()),
                              snapshot(sql.db, sql.db.get_root()))
             for hash_id in (*self.data['hashes'], 'missing:1'):
                 self.assertEqual(actual.get_hash_dups(hash_id), sql.get_hash_dups(hash_id))
-
+    # VERIFY TREE MATCHES SQLITE ]
+    # VERIFY SCANNED FILE INSERT IS INDEXED AND IDEMPOTENT [
     def test_scanned_file_insert_is_indexed_and_idempotent(self):
         fs = vfs.VirtualFS({'files': {}, 'hashes': {}}, db_type='redis', rebuild_db=True)
         self.assertTrue(fs.db.add_scanned_file('/new/dir/file', 'md5:abc', 3))
@@ -105,7 +115,8 @@ class RedisTests(unittest.TestCase):
         self.assertFalse(fs.db.add_scanned_file('/new/dir/file', 'md5:changed', 5))
         self.assertEqual(fs.db.get_root().size, 3)
         self.assertEqual(fs.get_from_path('/new/dir/file').info['hash'], 'md5:abc')
-
+    # VERIFY SCANNED FILE INSERT IS INDEXED AND IDEMPOTENT ]
+    # VERIFY EMPTY TREE [
     def test_empty_tree(self):
         fs = vfs.VirtualFS({'files': {}, 'hashes': {}}, db_type='redis', rebuild_db=True)
         self.assertEqual(fs.pwd(), '/')
@@ -114,7 +125,9 @@ class RedisTests(unittest.TestCase):
         self.assertIsNone(fs.db.get_parent(fs.get_cwd()))
         self.assertIsNone(fs.get_from_path('/missing'))
         self.assertEqual(fs.get_hash_dups('missing:0'), set())
-
-
+    # VERIFY EMPTY TREE ]
+# VERIFY REDIS BEHAVIOR ]
+# RUN TEST REDIS ENTRY POINT [
 if __name__ == '__main__':
     unittest.main()
+# RUN TEST REDIS ENTRY POINT ]

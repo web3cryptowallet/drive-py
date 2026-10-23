@@ -1,4 +1,5 @@
 """Positional startup directories preserve the process cwd and storage location."""
+# IMPORT TEST STARTUP PATH DEPENDENCIES [
 import importlib.util
 import os
 from pathlib import Path
@@ -9,13 +10,15 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS, aliases
-
+# IMPORT TEST STARTUP PATH DEPENDENCIES ]
+# PREPARE TEST STARTUP PATH SHARED STATE [
 spec = importlib.util.spec_from_file_location('startup_path', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST STARTUP PATH SHARED STATE ]
+# VERIFY STARTUP PATH BEHAVIOR [
 class StartupPathTests(unittest.TestCase):
+    # VERIFY SYMLINK STARTUP AND SYMLINK MOUNT REUSE CATALOG [
     def test_symlink_startup_and_symlink_mount_reuse_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -34,7 +37,8 @@ class StartupPathTests(unittest.TestCase):
                     self.assertEqual(fs.pwd(), '/disk/folder')
                     self.assertIn('catalog.txt', [node.name for node in fs.list_nodes()])
                     self.assertEqual(os.getcwd(), cwd)
-
+    # VERIFY SYMLINK STARTUP AND SYMLINK MOUNT REUSE CATALOG ]
+    # VERIFY LOCAL PATHS AND ALIASES WITHOUT CHDIR [
     def test_local_paths_and_aliases_without_chdir(self):
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:
@@ -59,7 +63,8 @@ class StartupPathTests(unittest.TestCase):
             for invalid in [str(root / 'missing'), str(target / 'file.txt')]:
                 with self.assertRaises(ValueError):
                     fs.start_in_current_directory(invalid)
-
+    # VERIFY LOCAL PATHS AND ALIASES WITHOUT CHDIR ]
+    # VERIFY CLI PASSES POSITIONAL PATH AND REJECTS INVALID BEFORE LOADING [
     def test_cli_passes_positional_path_and_rejects_invalid_before_loading(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch('sys.argv', ['drive-tui.py', directory]), \
@@ -74,3 +79,5 @@ class StartupPathTests(unittest.TestCase):
                     tui.main()
                 self.assertEqual(error.exception.code, 2)
                 load.assert_not_called()
+    # VERIFY CLI PASSES POSITIONAL PATH AND REJECTS INVALID BEFORE LOADING ]
+# VERIFY STARTUP PATH BEHAVIOR ]

@@ -1,4 +1,5 @@
 """Process-isolated libmpv decoding and bounded terminal-frame delivery."""
+# IMPORT VIDEO PREVIEW DEPENDENCIES [
 import ctypes
 import multiprocessing
 import os
@@ -9,8 +10,8 @@ from threading import Event, Thread
 import time
 
 from .thumbnails import AUDIO_SUFFIXES
-
-
+# IMPORT VIDEO PREVIEW DEPENDENCIES ]
+# READ THE DISPLAY MATRIX WITHOUT LIBMPVS FAILING SOFTWARE AUTO-ROTATION [
 def video_rotation_filter(path):
     """Read the display matrix without libmpv's failing software auto-rotation."""
     try:
@@ -30,8 +31,8 @@ def video_rotation_filter(path):
                 270: 'transpose=clock,'}.get(angle, '')
     except (OSError, ValueError, subprocess.SubprocessError):
         return ''
-
-
+# READ THE DISPLAY MATRIX WITHOUT LIBMPVS FAILING SOFTWARE AUTO-ROTATION ]
+# DECODE FOR THE VIDEO PREVIEW WORKFLOW [
 def _decode(path, size, connection, library):
     # A native assertion must not kill the TUI or write into its terminal.
     with open(os.devnull, 'w') as sink:
@@ -102,8 +103,8 @@ def _decode(path, size, connection, library):
         except (BrokenPipeError, EOFError, OSError):
             pass
         connection.close()
-
-
+# DECODE FOR THE VIDEO PREVIEW WORKFLOW ]
+# PLAY AUDIO WITHOUT ALLOCATING A SOFTWARE VIDEO RENDERER [
 def _decode_audio(path, size, connection, library):
     """Play audio without allocating a software video renderer."""
     with open(os.devnull, 'w') as sink:
@@ -156,9 +157,10 @@ def _decode_audio(path, size, connection, library):
         except (BrokenPipeError, EOFError, OSError):
             pass
         connection.close()
-
-
+# PLAY AUDIO WITHOUT ALLOCATING A SOFTWARE VIDEO RENDERER ]
+# MANAGE VIDEO PREVIEW [
 class VideoPreview:
+    # INITIALIZE VIDEO PREVIEW [
     def __init__(self, path, pixels, serialize):
         self.path, self.serialize = path, serialize
         self.pixels = tuple(max(2, int(value) // 2 * 2) for value in pixels)
@@ -166,10 +168,12 @@ class VideoPreview:
         self.seeks = Queue(maxsize=1)
         self.events = Queue(maxsize=2)
         self.thread = Thread(target=self.run, name='drive-video-preview', daemon=True)
-
+    # INITIALIZE VIDEO PREVIEW ]
+    # START VIDEO PREVIEW [
     def start(self):
         self.thread.start()
-
+    # START VIDEO PREVIEW ]
+    # PUBLISH UPDATED FILE STATE TO SCANNER CONSUMERS [
     def publish(self, kind, value=None):
         while True:
             try:
@@ -180,17 +184,20 @@ class VideoPreview:
                     self.events.get_nowait()
                 except Empty:
                     pass
-
+    # PUBLISH UPDATED FILE STATE TO SCANNER CONSUMERS ]
+    # SEEK TO A REQUESTED MEDIA OR SCAN POSITION [
     def seek(self, seconds):
         try:
             self.seeks.get_nowait()
         except Empty:
             pass
         self.seeks.put_nowait(max(0., float(seconds)))
-
+    # SEEK TO A REQUESTED MEDIA OR SCAN POSITION ]
+    # CLOSE VIDEO PREVIEW [
     def close(self):
         self.stop.set()
-
+    # CLOSE VIDEO PREVIEW ]
+    # RUN VIDEO PREVIEW [
     def run(self):
         process = connection = None
         try:
@@ -250,3 +257,5 @@ class VideoPreview:
             if connection is not None:
                 connection.close()
             self.publish('end')
+    # RUN VIDEO PREVIEW ]
+# MANAGE VIDEO PREVIEW ]

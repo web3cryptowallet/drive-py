@@ -176,7 +176,7 @@ wheels = [
 
 [[package]]
 name = "drive-py"
-version = "0.992"
+version = "0.995"
 source = { virtual = "." }
 dependencies = [
     { name = "pillow" },

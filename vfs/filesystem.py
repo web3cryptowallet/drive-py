@@ -6,9 +6,10 @@ import os
 
 from .adapter.memory import MemoryDBAdapter
 from .nodes import VFSNode
-from .paths import aliases, get_real_path, get_stat_info, path_update_prefix
+from .paths import aliases, get_real_path, get_stat_info, path_update_prefix, catalog_identity_path
 from .adapter.redis import RedisDBAdapter
 from .adapter.sqlite import SQLiteDBAdapter
+from .adapter.fragmented import FragmentedSQLiteDBAdapter
 from .utils import normalize_path
 
 # IMPORT FILESYSTEM NAVIGATION AND DUPLICATE INSPECTION DEPENDENCIES ]
@@ -23,7 +24,10 @@ class VirtualFS:
         if db_type == "memory":
             self.db = MemoryDBAdapter(**db_kwargs)
         elif db_type == "sqlite":
-            self.db = SQLiteDBAdapter(**db_kwargs)
+            self.db = (FragmentedSQLiteDBAdapter(**db_kwargs)
+                       if db_kwargs.get('fragments') or db_kwargs.get('refragment')
+                       or self._has_fragments(db_kwargs.get('db_path', 'drivevfs'))
+                       else SQLiteDBAdapter(**db_kwargs))
         elif db_type == "redis":
             self.db = RedisDBAdapter(**db_kwargs)
         else:
@@ -34,6 +38,17 @@ class VirtualFS:
 
         self._local_nodes = {}
         self.cwd = self.db.get_root()
+
+    @staticmethod
+    def _has_fragments(filename):
+        import sqlite3
+        if not os.path.isfile(filename):
+            return False
+        conn = sqlite3.connect(filename)
+        try:
+            return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='db_fragments'").fetchone())
+        finally:
+            conn.close()
 
     # SELECT AND INITIALIZE FILESYSTEM STORAGE ]
     # MERGE LOG DATA AND REFRESH CURRENT DIRECTORY [
@@ -67,6 +82,11 @@ class VirtualFS:
             if path == local or path.startswith(local.rstrip('/') + '/'):
                 path = '/' + alias + path[len(local):]
                 break
+        # Prefer an imported startup-relative catalog when opening launch cwd.
+        startup = os.path.realpath(os.getcwd())
+        relative_root = self.db.get_child(self.db.get_root(), '~:')
+        if relative_root is not None and (path == startup or path.startswith(startup.rstrip('/') + '/')):
+            path = '/~:' + ('/' + os.path.relpath(path, startup) if path != startup else '')
         node = self.get_from_path(path)
         if node and node.is_dir:
             self.cwd = node
@@ -87,7 +107,7 @@ class VirtualFS:
     def _local_node(self, path, parent_id):
         real = get_real_path(path)
         try:
-            st = os.lstat(real)
+            st = os.stat(real) if os.path.exists(real) else os.lstat(real)
         except OSError:
             return None
         node = VFSNode(path, path.rsplit('/', 1)[-1], os.path.isdir(real),
@@ -118,7 +138,7 @@ class VirtualFS:
                     children[child.name] = child
         for child in children.values():
             if child.info.get('status') != 'new':
-                child.info['status'] = ('tracked' if os.path.lexists(get_real_path(child.id))
+                child.info['status'] = ('tracked' if os.path.exists(get_real_path(child.id))
                                         else 'deleted')
         return sorted(children.values(), key=lambda child: (not child.is_dir, child.name))
 
@@ -172,7 +192,7 @@ class VirtualFS:
         # Fetch duplicates from the database instead of memory
         all_dups = self.get_hash_dups(file_hash)
         
-        dups = [p for p in map(lambda x: path_update_prefix('/' + normalize_path(x)[0]), all_dups) if p != current_path]
+        dups = [p for p in map(self.decode_source_path, all_dups) if p != current_path]
         
         dups_states = [get_stat_info(dup) for dup in dups]
 
@@ -193,9 +213,20 @@ class VirtualFS:
     # INSPECT FILE METADATA AND DUPLICATE CONTENT ]
     # LOOK UP A NODE BY VIRTUAL PATH [
 
+    def decode_source_path(self, path):
+        root = self.db.get_root()
+        startup = self.db.get_child(root, '~:') if root is not None else None
+        first = path.split('/', 1)[0]
+        legacy = self.db.get_child(root, first) if root is not None and first else None
+        if startup is not None or (not path.startswith('/') and legacy is None):
+            path = catalog_identity_path(path)
+        return '/' + normalize_path(path_update_prefix(path))[0]
+
     def get_from_path(self, fullpath):
         if not fullpath or fullpath == "/":
             return self.db.get_root()
+        if not fullpath.startswith('/'):
+            fullpath = self.decode_source_path(fullpath)
         path, parts = normalize_path(fullpath)
         node = self.db.get_root()
         for p in parts:

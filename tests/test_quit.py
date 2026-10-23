@@ -1,4 +1,5 @@
 """q exits the application even when a secondary view or text widget has focus."""
+# IMPORT TEST QUIT DEPENDENCIES [
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -8,13 +9,15 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
-
+# IMPORT TEST QUIT DEPENDENCIES ]
+# PREPARE TEST QUIT SHARED STATE [
 spec = importlib.util.spec_from_file_location('quit_app', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST QUIT SHARED STATE ]
+# VERIFY QUIT BEHAVIOR [
 class QuitTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY Q FROM ALL VIEWS [
     async def test_q_from_all_views(self):
         for context in ['main', 'info', 'help', 'actions', 'scanner', 'scanner-input']:
             with self.subTest(context=context), create_pipe_input() as pipe:
@@ -42,3 +45,5 @@ class QuitTests(unittest.IsolatedAsyncioTestCase):
                     if not task.done():
                         browser.app.exit()
                         await task
+    # VERIFY Q FROM ALL VIEWS ]
+# VERIFY QUIT BEHAVIOR ]

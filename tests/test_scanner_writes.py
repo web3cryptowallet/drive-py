@@ -1,4 +1,5 @@
 """Unchanged scanner discoveries must not rewrite persisted records."""
+# IMPORT TEST SCANNER WRITES DEPENDENCIES [
 from pathlib import Path
 from queue import Queue
 from threading import Event
@@ -8,23 +9,28 @@ import unittest
 
 from vfs import VirtualFS
 from vfs.scanner import DriveScanner, ScanStore
-
-
+# IMPORT TEST SCANNER WRITES DEPENDENCIES ]
+# MANAGE FAKE REDIS [
 class FakeRedis:
+    # INITIALIZE FAKE REDIS [
     def __init__(self):
         self.values = {}
         self.writes = 0
-
+    # INITIALIZE FAKE REDIS ]
+    # READ A FAKE REDIS HASH VALUE [
     def hget(self, name, key):
         value = self.values.get((name, key))
         return value.encode() if value is not None else None
-
+    # READ A FAKE REDIS HASH VALUE ]
+    # WRITE A FAKE REDIS HASH VALUE [
     def hset(self, name, key, value):
         self.values[name, key] = value
         self.writes += 1
-
-
+    # WRITE A FAKE REDIS HASH VALUE ]
+# MANAGE FAKE REDIS ]
+# VERIFY SCANNER WRITE BEHAVIOR [
 class ScannerWriteTests(unittest.TestCase):
+    # VERIFY SQLITE STORE SKIPS EQUAL AND LEGACY JSON AFTER REOPEN [
     def test_sqlite_store_skips_equal_and_legacy_json_after_reopen(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / 'cache.sqlite')
@@ -48,7 +54,8 @@ class ScannerWriteTests(unittest.TestCase):
                 self.assertEqual(store.get('entry', '/file')['size'], 4)
             finally:
                 fs.db.conn.close()
-
+    # VERIFY SQLITE STORE SKIPS EQUAL AND LEGACY JSON AFTER REOPEN ]
+    # VERIFY LITE REOPEN SKIPS EXISTING PATHS AND ENTRIES BUT EMITS EVENTS [
     def test_lite_reopen_skips_existing_paths_and_entries_but_emits_events(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -81,7 +88,8 @@ class ScannerWriteTests(unittest.TestCase):
                 self.assertEqual(ScanStore(fs.db).get('entry', str(file))['size'], 4)
             finally:
                 fs.db.conn.close()
-
+    # VERIFY LITE REOPEN SKIPS EXISTING PATHS AND ENTRIES BUT EMITS EVENTS ]
+    # VERIFY MEMORY AND REDIS SKIP EQUAL NORMALIZED VALUES [
     def test_memory_and_redis_skip_equal_normalized_values(self):
         memory = VirtualFS({'files': {}}).db
         redis = SimpleNamespace(client=FakeRedis())
@@ -93,3 +101,5 @@ class ScannerWriteTests(unittest.TestCase):
                 self.assertTrue(store.put('map', '/', {'modes': [False, False, True]}))
                 self.assertEqual(store.get('map', '/')['modes'], [False, False, True])
         self.assertEqual(redis.client.writes, 2)
+    # VERIFY MEMORY AND REDIS SKIP EQUAL NORMALIZED VALUES ]
+# VERIFY SCANNER WRITE BEHAVIOR ]

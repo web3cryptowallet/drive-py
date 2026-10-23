@@ -1,4 +1,5 @@
 """Expert scanning groups metadata commits without holding write locks during I/O."""
+# IMPORT TEST EXPERT SQLITE TRANSACTIONS DEPENDENCIES [
 from pathlib import Path
 from queue import Queue
 from threading import Event
@@ -8,9 +9,10 @@ from unittest.mock import patch
 
 from vfs import VirtualFS
 from vfs.scanner import DriveScanner, ScanControls, ScanEntry, ScanStore
-
-
+# IMPORT TEST EXPERT SQLITE TRANSACTIONS DEPENDENCIES ]
+# VERIFY EXPERT SQLITE TRANSACTION BEHAVIOR [
 class ExpertSQLiteTransactionTests(unittest.TestCase):
+    # SCANNER FOR EXPERT SQLITE TRANSACTION TESTS [
     def scanner(self, fs, directory, files, buckets=None):
         controls = ScanControls((False, False, True), heavy_order='expert')
         controls.buckets = buckets or tuple((str(file),) for file in files)
@@ -18,7 +20,8 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
         scanner = DriveScanner(fs.db, directory, Queue(), Event(), controls=controls,
             entries=[ScanEntry(str(file), str(file), False, file.stat().st_size) for file in files])
         return scanner, controls
-
+    # SCANNER FOR EXPERT SQLITE TRANSACTION TESTS ]
+    # VERIFY NEW FILES USE TWO COMMITS AND EVENTS RUN WITHOUT WRITE LOCK [
     def test_new_files_use_two_commits_and_events_run_without_write_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -33,9 +36,11 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
                 fs.db.conn.set_trace_callback(statements.append)
                 original_emit = scanner.emit
 
+                # DELIVER SCANNER EVENTS WITH BACKPRESSURE [
                 def emit(event):
                     self.assertFalse(fs.db.conn.in_transaction, event[0])
                     original_emit(event)
+                # DELIVER SCANNER EVENTS WITH BACKPRESSURE ]
 
                 with patch.object(scanner, 'emit', side_effect=emit), patch(
                         'vfs.scanner.random.randint', return_value=20):
@@ -58,7 +63,8 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
                     self.assertEqual(reopened.get_from_path(str(file)).size, 3)
             finally:
                 reopened.db.conn.close()
-
+    # VERIFY NEW FILES USE TWO COMMITS AND EVENTS RUN WITHOUT WRITE LOCK ]
+    # VERIFY NESTED METADATA WRITES ROLLBACK TOGETHER [
     def test_nested_metadata_writes_rollback_together(self):
         with tempfile.TemporaryDirectory() as directory:
             fs = VirtualFS(None, 'sqlite', db_path=str(Path(directory) / 'cache.sqlite'))
@@ -75,7 +81,8 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
                 self.assertFalse(fs.db.conn.in_transaction)
             finally:
                 fs.db.conn.close()
-
+    # VERIFY NESTED METADATA WRITES ROLLBACK TOGETHER ]
+    # VERIFY INTERRUPTED BUCKET KEEPS REAL REMAINING CHECKPOINT [
     def test_interrupted_bucket_keeps_real_remaining_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -89,9 +96,11 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
                     buckets=(tuple(str(file) for file in files),))
                 original_publish = scanner.publish
 
+                # PAUSE FOR TEST INTERRUPTED BUCKET KEEPS REAL REMAINING CHECKPOINT [
                 def pause(db, entry):
                     original_publish(db, entry)
                     scanner.stop.set()
+                # PAUSE FOR TEST INTERRUPTED BUCKET KEEPS REAL REMAINING CHECKPOINT ]
 
                 with patch.object(scanner, 'publish', side_effect=pause):
                     scanner.scan_once(fs.db)
@@ -108,3 +117,5 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
                 self.assertIsNone(ScanStore(reopened.db).get('position', directory)['3'])
             finally:
                 reopened.db.conn.close()
+    # VERIFY INTERRUPTED BUCKET KEEPS REAL REMAINING CHECKPOINT ]
+# VERIFY EXPERT SQLITE TRANSACTION BEHAVIOR ]

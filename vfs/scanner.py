@@ -4,6 +4,7 @@ Discovery records remain separate; verified new files join the VFS baseline.
 Existing comparison baselines are preserved.
 Path IDs have the same meaning as nodes.id throughout the existing VFS.
 """
+# IMPORT SCANNER DEPENDENCIES [
 from collections import Counter, deque
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
@@ -22,8 +23,8 @@ from .adapter.sqlite import SQLiteDBAdapter
 from .scanner_pool import CandidatePool
 from .paths import aliases, get_real_path
 from .nodes import VFSNode
-
-
+# IMPORT SCANNER DEPENDENCIES ]
+# DESCRIBE A DISCOVERED FILE AND ITS VERIFICATION STATE [
 @dataclass(frozen=True)
 class ScanEntry:
     id: str
@@ -34,6 +35,7 @@ class ScanEntry:
     progress: int | None = None
     error: str = ''
 
+    # NORMALIZE SCAN ENTRY [
     def __post_init__(self):
         if self.is_dir:
             object.__setattr__(self, 'state', 'directory')
@@ -41,8 +43,9 @@ class ScanEntry:
             object.__setattr__(self, 'progress', None)
         elif self.state == 'directory':
             object.__setattr__(self, 'state', 'unknown')
-
-
+    # NORMALIZE SCAN ENTRY ]
+# DESCRIBE A DISCOVERED FILE AND ITS VERIFICATION STATE ]
+# REPORT SCAN COUNTS AND RECENT PROCESSING RATES [
 @dataclass(frozen=True)
 class ScanStats:
     path: str = ''
@@ -58,17 +61,20 @@ class ScanStats:
     hash_samples: tuple | None = None
     hash_started: float | None = None
 
+    # CALCULATE RECENT SCAN THROUGHPUT [
     def recent_rate(self, column):
         now = time.monotonic()
         return sum(sample[column] for sample in self.rate_samples
                    if 0 <= now - sample[0] < 5) / 5
-
+    # CALCULATE RECENT SCAN THROUGHPUT ]
+    # PATHS PER SECOND [
     @property
     def paths_per_second(self):
         if self.rate_samples is not None:
             return self.recent_rate(1)
         return self.paths / self.elapsed if self.active and self.elapsed > 0 else 0.
-
+    # PATHS PER SECOND ]
+    # MB PER SECOND [
     @property
     def mb_per_second(self):
         if self.hash_samples is not None:
@@ -80,10 +86,12 @@ class ScanStats:
             return self.recent_rate(2) / 1_000_000
         size = self.bytes_read if self.size_scanned is None else self.size_scanned
         return size / self.elapsed / 1_000_000 if self.active and self.elapsed > 0 else 0.
-
-
+    # MB PER SECOND ]
+# REPORT SCAN COUNTS AND RECENT PROCESSING RATES ]
+# TRACK ACTIVE SCAN MODE AND ACCUMULATED MAP TIME [
 class ScanTiming:
     """Per-map mode processing time; pauses/watch delays are excluded."""
+    # INITIALIZE SCAN TIMING [
     def __init__(self, elapsed=(0., 0., 0.)):
         self.elapsed = list(elapsed)
         self.run_elapsed = [0., 0., 0.]
@@ -91,7 +99,8 @@ class ScanTiming:
         self.mode = 0
         self.started = time.monotonic()
         self.lock = RLock()
-
+    # INITIALIZE SCAN TIMING ]
+    # SWITCH ACTIVE SCAN MODE AND ACCOUNT FOR TIME [
     def switch(self, mode, token=None):
         with self.lock:
             now = time.monotonic()
@@ -103,23 +112,27 @@ class ScanTiming:
                 self.run_elapsed[mode - 1] = 0.
                 self.run_tokens[mode - 1] = token
             self.mode, self.started = mode, now
-
+    # SWITCH ACTIVE SCAN MODE AND ACCOUNT FOR TIME ]
+    # SNAPSHOT FOR SCAN TIMING [
     def snapshot(self):
         with self.lock:
             elapsed = self.elapsed.copy()
             if self.mode:
                 elapsed[self.mode - 1] += max(0., time.monotonic() - self.started)
             return self.mode, tuple(elapsed)
-
+    # SNAPSHOT FOR SCAN TIMING ]
+    # DISPLAY SNAPSHOT FOR SCAN TIMING [
     def display_snapshot(self):
         with self.lock:
             spent = max(0., time.monotonic() - self.started) if self.mode else 0.
             current = self.run_elapsed[self.mode - 1] + spent if self.mode else 0.
             return current, sum(self.elapsed) + spent
-
-
+    # DISPLAY SNAPSHOT FOR SCAN TIMING ]
+# TRACK ACTIVE SCAN MODE AND ACCUMULATED MAP TIME ]
+# PERSIST SCANNER METADATA AND RESUME POSITIONS [
 class ScanStore:
     """Scanner-owned records, separate from the imported comparison baseline."""
+    # INITIALIZE SCAN STORE [
     def __init__(self, db):
         self.db = db
         if isinstance(db, SQLiteDBAdapter):
@@ -127,7 +140,8 @@ class ScanStore:
             db.conn.commit()
         elif not hasattr(db, 'client') and not hasattr(db, 'scan_state'):
             db.scan_state = {}
-
+    # INITIALIZE SCAN STORE ]
+    # READ A STORED SCANNER RECORD [
     def get(self, kind, key, default=None):
         db = self.db
         if isinstance(db, SQLiteDBAdapter):
@@ -138,7 +152,8 @@ class ScanStore:
         else:
             value = db.scan_state.get((kind, key))
         return json.loads(value) if value is not None else default
-
+    # READ A STORED SCANNER RECORD ]
+    # ITERATE STORED LIVELOG OR SCANNER RECORDS [
     def items(self, kind):
         db = self.db
         if isinstance(db, SQLiteDBAdapter):
@@ -150,7 +165,8 @@ class ScanStore:
                     if record_kind == kind)
         return {(key.decode() if isinstance(key, bytes) else key): json.loads(value)
                 for key, value in rows}
-
+    # ITERATE STORED LIVELOG OR SCANNER RECORDS ]
+    # DELETE EXACTLY ONE SCANNER RECORD, LEAVING OTHER SCOPES UNTOUCHED [
     def delete(self, kind, key):
         """Delete exactly one scanner record, leaving other scopes untouched."""
         db = self.db
@@ -163,7 +179,8 @@ class ScanStore:
         if hasattr(db, 'client'):
             return bool(db.client.hdel('scan_state:' + kind, key))
         return db.scan_state.pop((kind, key), None) is not None
-
+    # DELETE EXACTLY ONE SCANNER RECORD, LEAVING OTHER SCOPES UNTOUCHED ]
+    # PERSIST ONLY CHANGED JSON DATA; RETURN WHETHER A WRITE WAS NEEDED [
     def put(self, kind, key, value):
         """Persist only changed JSON data; return whether a write was needed."""
         value = json.dumps(value, sort_keys=True)
@@ -189,38 +206,47 @@ class ScanStore:
         else:
             db.scan_state[kind, key] = value
         return True
-
-
+    # PERSIST ONLY CHANGED JSON DATA; RETURN WHETHER A WRITE WAS NEEDED ]
+# PERSIST SCANNER METADATA AND RESUME POSITIONS ]
+# INTERNAL FIFO THAT RECORDS MEMBERSHIP DELTAS FOR THE MAP OVERLAY [
 class SelectionQueue(deque):
     """Internal FIFO that records membership deltas for the map overlay."""
+    # INITIALIZE SELECTION QUEUE [
     def __init__(self, changed):
         super().__init__()
         self.changed = changed
-
+    # INITIALIZE SELECTION QUEUE ]
+    # APPEND PENDING WORK OR FILE OPERATIONS [
     def append(self, ids):
         super().append(ids)
         self.changed(ids, 1)
-
+    # APPEND PENDING WORK OR FILE OPERATIONS ]
+    # PREPEND PENDING SCAN WORK [
     def appendleft(self, ids):
         super().appendleft(ids)
         self.changed(ids, 1)
-
+    # PREPEND PENDING SCAN WORK ]
+    # EXTEND FOR SELECTION QUEUE [
     def extend(self, values):
         for ids in values:
             self.append(ids)
-
+    # EXTEND FOR SELECTION QUEUE ]
+    # TAKE THE NEXT PENDING SCAN ITEM [
     def popleft(self):
         ids = super().popleft()
         self.changed(ids, -1)
         return ids
-
+    # TAKE THE NEXT PENDING SCAN ITEM ]
+    # CLEAR SELECTION QUEUE [
     def clear(self):
         while self:
             self.popleft()
-
-
+    # CLEAR SELECTION QUEUE ]
+# INTERNAL FIFO THAT RECORDS MEMBERSHIP DELTAS FOR THE MAP OVERLAY ]
+# COORDINATE SCAN MODES AND PENDING WORK [
 class ScanControls:
     """Independent mode flags and wake signal shared with the worker."""
+    # INITIALIZE SCAN CONTROLS [
     def __init__(self, modes=(True, False, False), read_known=False, new_first=True,
                  startup=False, heavy_order='normal'):
         self.startup_mode = 1 if startup else None
@@ -246,7 +272,8 @@ class ScanControls:
         self.selector_catalog = None
         self.selector_builder = None
         self.selector_empty_signature = None
-
+    # INITIALIZE SCAN CONTROLS ]
+    # SELECTION CHANGED FOR SCAN CONTROLS [
     def _selection_changed(self, ids, delta):
         key = id(ids)
         change = self.selection_changes.get(key)
@@ -256,11 +283,13 @@ class ScanControls:
         else:
             self.selection_changes.pop(key, None)
         self.selection_revision += 1
-
+    # SELECTION CHANGED FOR SCAN CONTROLS ]
+    # EXPERT CURRENT FOR SCAN CONTROLS [
     @property
     def expert_current(self):
         return self._expert_current
-
+    # EXPERT CURRENT FOR SCAN CONTROLS ]
+    # EXPERT CURRENT FOR SCAN CONTROLS [
     @expert_current.setter
     def expert_current(self, ids):
         if self._expert_current is not None:
@@ -268,12 +297,14 @@ class ScanControls:
         self._expert_current = ids
         if ids is not None:
             self._selection_changed(ids, 1)
-
+    # EXPERT CURRENT FOR SCAN CONTROLS ]
+    # SELECTED BUCKETS FOR SCAN CONTROLS [
     @property
     def selected_buckets(self):
         with self.lock:
             return ((self.expert_current,) if self.expert_current else ()) + tuple(self.expert_queue)
-
+    # SELECTED BUCKETS FOR SCAN CONTROLS ]
+    # EXPERT ELIGIBLE INDICES [
     def expert_eligible_indices(self, buckets, priorities=None):
         priorities_by_path = self.entry_priorities if priorities is None else priorities
         tiers = {}
@@ -285,7 +316,8 @@ class ScanControls:
                                 1 if any(value != 3 for value in priorities) else 2)
         tier = min(tiers.values(), default=None)
         return {index for index, value in tiers.items() if value == tier}
-
+    # EXPERT ELIGIBLE INDICES ]
+    # SELECTOR-ONLY: ENQUEUE THE NEXT ELIGIBLE FILE BUCKET IN MAP ORDER [
     def enqueue_expert(self, eligible=None, buckets=None):
         """Selector-only: enqueue the next eligible file bucket in map order."""
         with self.lock:
@@ -314,7 +346,8 @@ class ScanControls:
                 self.wake.set()
                 return True
             return False
-
+    # SELECTOR-ONLY: ENQUEUE THE NEXT ELIGIBLE FILE BUCKET IN MAP ORDER ]
+    # SNAPSHOT UNDER THE SHARED LOCK; BUILD ONCE OUTSIDE IT [
     def prepare_expert_pool(self):
         """Snapshot under the shared lock; build once outside it."""
         with self.lock:
@@ -351,7 +384,8 @@ class ScanControls:
             with self.lock:
                 if self.selector_builder is token:
                     self.selector_builder = None
-
+    # SNAPSHOT UNDER THE SHARED LOCK; BUILD ONCE OUTSIDE IT ]
+    # ENQUEUE EXPERT BATCH [
     def enqueue_expert_batch(self):
         if not self.prepare_expert_pool():
             return 0
@@ -369,7 +403,8 @@ class ScanControls:
             self.selector_batch = len(chosen)
             self.wake.set()
             return len(chosen)
-
+    # ENQUEUE EXPERT BATCH ]
+    # CLAIM EXPERT FOR SCAN CONTROLS [
     def claim_expert(self):
         with self.lock:
             if (not self.modes[2] or self.heavy_order != 'expert' or
@@ -377,20 +412,23 @@ class ScanControls:
                 return None
             self.expert_current = self.expert_queue.popleft()
             return self.expert_current
-
+    # CLAIM EXPERT FOR SCAN CONTROLS ]
+    # FINISH EXPERT FOR SCAN CONTROLS [
     def finish_expert(self, interrupted=False):
         with self.lock:
             ids = self.expert_current
             self.expert_current = None
             if interrupted and ids and self.heavy_order == 'expert':
                 self.expert_queue.appendleft(ids)
-
+    # FINISH EXPERT FOR SCAN CONTROLS ]
+    # CANCEL STARTUP FOR SCAN CONTROLS [
     def cancel_startup(self):
         with self.lock:
             if self.startup_mode is not None:
                 self.startup_mode = None
                 self.epochs = tuple(value + 1 for value in self.epochs)
-
+    # CANCEL STARTUP FOR SCAN CONTROLS ]
+    # ADVANCE STARTUP FOR SCAN CONTROLS [
     def advance_startup(self, mode):
         with self.lock:
             if self.startup_mode == mode:
@@ -398,7 +436,8 @@ class ScanControls:
                 self.modes = tuple(self.startup_mode == index for index in (1, 2, 3))
                 self.run_revisions = tuple(value + (self.startup_mode == i + 1)
                                            for i, value in enumerate(self.run_revisions))
-
+    # ADVANCE STARTUP FOR SCAN CONTROLS ]
+    # TOGGLE ORDER FOR SCAN CONTROLS [
     def toggle_order(self):
         with self.lock:
             self.cancel_startup()
@@ -409,7 +448,8 @@ class ScanControls:
             self.selector_pool = CandidatePool()
             self.epochs = tuple(value + (i == 2) for i, value in enumerate(self.epochs))
             self.wake.set()
-
+    # TOGGLE ORDER FOR SCAN CONTROLS ]
+    # TOGGLE FOR SCAN CONTROLS [
     def toggle(self, mode):
         with self.lock:
             self.cancel_startup()
@@ -421,7 +461,8 @@ class ScanControls:
             self.epochs = tuple(value + (index == mode - 1)
                                 for index, value in enumerate(self.epochs))
             self.wake.set()
-
+    # TOGGLE FOR SCAN CONTROLS ]
+    # START FROM FOR SCAN CONTROLS [
     def start_from(self, mode, path):
         with self.lock:
             self.cancel_startup()
@@ -444,9 +485,12 @@ class ScanControls:
                     self.selector_batch = 1
                     self.selector_next = (bucket_index + 1) % len(self.buckets)
             self.wake.set()
-
+    # START FROM FOR SCAN CONTROLS ]
+# COORDINATE SCAN MODES AND PENDING WORK ]
+# DISCOVER AND VERIFY FILES IN BACKGROUND SCAN PASSES [
 class DriveScanner:
     """One disk worker with independently enabled discovery/metadata/hash passes."""
+    # INITIALIZE DRIVE SCANNER [
     def __init__(self, db, path, events, stop, interval=5, controls=None, entries=(), root_names=(), timing=None, scan_roots=(), storage_path=None):
         self.source = db
         self.root_names = tuple(root_names)
@@ -478,7 +522,8 @@ class DriveScanner:
         self.baseline_known = {}
         self.expert_initialized = False
         self.checksums = None
-
+    # INITIALIZE DRIVE SCANNER ]
+    # DELIVER SCANNER EVENTS WITH BACKPRESSURE [
     def emit(self, event):
         while not self.stop.is_set():
             try:
@@ -486,7 +531,8 @@ class DriveScanner:
                 return
             except Full:
                 pass
-
+    # DELIVER SCANNER EVENTS WITH BACKPRESSURE ]
+    # REPORT STATS FOR DRIVE SCANNER [
     def report_stats(self, *, path=None, read=0, completed_size=None, force=False, active=True):
         if path is not None:
             self.current_path = path
@@ -514,12 +560,14 @@ class DriveScanner:
                                          self.paths, self.size_scanned, tuple(self.rate_samples),
                                          tuple(self.hash_samples), self.hash_started)))
             self.last_stats = now
-
+    # REPORT STATS FOR DRIVE SCANNER ]
+    # CHECK WHETHER THE REQUESTED SCAN MODE CAN RUN [
     def enabled(self, mode):
         return (not self.stop.is_set() and self.controls.modes[mode - 1] and
                 (self.current_mode != mode or
                  self.active_epoch == self.controls.epochs[mode - 1]))
-
+    # CHECK WHETHER THE REQUESTED SCAN MODE CAN RUN ]
+    # BEGIN MODE FOR DRIVE SCANNER [
     def begin_mode(self, mode):
         self.timing.switch(mode, self.controls.run_revisions[mode - 1])
         self.current_mode = mode
@@ -550,7 +598,8 @@ class DriveScanner:
                 self.controls.startup_mode is None and
                 not self.checkpoints[key]['remaining']):
             self.save_positions()
-
+    # BEGIN MODE FOR DRIVE SCANNER ]
+    # DISCOVERY FRONTIER FOR DRIVE SCANNER [
     def discovery_frontier(self, paths):
         frontier, selected = [], set()
         for path in paths:
@@ -561,15 +610,18 @@ class DriveScanner:
                 frontier.append(path)
                 selected.add(path)
         return frontier
-
+    # DISCOVERY FRONTIER FOR DRIVE SCANNER ]
+    # FINISH STARTUP MODE [
     def finish_startup_mode(self, mode):
         if (self.enabled(mode) and self.checkpoints.get(str(mode)) is None and
                 (mode != 2 or self.checkpoints.get('2-discovery') is None)):
             self.controls.advance_startup(mode)
-
+    # FINISH STARTUP MODE ]
+    # SAVE POSITIONS FOR DRIVE SCANNER [
     def save_positions(self):
         self.store.put('position', self.storage_path, self.checkpoints)
-
+    # SAVE POSITIONS FOR DRIVE SCANNER ]
+    # SELECT BUCKETS FOR DRIVE SCANNER [
     def select_buckets(self):
         exhausted = None
         while not self.stop.is_set() and not self.selector_stop.is_set():
@@ -582,7 +634,8 @@ class DriveScanner:
                         self.controls.enqueue_expert_batch())
             exhausted = None if selected else signature
             self.selector_stop.wait(random.uniform(.2, 1.0) if selected else .05)
-
+    # SELECT BUCKETS FOR DRIVE SCANNER ]
+    # RUN DRIVE SCANNER [
     def run(self):
         self.selector_thread = Thread(target=self.select_buckets,
                                       name='drive-bucket-selector', daemon=True)
@@ -591,9 +644,13 @@ class DriveScanner:
         owns_connection = isinstance(db, SQLiteDBAdapter)
         try:
             if owns_connection:
-                db = object.__new__(SQLiteDBAdapter)
-                db.conn = sqlite3.connect(self.source.db_path, timeout=2)
-                db.conn.row_factory = sqlite3.Row
+                if hasattr(self.source, 'routes'):
+                    db = type(self.source)(self.source.db_path)
+                    db.conn.execute('PRAGMA busy_timeout=2000')
+                else:
+                    db = object.__new__(SQLiteDBAdapter)
+                    db.conn = sqlite3.connect(self.source.db_path, timeout=2)
+                    db.conn.row_factory = sqlite3.Row
             while not self.stop.is_set():
                 self.controls.wake.clear()
                 if not any(self.controls.modes):
@@ -621,7 +678,8 @@ class DriveScanner:
             self.selector_thread.join(2)
             if owns_connection and db is not self.source:
                 db.conn.close()
-
+    # RUN DRIVE SCANNER ]
+    # PERSIST THE SCANNED FILE ID TO PATH MAPPING [
     def remember(self, db, entry):
         if entry.id in self.remembered:
             return
@@ -646,7 +704,8 @@ class DriveScanner:
             if db.scan_paths.get(entry.id) != entry.path:
                 db.scan_paths[entry.id] = entry.path
         self.remembered.add(entry.id)
-
+    # PERSIST THE SCANNED FILE ID TO PATH MAPPING ]
+    # LOOK UP IMPORTED OR SAVED CHECKSUM BASELINES [
     def baseline(self, db, path):
         node = db.get_root()
         for part in path.strip('/').split('/') if path else []:
@@ -660,7 +719,8 @@ class DriveScanner:
         self.baseline_known[path] = bool(node and (node.is_dir or node.info.get('hash') or
                                                  node.info.get('hashinfo')))
         return node
-
+    # LOOK UP IMPORTED OR SAVED CHECKSUM BASELINES ]
+    # READ LOCAL FILE METADATA AND CAPTURE ERRORS [
     def disk_info(self, path):
         try:
             return os.lstat(get_real_path(path)), ''
@@ -668,7 +728,8 @@ class DriveScanner:
             return None, ''
         except OSError as exc:
             return None, str(exc)
-
+    # READ LOCAL FILE METADATA AND CAPTURE ERRORS ]
+    # PUBLISH UPDATED FILE STATE TO SCANNER CONSUMERS [
     def publish(self, db, entry):
         new = entry.id not in self.entries
         self.entries[entry.id] = entry
@@ -682,7 +743,8 @@ class DriveScanner:
         self.size_scanned += entry.size if not entry.is_dir else 0
         self.update_priority(entry)
         self.report_stats(path=entry.path, completed_size=entry.size, force=True)
-
+    # PUBLISH UPDATED FILE STATE TO SCANNER CONSUMERS ]
+    # UPDATE PRIORITY FOR DRIVE SCANNER [
     def update_priority(self, entry):
         if entry.state in ('unknown', 'new'):
             priority = 1 if self.baseline_known.get(entry.id, False) else 0
@@ -696,13 +758,15 @@ class DriveScanner:
                 self.controls.entry_priorities[entry.id] = priority
             if old != self.controls.entry_priorities.get(entry.id):
                 self.controls.priority_revision += 1
-
+    # UPDATE PRIORITY FOR DRIVE SCANNER ]
+    # SCAN ONCE FOR DRIVE SCANNER [
     def scan_once(self, db):
         try:
             self._scan_once(db)
         finally:
             self.timing.switch(0)
-
+    # SCAN ONCE FOR DRIVE SCANNER ]
+    # SCAN ONCE FOR DRIVE SCANNER [
     def _scan_once(self, db):
         self.store = ScanStore(db)
         if self.checkpoints is None:
@@ -752,7 +816,8 @@ class DriveScanner:
         self.current_mode = 0
         self.report_stats(force=True, active=False)
         self.elapsed += max(0., time.monotonic() - self.started)
-
+    # SCAN ONCE FOR DRIVE SCANNER ]
+    # VERIFY PENDING FOR DRIVE SCANNER [
     def verify_pending(self, db, mode):
         checkpoint = self.checkpoints.get(str(mode))
         pending = (checkpoint['remaining'] if checkpoint is not None else list(self.entries))
@@ -801,7 +866,8 @@ class DriveScanner:
             {'remaining': [path for path in original_order if path in pending],
              'first': first} if pending else None)
         self.save_positions()
-
+    # VERIFY PENDING FOR DRIVE SCANNER ]
+    # SCAN EXPERT FOR DRIVE SCANNER [
     def scan_expert(self, db):
         self.expert_scanned = False
         ids = self.controls.claim_expert()
@@ -830,7 +896,8 @@ class DriveScanner:
             self.controls.finish_expert(
                 interrupted=self.checkpoints.get('3') is not None and
                 self.controls.requests[2][0] == self.requests_seen[2])
-
+    # SCAN EXPERT FOR DRIVE SCANNER ]
+    # DISCOVER FILES AND RESUME DIRECTORY TRAVERSAL [
     def discover(self, db, mode=1, new_only=False):
         key = '1' if mode == 1 else '2-discovery'
         checkpoint = self.checkpoints.get(key)
@@ -898,7 +965,8 @@ class DriveScanner:
             self.previous_ids = seen
         self.checkpoints[key] = {'stack': stack, 'seen': list(seen), 'partial': partial} if stack else None
         self.save_positions()
-
+    # DISCOVER FILES AND RESUME DIRECTORY TRAVERSAL ]
+    # VERIFY METADATA FOR DRIVE SCANNER [
     def verify_metadata(self, entry, baseline, disk_stat, error):
         if entry.is_dir:
             return replace(entry, state='directory', progress=None)
@@ -912,7 +980,8 @@ class DriveScanner:
                    (not baseline.is_dir and (not stat.S_ISREG(disk_stat.st_mode) or
                                              disk_stat.st_size != baseline.size)))
         return replace(entry, state='modified' if changed else 'verified')
-
+    # VERIFY METADATA FOR DRIVE SCANNER ]
+    # VERIFY FILE CONTENTS AGAINST CHECKSUM BASELINES [
     def verify(self, entry, baseline, disk_stat, error):
         if entry.is_dir:
             return replace(entry, state='directory', progress=None)
@@ -984,9 +1053,11 @@ class DriveScanner:
             return replace(entry, state='verified' if verified else 'modified')
         except (OSError, ValueError) as exc:
             return replace(entry, state='unknown', error=str(exc))
-
-
+    # VERIFY FILE CONTENTS AGAINST CHECKSUM BASELINES ]
+# DISCOVER AND VERIFY FILES IN BACKGROUND SCAN PASSES ]
+# MANAGE BUCKET FOR THE SCANNER WORKFLOW [
 class Bucket:
+    # INITIALIZE BUCKET FOR BUCKET [
     def __init__(self):
         self.ids = []
         self.weight = 0
@@ -996,10 +1067,12 @@ class Bucket:
         self.file_states = Counter()
         self.active = 0
         self.updated = 0.
-
-
+    # INITIALIZE BUCKET FOR BUCKET ]
+# MANAGE BUCKET FOR THE SCANNER WORKFLOW ]
+# GROUP SCANNED FILES INTO DISPLAY BUCKETS [
 class FileMap:
     """Incremental sequential packing; fixed maps grow capacity geometrically."""
+    # INITIALIZE FILE MAP [
     def __init__(self):
         self.entries = {}
         self.buckets = []
@@ -1010,10 +1083,12 @@ class FileMap:
         self.limit = 100
         self.byte_limit = 64 * 1024 * 1024
         self.capacity = 1
-
+    # INITIALIZE FILE MAP ]
+    # CALCULATE THE BUCKET CAPACITY CONTRIBUTION [
     def weight(self, entry):
         return max(1, entry.size) if self.mode == 'size' else 1
-
+    # CALCULATE THE BUCKET CAPACITY CONTRIBUTION ]
+    # REBUILD DISPLAY BUCKETS FROM FILE ENTRIES [
     def rebuild(self, minimum=1):
         self.buckets = []
         self.locations = {}
@@ -1029,7 +1104,8 @@ class FileMap:
             self.locations = {}
             for entry in self.entries.values():
                 self._append(entry)
-
+    # REBUILD DISPLAY BUCKETS FROM FILE ENTRIES ]
+    # APPEND FOR FILE MAP [
     def _append(self, entry):
         weight = self.weight(entry)
         if not self.buckets or (self.buckets[-1].weight + weight > self.capacity
@@ -1039,7 +1115,8 @@ class FileMap:
         self.locations[entry.id] = len(self.buckets) - 1
         bucket.ids.append(entry.id)
         self._account(bucket, entry, 1)
-
+    # APPEND FOR FILE MAP ]
+    # ACCOUNT FOR FILE MAP [
     def _account(self, bucket, entry, sign):
         bucket.weight += sign * self.weight(entry)
         bucket.counts[entry.state] += sign
@@ -1047,7 +1124,8 @@ class FileMap:
         bucket.files += sign * int(not entry.is_dir)
         bucket.file_states[entry.state] += sign * int(not entry.is_dir)
         bucket.active += sign * int(entry.progress is not None)
-
+    # ACCOUNT FOR FILE MAP ]
+    # UPDATE FILE MAP [
     def update(self, entry, rebuild=True):
         old = self.entries.get(entry.id)
         self.entries[entry.id] = entry
@@ -1066,16 +1144,20 @@ class FileMap:
                     return True
                 self.rebuild()
         self.buckets[self.locations[entry.id]].updated = time.monotonic()
-
-
+    # UPDATE FILE MAP ]
+# GROUP SCANNED FILES INTO DISPLAY BUCKETS ]
+# ONE-BASED PAGES WITH A WIDTH-LIMITED WINDOW AND FIRST/LAST ANCHORS [
 class Pagination:
     """One-based pages with a width-limited window and first/last anchors."""
+    # INITIALIZE PAGINATION FOR PAGINATION [
     def __init__(self):
         self.page = 1
-
+    # INITIALIZE PAGINATION FOR PAGINATION ]
+    # SELECT PAGINATION FOR PAGINATION [
     def select(self, page, pages):
         self.page = max(1, min(page, max(1, pages)))
-
+    # SELECT PAGINATION FOR PAGINATION ]
+    # CHOOSE ELIGIBLE EXPERT SCAN BUCKETS [
     def choices(self, pages, width):
         pages = max(1, pages)
         self.select(self.page, pages)
@@ -1095,3 +1177,5 @@ class Pagination:
                        + ([None] if end < pages - 1 else []) + [pages])
             if len(choices) <= capacity:
                 return choices
+    # CHOOSE ELIGIBLE EXPERT SCAN BUCKETS ]
+# ONE-BASED PAGES WITH A WIDTH-LIMITED WINDOW AND FIRST/LAST ANCHORS ]

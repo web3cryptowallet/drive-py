@@ -14,7 +14,7 @@ from .utils import batched, format_size, normalize_path
 from .demo import test_vfs
 
 # EXPOSE THE PUBLIC VIRTUAL FILESYSTEM API ]
-
+# PREPARE INIT SHARED STATE [
 __all__ = [
     "DriveActionsList",
     "BaseDBAdapter",
@@ -36,3 +36,4 @@ __all__ = [
     "normalize_path",
     "test_vfs",
 ]
+# PREPARE INIT SHARED STATE ]

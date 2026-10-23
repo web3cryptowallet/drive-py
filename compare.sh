@@ -1,7 +1,11 @@
+# COMPARE DIRECTORY CONTENTS WITH RECORDED CHECKSUMS [
+# INITIALIZE VARIABLES [
 # Initialize variables
 LOGS_DIR=""
 SCAN_PATHS=()
 
+# INITIALIZE VARIABLES ]
+# PARSE COMMAND LINE ARGUMENTS [
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -23,6 +27,8 @@ done
 echo SCAN_PATHS: ${SCAN_PATHS[@]}
 echo LOGS_DIR: $LOGS_DIR
 
+# PARSE COMMAND LINE ARGUMENTS ]
+# CHECK IF WE HAVE AT LEAST 2 ARGUMENTS (PATHS AND LOGS DIRECTORY) [
 # Check if we have at least 2 arguments (paths and logs directory)
 if [ ${#SCAN_PATHS[@]} -lt 1 ] || [ -z "$LOGS_DIR" ]; then
     echo "Usage: $0 path [path ...] logs_directory"
@@ -70,3 +76,5 @@ CMD="$CMD $LOGS_DIR"
 echo EXEC: $CMD
 
 $CMD
+# CHECK IF WE HAVE AT LEAST 2 ARGUMENTS (PATHS AND LOGS DIRECTORY) ]
+# COMPARE DIRECTORY CONTENTS WITH RECORDED CHECKSUMS ]

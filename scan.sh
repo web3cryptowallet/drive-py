@@ -1,5 +1,7 @@
 #!/bin/bash
+# SCAN DIRECTORY CONTENTS AND WRITE CHECKSUM LOGS [
 
+# CONVERT BYTES TO HUMAN READABLE FORMAT [
 # Function to convert bytes to human readable format
 convert_size() {
     local bytes=$1
@@ -14,11 +16,15 @@ convert_size() {
     fi
 }
 
+# CONVERT BYTES TO HUMAN READABLE FORMAT ]
+# INITIALIZE VARIABLES [
 # Initialize variables
 LOGS_DIR=""
 SCAN_PATHS=()
 FILTER_DIRS=()
 
+# INITIALIZE VARIABLES ]
+# PARSE COMMAND LINE ARGUMENTS [
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -41,6 +47,8 @@ echo FILTER_DIRS: ${FILTER_DIRS[@]}
 echo SCAN_PATHS: ${SCAN_PATHS[@]}
 echo LOGS_DIR: $LOGS_DIR
 
+# PARSE COMMAND LINE ARGUMENTS ]
+# CHECK IF WE HAVE AT LEAST 2 ARGUMENTS (PATHS AND LOGS DIRECTORY) [
 # Check if we have at least 2 arguments (paths and logs directory)
 if [ ${#SCAN_PATHS[@]} -lt 1 ] || [ -z "$LOGS_DIR" ]; then
     echo "Usage: $0 [-i filter_dir] path [path ...] logs_directory"
@@ -51,12 +59,18 @@ if [ ${#SCAN_PATHS[@]} -lt 1 ] || [ -z "$LOGS_DIR" ]; then
     exit 1
 fi
 
+# CHECK IF WE HAVE AT LEAST 2 ARGUMENTS (PATHS AND LOGS DIRECTORY) ]
+# CREATE LOGS DIRECTORY IF IT DOESN'T EXIST [
 # Create logs directory if it doesn't exist
 mkdir -p "$LOGS_DIR"
 
+# CREATE LOGS DIRECTORY IF IT DOESN'T EXIST ]
+# INITIALIZE TOTAL SIZE [
 # Initialize total size
 total_size=0
 
+# INITIALIZE TOTAL SIZE ]
+# BUILD LIST OF SUBDIRECTORIES FROM PROVIDED PATHS [
 # Build list of subdirectories from provided paths
 SUBDIRS=()
 for path in "${SCAN_PATHS[@]}"; do
@@ -84,6 +98,8 @@ done
 #echo 111 ${SCAN_PATHS[@]}
 #echo 111 ${SUBDIRS[@]}
 #exit 1
+# BUILD LIST OF SUBDIRECTORIES FROM PROVIDED PATHS ]
+# PROCESS EACH DIRECTORY [
 # Process each directory
 #SUBDIRS=${SUBDIRS[@]}
 #echo $SUBDIRS
@@ -115,6 +131,10 @@ for dir in "${SUBDIRS[@]}"; do
     fi
 done
 
+# PROCESS EACH DIRECTORY ]
+# DISPLAY TOTAL SIZE [
 # Display total size
 echo "----------------------------------------"
-echo "Total size: $(convert_size $total_size)" 
+echo "Total size: $(convert_size $total_size)"
+# DISPLAY TOTAL SIZE ]
+# SCAN DIRECTORY CONTENTS AND WRITE CHECKSUM LOGS ]

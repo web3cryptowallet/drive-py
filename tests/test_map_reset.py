@@ -1,4 +1,5 @@
 """Main Shift+R clears only the current folder's map/resume records."""
+# IMPORT TEST MAP RESET DEPENDENCIES [
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -10,13 +11,15 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
 from vfs.scanner import ScanStore
-
+# IMPORT TEST MAP RESET DEPENDENCIES ]
+# PREPARE TEST MAP RESET SHARED STATE [
 spec = importlib.util.spec_from_file_location('pt_map_reset', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 pt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pt)
-
-
+# PREPARE TEST MAP RESET SHARED STATE ]
+# VERIFY MAP RESET BEHAVIOR [
 class MapResetTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY MAIN BINDING SCOPES AND SQLITE REOPENING [
     async def test_main_binding_scopes_and_sqlite_reopening(self):
         for backend in ('memory', 'sqlite'):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
@@ -70,3 +73,5 @@ class MapResetTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(store.get('map', '/other'), {'keep': True})
                     finally:
                         reopened.db.conn.close()
+    # VERIFY MAIN BINDING SCOPES AND SQLITE REOPENING ]
+# VERIFY MAP RESET BEHAVIOR ]

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LAUNCH THE FILE BROWSER FROM THE PROJECT DIRECTORY [
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,3 +11,4 @@ fi
 source .venv/bin/activate
 
 exec uv run drive-tui.py -c sqlite "$@"
+# LAUNCH THE FILE BROWSER FROM THE PROJECT DIRECTORY ]

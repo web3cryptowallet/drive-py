@@ -1,4 +1,5 @@
 """Per-map processing timers, duration labels and expert selection counts."""
+# IMPORT TEST MAP TIMING DEPENDENCIES [
 import importlib.util
 from pathlib import Path
 from queue import Queue
@@ -11,19 +12,22 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
 from vfs.scanner import DriveScanner, ScanControls, ScanStore, ScanTiming
-
+# IMPORT TEST MAP TIMING DEPENDENCIES ]
+# PREPARE TEST MAP TIMING SHARED STATE [
 spec = importlib.util.spec_from_file_location('map_timing', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST MAP TIMING SHARED STATE ]
+# VERIFY MAP TIMING BEHAVIOR [
 class MapTimingTests(unittest.TestCase):
+    # VERIFY DURATION FORMATS [
     def test_duration_formats(self):
         for seconds, expected in [(0, '0:00'), (1, '0:01'), (59, '0:59'),
                 (72, '1:12'), (3682, '1:01:22'), (90671, '25:11:11'),
                 (172800, '48:00:00')]:
             self.assertEqual(tui.format_elapsed(seconds), expected)
-
+    # VERIFY DURATION FORMATS ]
+    # VERIFY TIMER SUMS MODE PROCESSING AND EXCLUDES PAUSE [
     def test_timer_sums_mode_processing_and_excludes_pause(self):
         clock = [10.]
         with patch('vfs.scanner.time.monotonic', side_effect=lambda: clock[0]):
@@ -39,7 +43,8 @@ class MapTimingTests(unittest.TestCase):
             timer.switch(3)
             clock[0] += 1
             self.assertEqual(timer.snapshot(), (3, (3., 2., 8.)))
-
+    # VERIFY TIMER SUMS MODE PROCESSING AND EXCLUDES PAUSE ]
+    # VERIFY WORKER ATTRIBUTES MODES AND STOPS TIMER ON ERROR [
     def test_worker_attributes_modes_and_stops_timer_on_error(self):
         fs = VirtualFS({'files': {}})
         clock = [10.]
@@ -47,11 +52,14 @@ class MapTimingTests(unittest.TestCase):
         with patch('vfs.scanner.time.monotonic', side_effect=lambda: clock[0]):
             scanner = DriveScanner(fs.db, '/', Queue(), Event(), controls=controls)
 
+            # DISCOVER FILES AND RESUME DIRECTORY TRAVERSAL [
             def discover(db, mode=1, **kwargs):
                 clock[0] += 2 if mode == 1 else 3
-
+            # DISCOVER FILES AND RESUME DIRECTORY TRAVERSAL ]
+            # VERIFY FILE CONTENTS AGAINST CHECKSUM BASELINES [
             def verify(db, mode):
                 clock[0] += 4 if mode == 2 else 5
+            # VERIFY FILE CONTENTS AGAINST CHECKSUM BASELINES ]
 
             with patch.object(scanner, 'discover', side_effect=discover), patch.object(
                     scanner, 'verify_pending', side_effect=verify):
@@ -63,7 +71,8 @@ class MapTimingTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     scanner.scan_once(fs.db)
             self.assertEqual(scanner.timing.snapshot()[0], 0)
-
+    # VERIFY WORKER ATTRIBUTES MODES AND STOPS TIMER ON ERROR ]
+    # VERIFY COUNTS AND TIMING SAVE REOPEN AND RESET [
     def test_counts_and_timing_save_reopen_and_reset(self):
         for backend in ['memory', 'sqlite']:
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
@@ -121,3 +130,5 @@ class MapTimingTests(unittest.TestCase):
                 finally:
                     if backend == 'sqlite':
                         fs.db.conn.close()
+    # VERIFY COUNTS AND TIMING SAVE REOPEN AND RESET ]
+# VERIFY MAP TIMING BEHAVIOR ]

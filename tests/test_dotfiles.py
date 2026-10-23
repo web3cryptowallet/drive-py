@@ -1,4 +1,5 @@
 """Dotfile filtering across table, expanded graphics and actual key input."""
+# IMPORT TEST DOTFILES DEPENDENCIES [
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -8,13 +9,15 @@ import unittest
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
-
+# IMPORT TEST DOTFILES DEPENDENCIES ]
+# PREPARE TEST DOTFILES SHARED STATE [
 spec = importlib.util.spec_from_file_location('dotfiles_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST DOTFILES SHARED STATE ]
+# VERIFY DOTFILE BEHAVIOR [
 class DotfileTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY PERIOD TOGGLE TABLE EXPANDED GRID AND PARENT [
     async def test_period_toggle_table_expanded_grid_and_parent(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)
@@ -26,12 +29,14 @@ class DotfileTests(unittest.IsolatedAsyncioTestCase):
             fs = VirtualFS({'files': {}})
             browser = tui.DriveBrowser(fs, path=directory, input=pipe, output=DummyOutput())
             task = asyncio.create_task(browser.app.run_async())
+            # WAIT FOR FOR TEST PERIOD TOGGLE TABLE EXPANDED GRID AND PARENT [
             async def wait_for(predicate):
                 for _ in range(100):
                     if predicate():
                         return
                     await asyncio.sleep(.01)
                 self.fail('UI did not reach expected state')
+            # WAIT FOR FOR TEST PERIOD TOGGLE TABLE EXPANDED GRID AND PARENT ]
             try:
                 await wait_for(lambda: browser.files.render_info is not None)
                 self.assertIn('.hidden.txt', [row['name'] for row in browser.rows])
@@ -63,3 +68,5 @@ class DotfileTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
+    # VERIFY PERIOD TOGGLE TABLE EXPANDED GRID AND PARENT ]
+# VERIFY DOTFILE BEHAVIOR ]

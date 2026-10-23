@@ -1,9 +1,10 @@
 """Reusable random-access candidates with ordered, constant-work removals."""
 
+# IMPORT SCANNER POOL DEPENDENCIES [
 from array import array
 from collections.abc import Sequence
-
-
+# IMPORT SCANNER POOL DEPENDENCIES ]
+# CONSUME CIRCULAR RANGES OF SORTED, UNIQUE BUCKET INDICES [
 class CandidatePool(Sequence):
     """Consume circular ranges of sorted, unique bucket indices.
 
@@ -14,6 +15,7 @@ class CandidatePool(Sequence):
     supplies increasing, unique indices and owns synchronization.
     """
 
+    # INITIALIZE CANDIDATE POOL [
     def __init__(self, indices=()):
         self._indices = tuple(indices)
         count = len(self._indices)
@@ -27,19 +29,23 @@ class CandidatePool(Sequence):
         if count:
             self._next[-1] = 0
             self._previous[0] = count - 1
-
+    # INITIALIZE CANDIDATE POOL ]
+    # COUNT AVAILABLE SCAN CANDIDATES [
     def __len__(self):
         return len(self._dense)
-
+    # COUNT AVAILABLE SCAN CANDIDATES ]
+    # LOOK UP A CANDIDATE BY INDEX [
     def __getitem__(self, position):
         if isinstance(position, slice):
             return [self._indices[slot] for slot in self._dense[position]]
         return self._indices[self._dense[position]]
-
+    # LOOK UP A CANDIDATE BY INDEX ]
+    # CONTAINS FOR CANDIDATE POOL [
     def __contains__(self, index):
         slot = self._slots.get(index)
         return slot is not None and self._positions[slot] >= 0
-
+    # CONTAINS FOR CANDIDATE POOL ]
+    # REMOVE UP TO COUNT CANDIDATES FROM FIRST_INDEX IN MAP ORDER [
     def consume(self, first_index, count):
         """Remove up to count candidates from first_index in map order."""
         if count <= 0 or not self:
@@ -63,3 +69,5 @@ class CandidatePool(Sequence):
             self._positions[slot] = -1
             slot = following
         return chosen
+    # REMOVE UP TO COUNT CANDIDATES FROM FIRST_INDEX IN MAP ORDER ]
+# CONSUME CIRCULAR RANGES OF SORTED, UNIQUE BUCKET INDICES ]

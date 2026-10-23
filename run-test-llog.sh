@@ -1,3 +1,5 @@
 #!/bin/sh
+# EXERCISE LIVELOG SCANNING AND COMPARISON [
 
 python3 drive.py -s test0/t0 -d test0/t1 log-test0
+# EXERCISE LIVELOG SCANNING AND COMPARISON ]

@@ -1,4 +1,5 @@
 """Main Backspace goes to parent even while the read-only info pane is focused."""
+# IMPORT TEST PARENT NAVIGATION DEPENDENCIES [
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -8,13 +9,15 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
-
+# IMPORT TEST PARENT NAVIGATION DEPENDENCIES ]
+# PREPARE TEST PARENT NAVIGATION SHARED STATE [
 spec = importlib.util.spec_from_file_location('parent_navigation', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST PARENT NAVIGATION SHARED STATE ]
+# VERIFY PARENT NAVIGATION BEHAVIOR [
 class ParentNavigationTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY BACKSPACE FROM FILES AND INFO RESTORES SELECTION [
     async def test_backspace_from_files_and_info_restores_selection(self):
         for focus in ['files', 'info']:
             for key in ['\x7f', '\x08']:  # Terminal Backspace encodings.
@@ -47,3 +50,5 @@ class ParentNavigationTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         browser.app.exit()
                         await task
+    # VERIFY BACKSPACE FROM FILES AND INFO RESTORES SELECTION ]
+# VERIFY PARENT NAVIGATION BEHAVIOR ]

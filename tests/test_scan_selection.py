@@ -1,4 +1,5 @@
 """Folder marks and scoped scanner discovery."""
+# IMPORT TEST SCAN SELECTION DEPENDENCIES [
 import importlib.util
 from pathlib import Path
 from queue import Queue
@@ -10,12 +11,15 @@ from prompt_toolkit.input import DummyInput
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
 from vfs.scanner import DriveScanner, ScanControls
-
+# IMPORT TEST SCAN SELECTION DEPENDENCIES ]
+# PREPARE TEST SCAN SELECTION SHARED STATE [
 spec = importlib.util.spec_from_file_location('selection_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
+# PREPARE TEST SCAN SELECTION SHARED STATE ]
+# VERIFY SELECTION BEHAVIOR [
 class SelectionTests(unittest.TestCase):
+    # VERIFY MARKS CURSOR STYLES NAVIGATION AND SCOPE [
     def test_marks_cursor_styles_navigation_and_scope(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -56,3 +60,5 @@ class SelectionTests(unittest.TestCase):
             browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == 'plain')
             browser.toggle_scan_selection()
             self.assertFalse(browser.scan_selection)
+    # VERIFY MARKS CURSOR STYLES NAVIGATION AND SCOPE ]
+# VERIFY SELECTION BEHAVIOR ]

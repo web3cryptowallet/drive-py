@@ -23,6 +23,15 @@ Supported values:
 # ---- INFO ---- ]
 # SETTINGS JSON [
 {
-    "db": "sqlite"
+    "db": "sqlite",
+    "db_fragments": {}
 }
 # SETTINGS JSON ]
+
+# Path fragments: add catalog prefixes (after MAP DRIVES alias translation) to
+# db_fragments, for example {"/1T": "fragments/1T.sqlite"}. Relative database
+# filenames resolve from the launch directory. Activate new paths explicitly:
+# ./run.sh -refragment
+# Migration is lazy when browsing directories or writing files. Nested paths use
+# the longest matching prefix; unassigned data stays in drivevfs.
+# Export to a new/empty directory: ./run.sh -export-livelog /tmp/catalog-export

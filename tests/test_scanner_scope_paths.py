@@ -1,4 +1,5 @@
 """Scanner directory scopes color only matching path prefixes."""
+# IMPORT TEST SCANNER SCOPE PATHS DEPENDENCIES [
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,14 +7,16 @@ import unittest
 from unittest.mock import Mock, patch
 
 from vfs.scanner import ScanEntry
-
+# IMPORT TEST SCANNER SCOPE PATHS DEPENDENCIES ]
+# PREPARE TEST SCANNER SCOPE PATHS SHARED STATE [
 spec = importlib.util.spec_from_file_location(
     'scope_paths', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST SCANNER SCOPE PATHS SHARED STATE ]
+# VERIFY SCOPE PATH BEHAVIOR [
 class ScopePathTests(unittest.TestCase):
+    # BUILD VIEW FOR SCOPE PATH TESTS [
     def make_view(self, paths):
         view = object.__new__(tui.ScannerView)
         view.model = SimpleNamespace(entries={
@@ -28,10 +31,12 @@ class ScopePathTests(unittest.TestCase):
         view.save = Mock()
         view.fixed_colors = {}
         return view
-
+    # BUILD VIEW FOR SCOPE PATH TESTS ]
+    # EXTRACT GOLD COLORED PATH SEGMENTS [
     def gold(self, row):
         return ''.join(text for style, text in row if style == 'fg:#ffd700')
-
+    # EXTRACT GOLD COLORED PATH SEGMENTS ]
+    # VERIFY CLEAR FIXED COLORS KEEPS SCOPE AND REMOVES SAVED PINS [
     def test_clear_fixed_colors_keeps_scope_and_removes_saved_pins(self):
         view = self.make_view([('/a/file', False), ('/b/file', False)])
         view.model.buckets = [SimpleNamespace(ids=[key]) for key in view.detail_ids]
@@ -50,7 +55,8 @@ class ScopePathTests(unittest.TestCase):
         view.invalidate.assert_called_once()
         view.clear_fixed_colors()  # Clearing an empty pin set is harmless.
         self.assertEqual(view.backgrounds, {0: '#404040'})
-
+    # VERIFY CLEAR FIXED COLORS KEEPS SCOPE AND REMOVES SAVED PINS ]
+    # VERIFY SCOPE PREVIEW OVERRIDES PINS AND RESTORES THEM WHEN LEAVING [
     def test_scope_preview_overrides_pins_and_restores_them_when_leaving(self):
         view = self.make_view([('/a/b/file', False), ('/a/other', False),
                                ('/x/file', False)])
@@ -74,7 +80,8 @@ class ScopePathTests(unittest.TestCase):
             view.details.index = 2
             view.scope(1)
             self.assertEqual(view.backgrounds, {0: '#404040', 1: '#202020', 2: '#606060'})
-
+    # VERIFY SCOPE PREVIEW OVERRIDES PINS AND RESTORES THEM WHEN LEAVING ]
+    # VERIFY SCOPE WRAPS BOTH DIRECTIONS AND RESETS FOR ANOTHER ROW [
     def test_scope_wraps_both_directions_and_resets_for_another_row(self):
         for is_dir, path in [(False, 'a/b/c/file'), (True, 'a/b/c')]:
             with self.subTest(is_dir=is_dir):
@@ -97,7 +104,8 @@ class ScopePathTests(unittest.TestCase):
                 self.assertEqual(view.scope_path, '/' if path == 'file' else '/a')
         view.detail_ids = []
         view.scope(-1)  # No selected path: no-op.
-
+    # VERIFY SCOPE WRAPS BOTH DIRECTIONS AND RESETS FOR ANOTHER ROW ]
+    # VERIFY BRACKETS CHANGE ONLY DIRECTORY PREFIX [
     def test_brackets_change_only_directory_prefix(self):
         view = self.make_view([('a/b/file1', False), ('a/b/file2', False),
                                ('a/b2/file3', False), ('other/file', False)])
@@ -117,7 +125,8 @@ class ScopePathTests(unittest.TestCase):
         self.assertEqual(self.gold(view.detail_rows()[0]), 'a/')
         view.clear_colors()
         self.assertTrue(all(not self.gold(row) for row in view.detail_rows()))
-
+    # VERIFY BRACKETS CHANGE ONLY DIRECTORY PREFIX ]
+    # VERIFY ABSOLUTE DIRECTORY BOUNDARY AND SELECTED PANNED ROW [
     def test_absolute_directory_boundary_and_selected_panned_row(self):
         view = self.make_view([('/a/b/file1', False), ('/a/b', True),
                                ('/a/b2/file', False)])
@@ -135,3 +144,5 @@ class ScopePathTests(unittest.TestCase):
         self.assertTrue(all('fg:#ffd700' not in style for style, text in fragments if text == '1'))
         view.scope_path = '/'
         self.assertEqual(self.gold(view.detail_rows()[0]), '/')
+    # VERIFY ABSOLUTE DIRECTORY BOUNDARY AND SELECTED PANNED ROW ]
+# VERIFY SCOPE PATH BEHAVIOR ]

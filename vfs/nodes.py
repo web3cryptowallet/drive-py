@@ -21,6 +21,7 @@ class Node:
 
 class VFSNode:
     """Standardized node abstraction returned by all DB adapters."""
+    # INITIALIZE VFSNODE FOR VFSNODE [
     def __init__(self, id, name, is_dir, size=0, total_files=0, parent_id=None, info=None):
         self.id = id
         self.name = name
@@ -29,5 +30,6 @@ class VFSNode:
         self.total_files = total_files
         self.parent_id = parent_id
         self.info = info or {}
+    # INITIALIZE VFSNODE FOR VFSNODE ]
 
 # REPRESENT DATABASE NODE METADATA ]

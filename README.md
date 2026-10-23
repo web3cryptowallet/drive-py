@@ -1,8 +1,8 @@
 # drive.py
 
-drive.py v0.994
+drive.py v0.995
 
-v0.994 - folder selection for scoped scans
+v0.995 - action history, path navigation and source-path fixes
 
 Multithreaded disk file comparison tool for verification and MD5 checksum reporting.
 
@@ -81,7 +81,52 @@ keep their normal colors. See [number highlighting](FEATURE-number-highlighting.
 Activates the project `.venv` (creating it with `uv sync` if needed), then uses
 `uv` to run `drive-tui.py` from the project directory, forwarding arguments.
 `run.sh` defaults to SQLite; use `-c memory` for an in-memory catalog.
+A missing or empty `drivevfs` initializes an empty catalog and opens the local
+startup directory without requiring a log import (see [first-start fix](FEATURE-sqlite-first-start.md)).
 Use `./run-megadisks.sh` for the generated megadisks dataset.
+
+Startup and updates do not run legacy source-path migration. To convert an old
+catalog explicitly, run from the project directory:
+
+```bash
+uv run migrate-paths.py                  # existing drivevfs and registered fragments
+uv run migrate-paths.py /path/to/catalog --config /path/to/config.sh --batch-size 100
+```
+
+The command uses drive mappings from `config.sh` (if present), preserves backups
+as `<database>.source-paths-backup.sqlite`, and refuses ambiguous path collisions
+or overwriting an existing backup. It reports the number of changed file records.
+Migration stages its plans in temporary SQLite files and processes 500 rows per
+batch by default. Use `--batch-size 100` for smaller batches at the cost of speed.
+Temporary disk space scales with catalog size; staging caches are capped at about
+1 MiB per database. Batches remain in one transaction for rollback safety, so the
+writer lock lasts through migration. New catalogs need no migration.
+
+Split SQLite storage by catalog path using `db_fragments` in the `SETTINGS JSON`
+section of `config.sh`:
+
+```json
+{"db": "sqlite", "db_fragments": {"/1T": "fragments/1T.sqlite", "/1T/photos": "fragments/photos.sqlite"}}
+```
+
+```bash
+./run.sh -refragment
+./run.sh -export-livelog /tmp/catalog-export
+```
+
+`-refragment` explicitly activates new paths. Existing files move lazily when their
+directory is browsed or written, in bounded transactions without rescanning or
+rehashing. Nested paths use the most specific prefix; all databases remain visible
+during migration. Active mappings persist even if removed from config. Relative
+filenames resolve from the launch directory; prefixes use catalog drive aliases.
+Keep the main database and all fragments together for backup. Migration does not
+automatically shrink the original SQLite file.
+
+`-export-livelog DIR` exports to a new/empty directory and exits. It writes a
+`db-paths.json` manifest, one importable `llog-llogfiles.sh` per database, raw node/hash
+JSONL files and a coordinator SQL dump. Import checksum logs with
+`./run.sh -u -d /tmp/catalog-export`; this does not restore raw metadata automatically.
+See [path fragments](FEATURE-path-fragments.md) for storage and recovery details.
 
 Pass an optional startup directory, including `~`, relative paths or paths with spaces:
 
@@ -100,8 +145,21 @@ remain in the launch working directory. `run.sh` first changes to the project
 directory. Configured local drive mounts translate to VFS aliases. Invalid or
 non-directory paths produce a command-line error. `-d` selects log input.
 
+In file lists, **x** off shows filenames and relative expanded subdirectory paths;
+**x** on shows prefixed full paths in the Path column and graphics labels.
+Press **x** to switch path labels across views between prefixed paths and original
+absolute filesystem paths. Prefixes are `~:` for the launch working directory,
+`<drive-id>:/` for configured drives, and `:/` for global paths. The preference is
+session-only; bookmarks and scan identities retain their stored format. In bookmark
+path/number editors, x types normally. Actions: **Ctrl+Delete** or **Clear** clears
+the queue. See [path prefix details](FEATURE-path-prefixes.md).
+
 In the main view, **Backspace** or **Esc** goes to the parent directory and
 restores the child selection, including when the info pane has focus.
+Press **Ctrl+O** to open the selected file with its default desktop application,
+or a directory in the default file manager (Finder / Ubuntu Files, etc.).
+In Info, a selected duplicate opens instead; otherwise the file-list selection
+is used. Linux requires `xdg-open` and a configured desktop session.
 
 Mark folders for scanning with **Space** (toggle without moving) or **Insert**
 (toggle and move down). **\*** inverts marks on all listed folders; **-** clears
@@ -121,6 +179,13 @@ The prompt_toolkit implementation is now the main `drive-tui.py`. Shared VFS,
 scanner and database code remains in `vfs/`. Run active tests with
 `uv run python -m unittest discover -s tests -v`.
 
+
+## Navigate source with LiveComment
+
+Python, shell and archived CSS source includes descriptive LiveComment blocks,
+including tests and the archived Textual UI. With LiveComment installed, run
+`livecomment --path .` from the repository root to navigate the source, or pass
+an individual source file. See [coverage and validation](FEATURE-livecomment.md).
 
 ## Run demo: View demo log files in your browser 
 
@@ -267,6 +332,36 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 [MIT](https://github.com/web3cryptowallet/drive-py/blob/main/LICENSE)
 
+Action history: press `l` in the main file manager to view saved navigation,
+file/image views, playback start/latest positions, desktop-open requests and
+queued removals. Stored locally in `history.llog`, with image views in their own
+LiveLog subnode. In history, `Delete` removes one record, `Shift+Delete` clears
+all records, and `Enter` goes to the directory when available in the catalog.
+Green ● / red ○ show mapped local presence; `t` alternates online/offline history
+filters (initially both). Main-screen `t` continues to change themes.
+
+File lists start with ordinary names (no colon prefixes); x enables prefixed
+paths. Local path resolution accepts `:/absolute/path` and configured
+`alias:/path` prefixes. Relative paths such as `test0/` resolve from the launch
+working directory; absolute `/home/...` paths remain rooted at `/`. A file-list
+`↗` suffix marks a symlink without changing its name or stored identity. Its
+circle is green when the target exists and red for a broken link.
+
+Catalog source paths are stored as `test0/a` for relative paths and `/home/...`
+for absolute paths in file metadata, duplicate indexes and LiveLog exports.
+VFS decodes relative paths against each run's launch working directory; `~:test0`
+is a virtual/display namespace, not a stored source-path prefix. Absolute paths
+stay rooted at `/`, with configured drive mappings applied. Internal tree IDs
+remain separate indexing keys. SQLite automatically upgrades earlier prefixed
+source fields, with a `.source-paths-backup.sqlite` snapshot for each changed
+database; earlier `.paths-backup.sqlite` snapshots remain intact. See
+[path storage and VFS decoding](FEATURE-path-prefixes.md).
+
+Navigation shortcuts: **~** opens your home folder. **/** opens a path command;
+enter a path or `cd PATH`, press Enter to navigate, or Esc to cancel. Empty Enter
+goes to `/`. Relative commands use the currently browsed directory; `~:` still
+means the launch-relative namespace. Shortcut letters type normally in the input.
+
 ## Version History
 
 v0.91
@@ -357,7 +452,7 @@ v0.993
 - FIX: Media replay defers saved seeks until loading completes; replay after EOF starts at zero. Bookmark `B` markers are bright cyan and bold in table and graphics modes.
 - TUI: MP3 and other supported audio files show a purple ▶ in graphics mode. Select one and press **Play** or `p` in quick view; **Stop** and seeking use the same player controls as video; `p` toggles playback in main and bookmark previews. Native libmpv is required.
 - TUI: Graphics tiles have a one-cell gutter. Preview height reserves bottom controls, the duplicates heading and the first duplicate row.
-- TUI: In table or graphics mode, `u` toggles the selected directory subtree open/closed from Files, Info or player focus; select `..` to target all current subdirectories. Select a child to expand deeper, or press `o` to toggle one/all levels. Expanded directory names are bold over a lighter full-row background. Nested rows show relative paths; Enter opens a directory. Directory symlinks are not expanded.
+- TUI: In table or graphics mode, `u` toggles the selected directory subtree open/closed from Files, Info or player focus; select `..` to target all current subdirectories. Select a child to expand deeper, or press `o` to toggle one/all levels. Expanded directory names are bold over a lighter full-row background. Nested rows show relative paths; Enter opens a directory. Directory symlinks are followed, with repeated physical targets skipped to stop expansion loops.
 - TUI: Info shows directory/file counts after Size, based on current visible entries including expanded subdirectories and active filters; `..` is excluded.
 - TUI: Info header shows `y:auto/off`, `o:one/all`, `.:show/hide` (dotfile visibility) and `i:on/off`.
 - TUI: Toggle automatic quick view with `y` (default off): on previews every selected file type in table and graphics modes; off requires Enter. Toggle image previews with `i` (default on); keep opened images stable during cursor movement
@@ -373,6 +468,16 @@ v0.994
 - TUI: Marked folder names appear gold in table and graphics views, including under the cursor. Entering another directory clears marks.
 - SCANNER: `s` scans marked folders and their subtrees, or the current directory when nothing is marked. Save maps and resume positions separately for each folder set; marks remain session-only.
 - CONTROLS: Thumbnail height now uses `+` to grow and `_` (Shift+-) to shrink, freeing `-` to clear folder marks.
+
+v0.995
+
+- HISTORY: `l` opens persistent action history with directory/file/image views, playback start/latest times and positions, desktop-open requests and queued removals. Image records use LiveLog subnodes; timestamps display without ISO separators or offsets.
+- HISTORY CONTROLS: `Delete` removes one record, `Shift+Delete` clears all, `Enter` navigates to the recorded directory, and `t` filters present/missing paths with green/red indicators.
+- NAVIGATION: `~` opens home; `/` opens a path command accepting paths or `cd PATH`. Empty Enter goes to `/`; Esc cancels.
+- PATHS: Start with ordinary filenames; `x` toggles path prefixes across views. Store raw relative `test0/...` versus absolute `/home/...` sources, resolve relative paths per launch directory, and preserve configured mappings. Legacy catalogs can be migrated explicitly with backups using `migrate-paths.py`.
+- SYMLINKS: Follow targets for file information and directory navigation; render a display-only `↗` suffix and target-presence status. Directory expansion guards physical-path cycles.
+- STORAGE: Configure path-based SQLite fragments with `-refragment`; `-export-livelog DIR` exports catalogs with raw source paths for reimport.
+- SOURCE: Maintain LiveComment navigation tags and synchronized feature/transplit documentation.
 
 ## Recomended projects
 

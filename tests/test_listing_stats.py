@@ -1,4 +1,5 @@
 """Visible-list counts include expanded descendants and active filters."""
+# IMPORT TEST LISTING STATS DEPENDENCIES [
 import importlib.util
 from pathlib import Path
 import unittest
@@ -7,13 +8,15 @@ from unittest.mock import patch
 from prompt_toolkit.input import DummyInput
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
-
+# IMPORT TEST LISTING STATS DEPENDENCIES ]
+# PREPARE TEST LISTING STATS SHARED STATE [
 spec = importlib.util.spec_from_file_location('stats_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST LISTING STATS SHARED STATE ]
+# VERIFY LISTING STATS BEHAVIOR [
 class ListingStatsTests(unittest.TestCase):
+    # VERIFY COUNTS EXPANSION FILTERS AND METADATA ROW [
     def test_counts_expansion_filters_and_metadata_row(self):
         fs = VirtualFS({'files': {f'/disk/{name}': {'MD5:test:1'} for name in
                          ['folder/a.txt', 'folder/nested/child.txt', '.hidden.txt', 'photo.png', 'plain.txt']}})
@@ -40,3 +43,5 @@ class ListingStatsTests(unittest.TestCase):
         self.assertEqual(browser.listing_stats(), 'Dirs: 2 · Files: 1')
         browser.rows = []
         self.assertEqual(browser.listing_stats(), 'Dirs: 0 · Files: 0')
+    # VERIFY COUNTS EXPANSION FILTERS AND METADATA ROW ]
+# VERIFY LISTING STATS BEHAVIOR ]

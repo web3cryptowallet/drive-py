@@ -1,4 +1,5 @@
 """Content-versioned JPEG thumbnail files; database linking belongs to the UI thread."""
+# IMPORT THUMBNAILS DEPENDENCIES [
 from contextlib import contextmanager
 from io import BytesIO
 import shutil
@@ -11,7 +12,8 @@ import warnings
 
 from PIL import Image, ImageOps
 import pillow_avif  # Registers AVIF decoding for Pillow 10 / term-image.
-
+# IMPORT THUMBNAILS DEPENDENCIES ]
+# PREPARE THUMBNAILS SHARED STATE [
 SIZES = (128, 256)
 JPEG_QUALITY = 60
 
@@ -28,8 +30,8 @@ AUDIO_SUFFIXES = {'.mp3', '.flac', '.wav', '.wave', '.m4a', '.aac', '.ogg', '.og
                   '.opus', '.wma', '.aiff', '.aif', '.alac', '.ape', '.amr', '.mid', '.midi'}
 THUMBNAIL_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
 MEDIA_SUFFIXES = THUMBNAIL_SUFFIXES | AUDIO_SUFFIXES
-
-
+# PREPARE THUMBNAILS SHARED STATE ]
+# DECODE AN IMAGE OR A REPRESENTATIVE FRAME FROM THE FIRST 30 VIDEO FRAMES [
 @contextmanager
 def media_image(source, size):
     """Decode an image or a representative frame from the first 30 video frames."""
@@ -52,8 +54,8 @@ def media_image(source, size):
     else:
         with Image.open(source) as image:
             yield image
-
-
+# DECODE AN IMAGE OR A REPRESENTATIVE FRAME FROM THE FIRST 30 VIDEO FRAMES ]
+# RETURN A CACHE LINK AFTER ATOMICALLY PUBLISHING A BOUNDED JPEG THUMBNAIL [
 def thumbnail(path, file_id, size=128, cache_root='.cache'):
     """Return a cache link after atomically publishing a bounded JPEG thumbnail."""
     if size not in SIZES:
@@ -99,3 +101,4 @@ def thumbnail(path, file_id, size=128, cache_root='.cache'):
                         os.unlink(temporary)
     return {'id': uid, 'file_id': file_id, 'size': size,
             'path': str(destination.resolve()), 'source': fingerprint, 'quality': JPEG_QUALITY}
+# RETURN A CACHE LINK AFTER ATOMICALLY PUBLISHING A BOUNDED JPEG THUMBNAIL ]

@@ -35,3 +35,13 @@ profile.*
 # Local persistent bookmarks
 .bookmarks.json
 .bookmarks.json.tmp
+
+# Local persistent action history
+history.llog
+.history-*
+
+# Pre-migration catalog snapshots
+*.paths-backup.sqlite
+
+# Raw source-path migration snapshots
+*.source-paths-backup.sqlite

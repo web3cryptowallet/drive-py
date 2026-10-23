@@ -1,4 +1,5 @@
 """On-demand button playback, frame delivery, worker failure and cleanup."""
+# IMPORT TEST VIDEO PREVIEW DEPENDENCIES [
 import asyncio
 import ctypes.util
 import importlib.util
@@ -20,17 +21,19 @@ from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.data_structures import Size
 from vfs import VirtualFS
 from vfs.video_preview import VideoPreview, video_rotation_filter
-
+# IMPORT TEST VIDEO PREVIEW DEPENDENCIES ]
+# PREPARE TEST VIDEO PREVIEW SHARED STATE [
 spec = importlib.util.spec_from_file_location('video_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST VIDEO PREVIEW SHARED STATE ]
+# ABORT DECODER FOR THE TEST VIDEO PREVIEW WORKFLOW [
 def abort_decoder(path, size, connection, library):
     os._exit(23)  # Simulate a fatal libmpv assertion, not a catchable exception.
-
-
+# ABORT DECODER FOR THE TEST VIDEO PREVIEW WORKFLOW ]
+# VERIFY WORKER BEHAVIOR [
 class WorkerTests(unittest.TestCase):
+    # VERIFY MISSING LIBRARY IS ERROR NOT CRASH [
     def test_missing_library_is_error_not_crash(self):
         player = VideoPreview('/missing.mov', (16, 16), lambda image: image)
         with patch.dict(sys.modules, {'mpv': None}):
@@ -42,7 +45,8 @@ class WorkerTests(unittest.TestCase):
         player.seek(1)
         player.seek(12)
         self.assertEqual(player.seeks.get_nowait(), 12)
-
+    # VERIFY MISSING LIBRARY IS ERROR NOT CRASH ]
+    # VERIFY ROTATION MATRIX IS APPLIED EXPLICITLY [
     def test_rotation_matrix_is_applied_explicitly(self):
         for angle, expected in [(-90, 'transpose=clock,'), (90, 'transpose=cclock,'),
                                 (180, 'hflip,vflip,'), (0, '')]:
@@ -51,7 +55,8 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(video_rotation_filter('/video.mov'), expected)
         with patch('vfs.video_preview.subprocess.run', side_effect=FileNotFoundError):
             self.assertEqual(video_rotation_filter('/video.mov'), '')
-
+    # VERIFY ROTATION MATRIX IS APPLIED EXPLICITLY ]
+    # VERIFY EXACT PORTRAIT FILE WITHOUT NATIVE ABORT [
     @unittest.skipUnless(os.environ.get('DRIVE_TEST_VIDEO'), 'Set DRIVE_TEST_VIDEO for exact-file regression')
     def test_exact_portrait_file_without_native_abort(self):
         # Exercise production software decoding in an outer process; use silent
@@ -82,13 +87,15 @@ print(connection.frames)
                                 text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreaterEqual(int(result.stdout.strip()), 20)
-
+    # VERIFY EXACT PORTRAIT FILE WITHOUT NATIVE ABORT ]
+    # VERIFY FRAME SERIALIZATION [
     def test_frame_serialization(self):
         tui.configure_image_terminal()
         frame = tui.serialize_video_frame(Image.new('RGB', (16, 16), 'red'), (4, 2))
         self.assertEqual(len(frame['lines']), 2)
         self.assertTrue(any('#ff0000' in style for row in frame['lines'] for style, _ in row))
-
+    # VERIFY FRAME SERIALIZATION ]
+    # VERIFY NATIVE PAYLOAD STRIPS LAYOUT NEWLINES AND CURSOR MOVES [
     def test_native_payload_strips_layout_newlines_and_cursor_moves(self):
         raw = '\x1b[32C\n\x1b_Ga=T,z=731;FRAME\x1b\\\x1b[10C\n\x1b[0m'
         payload = tui.native_graphics_payload(raw)
@@ -96,7 +103,8 @@ print(connection.frames)
         self.assertNotIn('\n', payload)
         self.assertNotIn('[32C', payload)
         self.assertEqual(tui.native_graphics_payload('no graphics'), '')
-
+    # VERIFY NATIVE PAYLOAD STRIPS LAYOUT NEWLINES AND CURSOR MOVES ]
+    # VERIFY FRAGMENTED GRAPHICS REPLIES AND CHUNK QUIET FLAGS [
     def test_fragmented_graphics_replies_and_chunk_quiet_flags(self):
         from prompt_toolkit.input.vt100_parser import Vt100Parser
         keys = []
@@ -108,7 +116,8 @@ print(connection.frames)
         payload = tui.native_graphics_payload('\x1b_Ga=T,q=1,m=1;AAAA\x1b\\\x1b_Gq=1,m=0;BBBB\x1b\\')
         self.assertEqual(payload.count('q=2'), 2)
         self.assertNotIn('q=1', payload)
-
+    # VERIFY FRAGMENTED GRAPHICS REPLIES AND CHUNK QUIET FLAGS ]
+    # VERIFY VIDEO FRAMES ARE REPLACED BEFORE PREVIOUS FRAME DELETED [
     def test_video_frames_are_replaced_before_previous_frame_deleted(self):
         browser = object.__new__(tui.DriveBrowser)
         browser.draw_grid_native = Mock()
@@ -137,7 +146,8 @@ print(connection.frames)
         self.assertIn('i=731002', second)
         self.assertLess(second.index('SECOND'), second.index('d=I,i=731001'))
         self.assertNotIn('d=Z', second)
-
+    # VERIFY VIDEO FRAMES ARE REPLACED BEFORE PREVIOUS FRAME DELETED ]
+    # VERIFY NATIVE FRAME FITS A SHORTER VIEWPORT [
     def test_native_frame_fits_a_shorter_viewport(self):
         browser = object.__new__(tui.DriveBrowser)
         browser.draw_grid_native = Mock()
@@ -161,7 +171,8 @@ print(connection.frames)
         self.assertTrue(browser.native_visible)
         self.assertIn('r=3', output.write_raw.call_args.args[0])
         self.assertEqual(browser.native_preview[1], (1, 3))
-
+    # VERIFY NATIVE FRAME FITS A SHORTER VIEWPORT ]
+    # VERIFY NATIVE DECODER ABORT IS CONTAINED [
     @unittest.skipUnless(os.environ.get('DRIVE_TEST_LIBMPV'), 'Requires libmpv test library')
     def test_native_decoder_abort_is_contained(self):
         original = ctypes.util.find_library
@@ -177,7 +188,8 @@ print(connection.frames)
         while not player.events.empty():
             errors.append(player.events.get_nowait())
         self.assertTrue(any(kind == 'error' and '23' in message for kind, message in errors))
-
+    # VERIFY NATIVE DECODER ABORT IS CONTAINED ]
+    # VERIFY REAL SOFTWARE PLAYBACK AND CLEANUP [
     @unittest.skipUnless(os.environ.get('DRIVE_TEST_LIBMPV') and shutil.which('ffmpeg'),
                          'Set DRIVE_TEST_LIBMPV to validate real software playback')
     def test_real_software_playback_and_cleanup(self):
@@ -210,10 +222,11 @@ print(connection.frames)
                 self.assertTrue(any(kind == 'frame' and value['dimensions'] == player.pixels
                                     for kind, value in events))
                 self.assertNotIn('error', [event[0] for event in events])
-
-
-
+    # VERIFY REAL SOFTWARE PLAYBACK AND CLEANUP ]
+# VERIFY WORKER BEHAVIOR ]
+# VERIFY CONTROLS BEHAVIOR [
 class ControlsTests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY GRAPHICS REPLIES DO NOT NAVIGATE OR TOGGLE PREVIEWS [
     async def test_graphics_replies_do_not_navigate_or_toggle_previews(self):
         with create_pipe_input() as pipe:
             fs = VirtualFS({'files': {'/disk/sub/file.txt': {'MD5:a:1'}}})
@@ -240,12 +253,17 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.app.exit()
                 await task
-
+    # VERIFY GRAPHICS REPLIES DO NOT NAVIGATE OR TOGGLE PREVIEWS ]
+    # VERIFY FAILED VIDEO POSTER AND SMALL RESIZE KEEP FILES USABLE [
     async def test_failed_video_poster_and_small_resize_keep_files_usable(self):
+        # MANAGE RESIZABLE OUTPUT [
         class ResizableOutput(DummyOutput):
             rows = 24
+            # RESOLVE SIZE FOR RESIZABLE OUTPUT [
             def get_size(self):
                 return Size(rows=self.rows, columns=80)
+            # RESOLVE SIZE FOR RESIZABLE OUTPUT ]
+        # MANAGE RESIZABLE OUTPUT ]
         with create_pipe_input() as pipe:
             output = ResizableOutput()
             fs = VirtualFS({'files': {}})
@@ -286,7 +304,8 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                     if not task.done():
                         browser.app.exit()
                         await task
-
+    # VERIFY FAILED VIDEO POSTER AND SMALL RESIZE KEEP FILES USABLE ]
+    # VERIFY SELECT VIDEO LOADS LARGE STILL WITHOUT PLAYBACK [
     async def test_select_video_loads_large_still_without_playback(self):
         with create_pipe_input() as pipe:
             fs = VirtualFS({'files': {}})
@@ -314,7 +333,8 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                 player.assert_not_called()
                 self.assertIsNone(browser.video_player)
                 self.assertEqual(browser.video_status, 'Press Play')
-
+    # VERIFY SELECT VIDEO LOADS LARGE STILL WITHOUT PLAYBACK ]
+    # VERIFY PLAY BUTTON NO AUTOPLAY FRAMES AND STOP ON VIEW CHANGE [
     async def test_play_button_no_autoplay_frames_and_stop_on_view_change(self):
         with create_pipe_input() as pipe:
             fs = VirtualFS({'files': {}})
@@ -406,3 +426,5 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     browser.app.exit()
                     await task
+    # VERIFY PLAY BUTTON NO AUTOPLAY FRAMES AND STOP ON VIEW CHANGE ]
+# VERIFY CONTROLS BEHAVIOR ]

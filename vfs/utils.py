@@ -26,6 +26,11 @@ def format_size(size, type):
 # NORMALIZE VIRTUAL PATH COMPONENTS [
 
 def normalize_path(path):
+    # Keep the startup namespace as a distinct tree component.
+    if path.startswith('/~:'):
+        path = path[1:]
+    if path.startswith('~:'):
+        path = '~:/' + path[2:].lstrip('/')
     parts = path.replace("//", "/").lstrip("/").rstrip("/").split("/")
 
     path = "/".join(parts)

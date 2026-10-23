@@ -1,4 +1,5 @@
 """Audio-only decoder commands and shared UI playback controls."""
+# IMPORT TEST AUDIO PLAYBACK DEPENDENCIES [
 import asyncio
 import ctypes.util
 import shutil
@@ -16,13 +17,15 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
 from vfs.video_preview import _decode_audio
-
+# IMPORT TEST AUDIO PLAYBACK DEPENDENCIES ]
+# PREPARE TEST AUDIO PLAYBACK SHARED STATE [
 spec = importlib.util.spec_from_file_location('audio_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
-
-
+# PREPARE TEST AUDIO PLAYBACK SHARED STATE ]
+# VERIFY AUDIO DECODER BEHAVIOR [
 class AudioDecoderTests(unittest.TestCase):
+    # VERIFY REAL MP3 DECODE TO EOF WITH NULL AUDIO OUTPUT [
     @unittest.skipUnless(ctypes.util.find_library('mpv') and shutil.which('ffmpeg'),
                          'Requires libmpv and ffmpeg')
     def test_real_mp3_decode_to_eof_with_null_audio_output(self):
@@ -61,7 +64,8 @@ assert connection.events[-1][0] == 'end', connection.events
             result = subprocess.run([sys.executable, '-c', code, str(path)],
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
+    # VERIFY REAL MP3 DECODE TO EOF WITH NULL AUDIO OUTPUT ]
+    # VERIFY AUDIO PROGRESS SEEK EOF AND NO VIDEO RENDERER [
     def test_audio_progress_seek_eof_and_no_video_renderer(self):
         player = SimpleNamespace(play=Mock(), command=Mock(), terminate=Mock(),
                                  time_pos=2., duration=10., idle_active=True)
@@ -79,7 +83,8 @@ assert connection.events[-1][0] == 'end', connection.events
         self.assertEqual(connection.send.call_args_list[-1].args[0], ('end', None))
         player.terminate.assert_called_once()
         connection.close.assert_called_once()
-
+    # VERIFY AUDIO PROGRESS SEEK EOF AND NO VIDEO RENDERER ]
+    # VERIFY AUDIO STOP AND STARTUP ERROR CLEANUP [
     def test_audio_stop_and_startup_error_cleanup(self):
         player = Mock()
         connection = Mock()
@@ -96,9 +101,11 @@ assert connection.events[-1][0] == 'end', connection.events
             _decode_audio('/song.mp3', (2, 2), connection, 'libmpv.so')
         self.assertIn('no output', connection.send.call_args_list[0].args[0][1])
         connection.close.assert_called_once()
-
-
+    # VERIFY AUDIO STOP AND STARTUP ERROR CLEANUP ]
+# VERIFY AUDIO DECODER BEHAVIOR ]
+# VERIFY AUDIO UI BEHAVIOR [
 class AudioUITests(unittest.IsolatedAsyncioTestCase):
+    # VERIFY MP3 EXPLICIT PLAY PROGRESS SEEK STOP [
     async def test_mp3_explicit_play_progress_seek_stop(self):
         with create_pipe_input() as pipe:
             fs = VirtualFS({'files': {}})
@@ -164,3 +171,5 @@ class AudioUITests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     browser.app.exit()
                     await task
+    # VERIFY MP3 EXPLICIT PLAY PROGRESS SEEK STOP ]
+# VERIFY AUDIO UI BEHAVIOR ]

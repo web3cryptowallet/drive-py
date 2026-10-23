@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 
-from ..paths import path_update_prefix
+from ..paths import path_update_prefix, catalog_source_path
 from ..utils import format_size, normalize_path
 
 # IMPORT DATABASE ADAPTER CONTRACT AND TREE CONSTRUCTION DEPENDENCIES ]
@@ -38,7 +38,7 @@ class BaseDBAdapter(ABC):
             ancestors.append(ancestors[-1] + '/' + part)
         return {'id': file_id, 'name': parts[-1], 'is_dir': False,
                 'size': size, 'parent_id': ancestors[-1],
-                'info': {'path': file_id, 'hash': digest, 'state': 'verified',
+                'info': {'path': catalog_source_path(file_id) if file_id.startswith('/~:') else file_id, 'hash': digest, 'state': 'verified',
                          'hashinfo': f'{digest}:{size}'}}, ancestors
 
     # DEFINE THE DATABASE NAVIGATION CONTRACT ]
@@ -60,6 +60,7 @@ class BaseDBAdapter(ABC):
 
         for path, hashes in files.items():
             path = path_update_prefix(path)
+            source_path = catalog_source_path(path)
             path, parts = normalize_path(path)
             
             total_files += 1
@@ -80,7 +81,7 @@ class BaseDBAdapter(ABC):
                 "is_dir": False,
                 "size": size,
                 "parent_id": parent_id,
-                "info": {"path": path, "hashinfo": hashinfo, "hash": md5}
+                "info": {"path": source_path, "hashinfo": hashinfo, "hash": md5}
             }
 
             nodes[""]["size"] += size

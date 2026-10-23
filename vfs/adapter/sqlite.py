@@ -9,7 +9,7 @@ from contextlib import contextmanager
 
 from .base import BaseDBAdapter
 from ..nodes import VFSNode
-from ..paths import path_update_prefix
+from ..paths import path_update_prefix, catalog_source_path, catalog_identity_path
 from ..utils import batched, normalize_path
 
 # IMPORT SQLITE FILESYSTEM STORAGE DEPENDENCIES ]
@@ -59,6 +59,11 @@ class SQLiteDBAdapter(BaseDBAdapter):
             CREATE INDEX IF NOT EXISTS idx_hash ON hashes(hash_id);
             CREATE INDEX IF NOT EXISTS idx_hash_path ON hashes(path);
         """)
+        with self.conn:
+            self.conn.execute("""
+                INSERT OR IGNORE INTO nodes (id, name, is_dir, size, parent_id, info)
+                VALUES ('', '', 1, 0, NULL, '{}')
+            """)
 
     def drop_tables(self):
         print("sqlite: drop tables")
@@ -106,6 +111,7 @@ class SQLiteDBAdapter(BaseDBAdapter):
         # Convert to list to support start_index slicing
         file_items = list(files.items())
         
+        # GENERATE NODES FOR BUILD [
         def generate_nodes(start_index, n=100_000):
             clone_count = 0
             changed_count = 0
@@ -116,6 +122,7 @@ class SQLiteDBAdapter(BaseDBAdapter):
                 path, hashes = file_items[i]
                 
                 path = path_update_prefix(path)
+                stored_path = catalog_source_path(path)
                 path, parts = normalize_path(path)
                 
                 base_file_id = "/" + "/".join(parts)
@@ -183,13 +190,14 @@ class SQLiteDBAdapter(BaseDBAdapter):
                     "is_dir": 0,
                     "size": size,
                     "parent_id": parent_id,
-                    "info": json.dumps({"path": path, "hashinfo": hashinfo, "hash": md5})
+                    "info": json.dumps({"path": stored_path, "hashinfo": hashinfo, "hash": md5})
                 })
             
             if clone_count > 0 or changed_count > 0:
                 print(f"{clone_count} clones {changed_count} changed")
 
             return batch
+        # GENERATE NODES FOR BUILD ]
 
 
         with self.conn:
@@ -232,15 +240,18 @@ class SQLiteDBAdapter(BaseDBAdapter):
                     INSERT INTO nodes
                     (id, name, is_dir, size, parent_id, info)
                     VALUES (:id, :name, :is_dir, :size, :parent_id, :info)
+                    ON CONFLICT(id) DO UPDATE SET size = excluded.size
                     """,
                     dir_batch
                 )
 
         if hashes:
+            # GENERATE HASHES FOR BUILD [
             def generate_hashes():
                 for h, paths in hashes.items():
                     for p in paths:
                         yield {"hash_id": h, "path": p}
+            # GENERATE HASHES FOR BUILD ]
 
             index = 0
             with self.conn:
@@ -276,7 +287,9 @@ class SQLiteDBAdapter(BaseDBAdapter):
             for source_path, values in files.items():
                 # VALIDATE FILE METADATA AND EXISTING NODE TYPE [
 
-                path, parts = normalize_path(path_update_prefix(source_path))
+                virtual_path = path_update_prefix(source_path)
+                stored_path = catalog_source_path(virtual_path)
+                path, parts = normalize_path(virtual_path)
                 if not path or not all(parts) or len(values) != 1:
                     raise ValueError(f"Expected a file path and one hash: {source_path!r}")
                 hashinfo = next(iter(values))
@@ -312,7 +325,7 @@ class SQLiteDBAdapter(BaseDBAdapter):
                             self.conn.executemany(
                                 'DELETE FROM hashes WHERE path = ?',
                                 ((candidate['path'],) for candidate in candidates
-                                 if '/' + normalize_path(path_update_prefix(candidate['path']))[0]
+                                 if self._duplicate_path_id(candidate['path'])
                                  == row['id']),
                             )
                     self.conn.executemany('DELETE FROM nodes WHERE id = ?',
@@ -348,7 +361,7 @@ class SQLiteDBAdapter(BaseDBAdapter):
                         self.conn.executemany(
                             'DELETE FROM hashes WHERE path = ?',
                             ((candidate['path'],) for candidate in candidates
-                             if '/' + normalize_path(path_update_prefix(candidate['path']))[0]
+                             if self._duplicate_path_id(candidate['path'])
                              == directory),
                         )
                         for ancestor in ancestors[:index]:
@@ -373,7 +386,7 @@ class SQLiteDBAdapter(BaseDBAdapter):
                 delta = size - old_size
                 for directory in ancestors:
                     deltas[directory] = deltas.get(directory, 0) + delta
-                info = json.dumps({'path': path, 'hashinfo': hashinfo, 'hash': digest})
+                info = json.dumps({'path': stored_path, 'hashinfo': hashinfo, 'hash': digest})
                 self.conn.execute(
                     """INSERT INTO nodes VALUES (?, ?, 0, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
@@ -386,12 +399,12 @@ class SQLiteDBAdapter(BaseDBAdapter):
                 old_path = json.loads(old['info']).get('path', path) if old else path
                 for duplicate_path in {source_path, path, '/' + path.lstrip('/'),
                                        old_path, '/' + old_path.lstrip('/')}:
-                    self.conn.execute("DELETE FROM hashes WHERE path = ?", (duplicate_path,))
+                    if self._duplicate_path_id(duplicate_path) == file_id:
+                        self.conn.execute("DELETE FROM hashes WHERE path = ?", (duplicate_path,))
                 self.conn.execute(
-                    "INSERT INTO hashes (hash_id, path) VALUES (?, ?)", (hashinfo, source_path)
+                    "INSERT INTO hashes (hash_id, path) VALUES (?, ?)", (hashinfo, catalog_source_path(source_path))
                 )
                 # REPLACE DUPLICATE HASH ENTRIES FOR THE UPDATED FILE ]
-
             # APPLY ACCUMULATED DIRECTORY SIZE CHANGES [
 
             self.conn.executemany(
@@ -424,6 +437,12 @@ class SQLiteDBAdapter(BaseDBAdapter):
         return True
 
     # MERGE FILES WITHOUT REBUILDING SQLITE ]
+    # MATCH RAW DUPLICATE PATHS TO RUNTIME CATALOG IDENTITIES [
+    def _duplicate_path_id(self, path):
+        if self.conn.execute("SELECT 1 FROM nodes WHERE id='/~:'").fetchone():
+            path = catalog_identity_path(path)
+        return '/' + normalize_path(path_update_prefix(path))[0]
+    # MATCH RAW DUPLICATE PATHS TO RUNTIME CATALOG IDENTITIES ]
     # QUERY SQLITE NODES AND DUPLICATES [
 
     def get_root(self):
