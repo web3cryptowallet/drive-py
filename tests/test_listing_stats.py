@@ -36,11 +36,11 @@ class ListingStatsTests(unittest.TestCase):
         self.assertEqual(browser.listing_stats(), 'Dirs: 2 · Files: 4')
         self.assertIn(browser.listing_stats(), browser.info.text)
         browser.toggle_graphics()
-        self.assertEqual(browser.listing_stats(), 'Dirs: 2 · Files: 4')
+        self.assertEqual(browser.listing_stats(), 'Dirs: 0 · Files: 4')
         browser.toggle_dotfiles()
-        self.assertEqual(browser.listing_stats(), 'Dirs: 2 · Files: 3')
+        self.assertEqual(browser.listing_stats(), 'Dirs: 0 · Files: 3')
         browser.toggle_media_filter()
-        self.assertEqual(browser.listing_stats(), 'Dirs: 2 · Files: 1')
+        self.assertEqual(browser.listing_stats(), 'Dirs: 0 · Files: 1')
         browser.rows = []
         self.assertEqual(browser.listing_stats(), 'Dirs: 0 · Files: 0')
     # VERIFY COUNTS EXPANSION FILTERS AND METADATA ROW ]

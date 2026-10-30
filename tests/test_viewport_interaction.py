@@ -135,3 +135,81 @@ class ViewportInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await task
     # VERIFY SCROLLBAR CLICK AND DRAG TABLE AND GRID ]
 # VERIFY VIEWPORT INTERACTION BEHAVIOR ]
+
+# VERIFY MAP JUMPS DISPLAY IMAGE ROWS BEFORE THE SELECTED FILENAME [
+class GridMapTileVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_map_jump_exposes_selected_tile_image_and_label(self):
+        fs = VirtualFS({'files': {f'/folder/file{i:03}.png': {'MD5:test:1'} for i in range(100)}})
+        fs.enter('folder')
+        output = ResizableOutput()
+        with create_pipe_input() as pipe:
+            with patch.object(fs, 'start_in_current_directory'):
+                b = tui.DriveBrowser(fs, input=pipe, output=output)
+            b.graphics_mode = True
+            b.image_previews = False
+            b.icon_lines = 4
+            b.refresh()
+            task = asyncio.create_task(b.app.run_async())
+            try:
+                await until(lambda: b.files.render_info is not None)
+                position = b.app.renderer._last_screen.visible_windows_to_write_positions[b.files]
+                width = b.files.right_margins[0].get_width(None)
+                x = position.xpos + position.width - width
+                y = position.ypos + position.height // 2 + 1
+                pipe.send_text(f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m')
+                await until(lambda: b.grid_scroll_to_tile is not None and b.selected > 0)
+                await asyncio.sleep(.04)
+                first = b.grid_positions[b.selected][1]
+                visible = b.files.render_info.input_line_to_visible_line
+                self.assertIn(first, visible)
+                self.assertIn(first + b.icon_lines, visible)
+                self.assertLess(visible[first], visible[first + b.icon_lines])
+                self.assertEqual(visible[first], 0)
+            finally:
+                b.app.exit()
+                await task
+# VERIFY MAP JUMPS DISPLAY IMAGE ROWS BEFORE THE SELECTED FILENAME ]
+
+# VERIFY MINUS ZOOM AND ARROW NAVIGATION KEEP COMPLETE IMAGE TILES VISIBLE [
+class GridKeyboardTileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_minus_by_mode_and_arrow_scroll_includes_image_and_filename(self):
+        fs = VirtualFS({'files': {f'/folder/file{i:03}.png': {'MD5:test:1'} for i in range(100)}})
+        fs.enter('folder')
+        with create_pipe_input() as pipe:
+            with patch.object(fs, 'start_in_current_directory'):
+                b = tui.DriveBrowser(fs, input=pipe, output=ResizableOutput())
+            b.image_previews = False
+            b.scan_selection.add('/folder')
+            task = asyncio.create_task(b.app.run_async())
+            try:
+                await until(lambda: b.files.render_info is not None)
+                pipe.send_text('-')
+                await until(lambda: not b.scan_selection)
+                before = b.icon_lines
+                pipe.send_text('g')
+                await until(lambda: b.graphics_mode)
+                b.scan_selection.add('/keep-selection')
+                pipe.send_text('-')
+                await until(lambda: b.icon_lines == before - 1)
+                self.assertIn('/keep-selection', b.scan_selection)
+                b.icon_lines = 4
+                b.app.invalidate()
+                await asyncio.sleep(.04)
+                pipe.send_text('\x1b[B' * 8)
+                await until(lambda: b.selected >= b.grid_columns * 7)
+                await asyncio.sleep(.04)
+                first = b.grid_positions[b.selected][1]
+                visible = b.files.render_info.input_line_to_visible_line
+                self.assertIn(first, visible)
+                self.assertIn(first + b.icon_lines, visible)
+                self.assertLess(visible[first], visible[first + b.icon_lines])
+                pipe.send_text('\x1b[C')
+                previous = b.selected
+                await until(lambda: b.selected != previous)
+                await asyncio.sleep(.04)
+                first = b.grid_positions[b.selected][1]
+                self.assertIn(first, b.files.render_info.input_line_to_visible_line)
+            finally:
+                b.app.exit()
+                await task
+# VERIFY MINUS ZOOM AND ARROW NAVIGATION KEEP COMPLETE IMAGE TILES VISIBLE ]

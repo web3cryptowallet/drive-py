@@ -26,6 +26,27 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
     # PREPARE TEST FIXTURES FOR BOOKMARK TESTS ]
+    async def test_preview_bookmark_button_targets_displayed_item(self):
+        from types import SimpleNamespace
+        fs = VirtualFS({'files': {'one/a.txt': {'same:3'}, 'two/b.txt': {'other:3'}}})
+        fs.enter('one')
+        with create_pipe_input() as pipe, patch.object(fs, 'start_in_current_directory'):
+            browser = tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
+            node = fs.get_from_path('/two/b.txt')
+            browser.show_info(preview_node=node)
+            event = SimpleNamespace(event_type=tui.MouseEventType.MOUSE_UP,
+                                    button=tui.MouseButton.LEFT)
+            fragments = browser.preview_bookmark_fragments()
+            self.assertEqual(fragments[1][:2], ('#888888', 'B'))
+            self.assertEqual(''.join(fragment[1] for fragment in fragments), '● B b.txt')
+            fragments[1][2](event)
+            self.assertEqual(browser.bookmarks, ['/two/b.txt'])
+            self.assertEqual(browser.preview_bookmark_fragments()[1][:2], ('#00ffff bold', 'B'))
+            self.assertIn('/two/b.txt', self.bookmark_file.read_text())
+            browser.click_preview_bookmark(event)
+            self.assertEqual(browser.bookmarks, [])
+            self.assertEqual(browser.preview_bookmark_fragments()[1][:2], ('#888888', 'B'))
+
     # VERIFY KEYS AND DUPLICATE [
     async def test_keys_and_duplicate(self):
         fs = VirtualFS({'files': {'one/a.txt': {'same:3'}, 'two/b.txt': {'same:3'}}, 'hashes': {'same:3': {'one/a.txt', 'two/b.txt'}}})
@@ -321,6 +342,51 @@ class BookmarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(make().bookmark_index, 0)
     # VERIFY CURSOR RESTORED ON REOPEN RESTART AND DELETION ]
     # VERIFY CONFIG ALIAS BOOKMARK LOADING EDITING AND NAVIGATION [
+    async def test_equal_panes_and_live_online_markers(self):
+        from prompt_toolkit.data_structures import Size
+
+        class Output(DummyOutput):
+            size = Size(rows=30, columns=120)
+
+            def get_size(self):
+                return self.size
+
+        root = Path(self.storage.name) / 'mounted'
+        root.mkdir()
+        target = root / ('long-name-' * 15 + '.txt')
+        target.write_text('preview content')
+        with patch.dict(tui.aliases, {'disk': str(root)}, clear=True), create_pipe_input() as pipe:
+            fs = VirtualFS({'files': {}})
+            output = Output()
+            browser = tui.DriveBrowser(fs, path=str(root), input=pipe, output=output)
+            browser.bookmarks = ['/disk/' + target.name, '/disk/missing.txt', '/disk']
+            menu = tui.BookmarksView(browser)
+            browser.push(menu)
+            task = asyncio.create_task(browser.app.run_async())
+            try:
+                for columns in (120, 80, 121):
+                    output.size = Size(rows=30, columns=columns)
+                    browser.app._on_resize()
+                    await asyncio.sleep(.1)
+                    positions = browser.app.renderer._last_screen.visible_windows_to_write_positions
+                    left_window = next(w for w in positions if w.content is menu.table)
+                    left = positions[left_window]
+                    right = positions[menu.details.window]
+                    self.assertLessEqual(abs(left.width - right.width), 1)
+                    self.assertLessEqual(abs(left.width - (columns // 2 - 2)), 1)
+                rows = menu.rows()
+                self.assertIn(('class:green', '●'), rows[0])
+                self.assertIn(('class:red', '●'), rows[1])
+                self.assertIn(('class:green', '●'), rows[2])
+                target.unlink()
+                self.assertIn(('class:red', '●'), menu.rows()[0])
+                target.write_text('back online')
+                self.assertIn(('class:green', '●'), menu.rows()[0])
+                self.assertEqual(browser.bookmarks[0], '/disk/' + target.name)
+            finally:
+                browser.app.exit()
+                await task
+
     async def test_config_alias_bookmark_loading_editing_and_navigation(self):
         import json
         root = Path(self.storage.name) / 'mounted disk'

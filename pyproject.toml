@@ -1,13 +1,15 @@
 [project]
 name = "drive-py"
-version = "0.995"
+version = "0.996"
 description = "Drive file browser"
 requires-python = ">=3.10"
 dependencies = [
     "Pillow>=10,<13",
     "pillow-avif-plugin>=1.5,<2",
+    "pillow-heif>=0.18,<2",
     "prompt-toolkit>=3.0.53,<4",
     "python-mpv>=1.0,<2",
+    "python-xlib>=0.33,<0.34",
     "term-image>=0.7,<0.8",
 ]
 

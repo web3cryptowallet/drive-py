@@ -25,12 +25,12 @@ class NumberHighlightTests(unittest.IsolatedAsyncioTestCase):
             screen.data_buffer[0][column] = Char(char, 'bg:#123456 bold')
         tui.NumberHighlight.highlight(screen)
         self.assertEqual(''.join(cell.char for cell in screen.data_buffer[0].values()), text)
-        for part in ['42', '40 MB', '1.25 GiB/s', '99%', '2026-10-17', '01:23']:
+        for part in ['40 MB', '1.25 GiB/s', '99%', '2026-10-17', '01:23']:
             start = text.index(part)
             for column in range(start, start + len(part)):
                 if text[column].isdigit():
                     self.assertIn('fg:#ffd700', screen.data_buffer[0][column].style)
-        for unit in ['MB', 'GiB/s', '%']:
+        for unit in ['file42', 'MB', 'GiB/s', '%']:
             start = text.index(unit)
             for column in range(start, start + len(unit)):
                 self.assertNotIn('fg:#ffd700', screen.data_buffer[0][column].style)
@@ -39,6 +39,17 @@ class NumberHighlightTests(unittest.IsolatedAsyncioTestCase):
                             for cell in screen.data_buffer[0].values()))
         self.assertNotIn('fg:#ffd700', screen.data_buffer[0][text.index('abc')].style)
     # VERIFY NUMBERS UNITS AND ORIGINAL STYLES ]
+    def test_digits_inside_words_are_not_numbers(self):
+        text = 'mp3 MP4 h264 file42 42file x1.25 1.25abc café3 _123 40 MB 1.25 99%'
+        screen = Screen()
+        for column, char in enumerate(text):
+            screen.data_buffer[0][column] = Char(char, '')
+        tui.NumberHighlight.highlight(screen)
+        boundary = text.index('40 MB')
+        for column, char in enumerate(text):
+            highlighted = 'fg:#ffd700' in screen.data_buffer[0][column].style
+            self.assertEqual(highlighted, column >= boundary and (char.isdigit() or char == '.'))
+
     # VERIFY FINAL RENDER INCLUDES WIDGETS AND DEFERRED WINDOWS [
     async def test_final_render_includes_widgets_and_deferred_windows(self):
         field = TextArea(text='40 MB', height=1)

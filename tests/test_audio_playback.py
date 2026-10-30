@@ -123,7 +123,7 @@ class AudioUITests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(browser.app.run_async())
                 try:
                     await asyncio.sleep(.05)
-                    pipe.send_text('\t\t\r')
+                    pipe.send_text('\t\t\t\r')
                     for _ in range(100):
                         if fake.start.called:
                             break

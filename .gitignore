@@ -20,7 +20,7 @@ livelog-drv
 
 config.sh
 
-drivevfs
+drivevfs*
 
 actions
 
@@ -28,6 +28,7 @@ FEATURE-*.md
 TRANSPLIT.md
 
 pack.sh
+copy-dir.sh
 
 .cache
 profile.*
@@ -35,6 +36,8 @@ profile.*
 # Local persistent bookmarks
 .bookmarks.json
 .bookmarks.json.tmp
+
+.blacklist*
 
 # Local persistent action history
 history.llog
@@ -45,3 +48,9 @@ history.llog
 
 # Raw source-path migration snapshots
 *.source-paths-backup.sqlite
+
+# Directory-copy plan
+files_dst.copy
+
+# Archived Textual UI (omit from copies)
+texual.removed/

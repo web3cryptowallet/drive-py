@@ -22,7 +22,7 @@ class DotfileTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)
             for name in ['.hidden.txt', '.hidden/image.png', 'visible.txt',
-                         'normal/.nested.txt', 'normal/shown.txt']:
+                         'normal/.nested.txt', 'normal/shown.txt', 'normal/photo.png']:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('fixture')
@@ -52,6 +52,7 @@ class DotfileTests(unittest.IsolatedAsyncioTestCase):
                 browser.toggle_expansion_depth()
                 browser.selected = 0
                 browser.expand_subdirs()
+                await wait_for(lambda: any(row['name'] == '.hidden/image.png' for row in browser.rows))
                 self.assertIn('.hidden/image.png', [row['name'] for row in browser.rows])
                 self.assertIn('normal/.nested.txt', [row['name'] for row in browser.rows])
                 pipe.send_text('.')
