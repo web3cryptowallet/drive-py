@@ -4,7 +4,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from types import SimpleNamespace as NS
 
 from prompt_toolkit.input import DummyInput
 from prompt_toolkit.output import DummyOutput
@@ -16,6 +17,36 @@ spec.loader.exec_module(tui)
 
 
 class BackgroundScannerTests(unittest.IsolatedAsyncioTestCase):
+    def test_status_line_keeps_stats_with_stage_rotation(self):
+        browser = object.__new__(tui.DriveBrowser)
+        scanner = NS(closing=False, paused_modes=None,
+                     controls=NS(modes=(True, True, True)),
+                     engine=NS(current_mode=1), storage_path='/private/scope',
+                     stats=NS(active=True, paths_per_second=25., mb_per_second=1.))
+        browser.scan_statistics_scope = 'session'
+        browser.scan_statistics = NS(record=lambda path: {'session': [[100, 4_000_000, 2.]]})
+        browser.scanners = [scanner]
+        for mode, frame, color in [(1, '\\', '#ffd700'), (2, '\\', '#af5fff'),
+                                   (3, '◐', '#ffd700')]:
+            scanner.engine.current_mode = mode
+            with patch.object(tui.time, 'monotonic', return_value=0):
+                fragments = browser.scan_progress()
+                self.assertEqual(fragments[0], ('fg:' + color, frame + ' · '))
+                text = ''.join(part for _, part in fragments)
+                self.assertIn('100 files / 4.000 MB', text)
+                self.assertIn('25 paths/s · 1.0 MB/s', text)
+                self.assertNotIn('/private/scope', text)
+                self.assertNotIn('Running', text)
+                self.assertNotIn('checksums', text)
+        scanner.paused_modes = (True, True, True)
+        self.assertIn('25 paths/s', str(browser.scan_progress()))
+        self.assertEqual(len(browser.scan_progress()), 1)
+        scanner.paused_modes = None
+        scanner.stats.active = False
+        self.assertEqual(len(browser.scan_progress()), 1)
+        browser.scanners = []
+        self.assertEqual(browser.scan_progress(), '')
+
     async def test_hide_navigate_reopen_pause_and_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -38,7 +69,7 @@ class BackgroundScannerTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(.02)
                 self.assertGreater(scanner.stats.paths, 0)
-                self.assertIn('paths/s', browser.scan_progress())
+                self.assertNotIn('Scan Running', str(browser.scan_progress()))
                 browser.toggle_scanner()
                 self.assertIs(browser.screen_stack[-1][0], scanner)
                 self.assertIs(scanner.worker, worker)
@@ -49,7 +80,7 @@ class BackgroundScannerTests(unittest.IsolatedAsyncioTestCase):
                 browser.pause_scanner()
                 await asyncio.sleep(.05)
                 self.assertEqual(scanner.controls.modes, (False, False, False))
-                self.assertIn('Paused', browser.scan_progress())
+                self.assertIn('paths/s', str(browser.scan_progress()))
                 browser.toggle_scanner()
                 self.assertIs(browser.screen_stack[-1][0], scanner)
                 scanner.close()

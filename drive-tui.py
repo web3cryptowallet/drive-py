@@ -3672,18 +3672,22 @@ class DriveBrowser:
     def scan_progress(self):
         if not self.scanners:
             return ''
-        scanner = self.scanners[-1]
-        state = ('Stopping' if scanner.closing else 'Paused' if scanner.paused_modes is not None
-                 else 'Running' if any(scanner.controls.modes) else 'Complete / idle')
-        stats = scanner.stats
+        scanner = next((item for item in reversed(self.scanners)
+                        if not item.closing and item.paused_modes is None
+                        and any(item.controls.modes) and item.stats.active), self.scanners[-1])
+        active = (not scanner.closing and scanner.paused_modes is None
+                  and any(scanner.controls.modes) and scanner.stats.active)
+        result = []
+        if active:
+            color = '#af5fff' if scan_activity_mode(scanner) == 2 else '#ffd700'
+            result.append(('fg:' + color, scan_activity_frame(scanner, time.monotonic()) + ' · '))
         scope = self.scan_statistics_scope
         rows = self.scan_statistics.record(scanner.storage_path)[scope]
         files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
-        return safe_text(f'Scan {state} · {scanner.path} · {scanner.phase} · '
-                         f'{scope}: {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
-                         f'{stats.paths_per_second:.0f} paths/s · '
-                         f'{stats.mb_per_second:.1f} MB/s · {stats.path} · '
-                         's:view Ctrl+S:statistics Ctrl+P:pause/resume Ctrl+K:stop')
+        result.append(('', f'{scope}: {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
+                           f'{scanner.stats.paths_per_second:.0f} paths/s · {scanner.stats.mb_per_second:.1f} MB/s · '
+                           's:view Ctrl+S:statistics Ctrl+P:pause/resume Ctrl+K:stop'))
+        return result
 
     # RESET CURRENT MAP [
     def reset_current_map(self):

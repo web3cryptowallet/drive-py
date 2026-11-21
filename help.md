@@ -554,3 +554,8 @@ used and free capacity; the browsed directory's disk is included if different.
 Storage refreshes in the background every five seconds; F5 requests an immediate
 refresh. These are database file sizes and volume capacity, not total catalogued
 file content sizes. Memory and remote backends have no local database file size.
+
+The main scan status line shows the mode's rotating indicator (purple for Medium,
+gold for Lite/Heavy), scope file count/size/time, paths/s, MB/s and shortcut hints.
+Verbose paths and phase text are omitted. Paused/idle scans keep statistics without
+rotation. Open s, F4 or Ctrl+S for more detail.
