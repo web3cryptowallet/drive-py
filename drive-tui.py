@@ -3634,6 +3634,7 @@ class DriveBrowser:
         lines += ['', 'Activity and errors', f'  Queued file actions: {len(self.actions)}',
                   f'  History writer: {self.action_history.error or "OK"}',
                   f'  Notification: {self.clipboard_notice or "—"}']
+        lines += ['', *getattr(self, 'storage_status_lines', ['Storage', '  Loading database sizes and disk space…'])]
         return [safe_text(line) for line in lines]
 
     def conversion_status(self):
@@ -4481,8 +4482,11 @@ class StatusView(PTScreen):
         self.table = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
         self.focus = self.table
         self.task = None
+        self.storage_task = None
+        self.closed = False
+        self.storage_wake = asyncio.Event()
         self.bind(['escape'], self.close, eager=True)
-        self.bind(['f5'], self.refresh, eager=True)
+        self.bind(['f5'], self.refresh_storage, eager=True)
         self.container = HSplit([
             Frame(self.table, title='Status · F4 / Esc close · F5 refresh'),
             Button('Close', handler=self.close),
@@ -4499,16 +4503,45 @@ class StatusView(PTScreen):
             self.table.buffer.cursor_position = min(cursor, len(text))
         self.invalidate()
 
+    def refresh_storage(self):
+        self.storage_wake.set()
+        self.refresh()
+
+    async def probe_storage(self):
+        from vfs.storage_status import storage_status
+        while not self.closed:
+            self.storage_wake.clear()
+            db = self.browser.vfs.db
+            paths = ([str(db.db_path), *map(str, getattr(db, 'routes', {}).values())]
+                     if isinstance(db, SQLiteDBAdapter) else [])
+            directory = get_real_path(self.browser.vfs.pwd())
+            try:
+                self.browser.storage_status_lines = await background_call(storage_status, paths, directory)
+            except Exception as exc:
+                self.browser.storage_status_lines = ['Storage', f'  Unable to read storage: {safe_text(exc)}']
+            if self.closed:
+                return
+            self.refresh()
+            try:
+                await asyncio.wait_for(self.storage_wake.wait(), timeout=5.)
+            except asyncio.TimeoutError:
+                pass
+
     def start(self):
         async def tick():
             while True:
                 await asyncio.sleep(.3)
                 self.refresh()
         self.task = self.browser.app.create_background_task(tick())
+        self.storage_task = self.browser.app.create_background_task(self.probe_storage())
 
     def close(self):
+        self.closed = True
+        self.storage_wake.set()
         if self.task:
             self.task.cancel()
+        if self.storage_task:
+            self.storage_task.cancel()
         super().close()
 
 

@@ -52,6 +52,46 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
                 browser.app.exit()
                 await task
 
+    async def test_storage_refresh_uses_worker_and_cancels_on_close(self):
+        import threading
+        with tempfile.TemporaryDirectory() as directory:
+            fs = VirtualFS(None, 'sqlite', db_path=str(Path(directory) / 'cache.sqlite'))
+            browser = tui.DriveBrowser(fs, path=directory, input=DummyInput(), output=DummyOutput())
+            fragment = str(Path(directory) / 'fragment.sqlite')
+            fs.db.routes = {'/fragment': fragment}
+            view = tui.StatusView(browser)
+            main_thread = threading.get_ident()
+            calls = []
+
+            def probe(paths, browsing):
+                calls.append((threading.get_ident(), paths, browsing))
+                return ['Storage', '  Database files total: 123 KB']
+
+            try:
+                with patch('vfs.storage_status.storage_status', side_effect=probe):
+                    browser.push(view)
+                    for _ in range(100):
+                        if '123 KB' in view.table.text:
+                            break
+                        await asyncio.sleep(.01)
+                    self.assertIn('123 KB', view.table.text)
+                    self.assertNotEqual(calls[0][0], main_thread)
+                    self.assertEqual(calls[0][1], [fs.db.db_path, fragment])
+                    view.refresh_storage()
+                    for _ in range(100):
+                        if len(calls) > 1:
+                            break
+                        await asyncio.sleep(.01)
+                    self.assertGreater(len(calls), 1)
+                    view.close()
+                    await asyncio.sleep(0)
+                    self.assertTrue(view.storage_task.done())
+            finally:
+                if not view.storage_task.done():
+                    view.close()
+                await asyncio.gather(*tuple(browser.app._background_tasks), return_exceptions=True)
+                fs.db.conn.close()
+
     async def test_status_snapshot_reads_cached_state_only(self):
         with tempfile.TemporaryDirectory() as directory:
             fs = VirtualFS({'files': {}})

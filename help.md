@@ -545,3 +545,12 @@ live. This reduces database commit overhead for small files.
 Completed directory summaries keep their result color: green for verified/empty,
 orange for modified and red for missing. The settled symbol and color refresh
 together after scanning; active rotation retains its stage color.
+
+### Database size and disk space in F4
+
+Open F4 and scroll to Storage for each SQLite database/fragment file size,
+WAL/SHM/journal sidecar size and their combined total. Containing disks show total,
+used and free capacity; the browsed directory's disk is included if different.
+Storage refreshes in the background every five seconds; F5 requests an immediate
+refresh. These are database file sizes and volume capacity, not total catalogued
+file content sizes. Memory and remote backends have no local database file size.
