@@ -515,3 +515,10 @@ to the index, and **Esc** leaves search then closes help. Mouse selection works;
 the Close button remains available. Typing shortcut letters in search enters text.
 Files, scanner and help shortcut entries are checked against their registered
 bindings, including Ctrl+R/F5, blacklist, sizing and scanner Loop controls.
+
+### Scan worker activity
+
+The scan popup shows the current worker operation and path, elapsed time in that
+step, and two recent activity messages. Before map paths appear, this identifies
+saved-state loading, catalog lookups, directory enumeration or database writes.
+Recent messages are sampled; a slow operation retains its current step and timer.

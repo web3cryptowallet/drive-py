@@ -538,6 +538,8 @@ class DriveScanner:
         self.bytes_read = self.paths = self.size_scanned = 0
         self.started = time.monotonic()
         self.last_stats = 0.
+        self.activity = (time.monotonic(), "Starting scanner")
+        self.last_activity_event = float("-inf")
         self.current_mode = 0
         self.elapsed = 0.
         self.checkpoints = None
@@ -559,6 +561,15 @@ class DriveScanner:
         self.count_revisions = [None] * 3
     # INITIALIZE DRIVE SCANNER ]
     # DELIVER SCANNER EVENTS WITH BACKPRESSURE [
+    def report_activity(self, operation, path=None, *, force=False):
+        """Expose the exact worker step before blocking I/O; bound UI log traffic."""
+        now = time.monotonic()
+        message = operation + (f' · {path}' if path is not None else '')
+        self.activity = (now, message)
+        if force or now - self.last_activity_event >= .25:
+            self.last_activity_event = now
+            self.emit(('activity', message))
+
     def excluded(self, path):
         return any(path == root or path.startswith(root.rstrip('/') + '/')
                    for root in self.controls.excluded_paths)
@@ -678,6 +689,7 @@ class DriveScanner:
     # SAVE POSITIONS FOR DRIVE SCANNER [
     def save_positions(self):
         self.flush_discoveries()
+        self.report_activity("Saving resume positions", self.storage_path, force=True)
         self.store.put('position', self.storage_path, self.checkpoints)
     # SAVE POSITIONS FOR DRIVE SCANNER ]
     # SELECT BUCKETS FOR DRIVE SCANNER [
@@ -702,6 +714,7 @@ class DriveScanner:
         db = self.source
         owns_connection = isinstance(db, SQLiteDBAdapter)
         try:
+            self.report_activity("Opening scan database", self.storage_path, force=True)
             if owns_connection:
                 if hasattr(self.source, 'routes'):
                     db = type(self.source)(self.source.db_path)
@@ -824,6 +837,7 @@ class DriveScanner:
         """Commit a bounded batch without holding a write lock during disk I/O."""
         if not self.pending_discoveries:
             return
+        self.report_activity(f"Saving {len(self.pending_discoveries)} discovered paths", force=True)
         db = self.store.db
         entries = list(self.pending_discoveries.values())
         # Read/serialize before taking the write lock. Compare in one query per
@@ -882,7 +896,9 @@ class DriveScanner:
     # SCAN ONCE FOR DRIVE SCANNER ]
     # SCAN ONCE FOR DRIVE SCANNER [
     def _scan_once(self, db):
+        self.report_activity("Initializing scan storage", self.storage_path, force=True)
         self.store = ScanStore(db)
+        self.report_activity("Loading excluded database paths", force=True)
         if not self.trash_loaded:
             roots = set(self.controls.trashed_paths)
             if isinstance(db, SQLiteDBAdapter):
@@ -893,6 +909,7 @@ class DriveScanner:
             self.controls.trashed_paths = tuple(roots)
             self.trash_loaded = True
         if self.checkpoints is None:
+            self.report_activity("Loading resume positions", self.storage_path, force=True)
             self.checkpoints = self.store.get('position', self.storage_path, {})
         self.current_mode = 0
         self.started = time.monotonic()
@@ -900,8 +917,10 @@ class DriveScanner:
                        self.controls.heavy_order == 'expert' and
                        self.controls.startup_mode is None)
         if self.checksums is None or not expert_only:
+            self.report_activity("Loading saved checksum baselines", self.storage_path, force=True)
             self.checksums = {path: value for path, value in self.store.items('checksum').items()
                               if path == self.path or path.startswith(self.path + '/')}
+            self.report_activity("Building checksum directory index", force=True)
             self.checksum_dirs, self.checksum_children = {}, {}
             for path in self.checksums:
                 child = path
@@ -940,6 +959,7 @@ class DriveScanner:
                 self.verify_pending(db, mode)
                 self.finish_startup_mode(mode)
         self.current_mode = 0
+        self.report_activity("Scan pass complete", force=True)
         self.report_stats(force=True, active=False)
         self.elapsed += max(0., time.monotonic() - self.started)
     # SCAN ONCE FOR DRIVE SCANNER ]
@@ -985,6 +1005,7 @@ class DriveScanner:
                 pending.remove(path)
                 continue
             baseline = self.baseline(db, path)
+            self.report_activity("Reading disk metadata", path)
             disk_stat, error = self.disk_info(path)
             old = self.entries[path]
             entry = replace(old, progress=None, error='',
@@ -1066,12 +1087,15 @@ class DriveScanner:
                 seen.add(path)
                 stack.pop()
                 continue
+            self.report_activity("Looking up catalog metadata", path)
             baseline = (self.baseline(db, path, catalog=catalog_nodes.pop(path), resolved=True)
                         if path in catalog_nodes else self.baseline(db, path))
+            self.report_activity('Loading saved file state', path)
             saved = self.store.get('entry', path)
             disk_stat, error = None, ''
             # Known directories must still be enumerated to find new descendants.
             if path and (baseline is None or baseline.is_dir or self.controls.read_known):
+                self.report_activity("Reading disk metadata", path)
                 disk_stat, error = self.disk_info(path)
             is_dir = stat.S_ISDIR(disk_stat.st_mode) if disk_stat else bool(baseline and baseline.is_dir)
             if path:
@@ -1093,6 +1117,7 @@ class DriveScanner:
             seen.add(path)
             stack.pop()
             if not path or is_dir:
+                self.report_activity("Listing catalog children", path)
                 children = {child.name: child for child in db.get_children(baseline)} if baseline and baseline.is_dir else {}
                 for name in self.checksum_children.get(path, ()):
                     children.setdefault(name, self.baseline(db, path + '/' + name))
@@ -1103,6 +1128,7 @@ class DriveScanner:
                     names.update(self.root_names)
                 elif disk_stat and stat.S_ISDIR(disk_stat.st_mode):
                     try:
+                        self.report_activity("Enumerating disk directory", path)
                         with os.scandir(get_real_path(path)) as disk_children:
                             names.update(child.name for child in disk_children)
                         enumerated = True

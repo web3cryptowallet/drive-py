@@ -6056,6 +6056,7 @@ class ScannerView(PTScreen):
         self.order_thread = None
         self.requested_modes = {}
         self.mode_thread = None
+        self.activity_log = deque(maxlen=2)
         self.phase = 'Starting scanner'
         self.paused_modes = None
         self.stats = ScanStats(path=self.path)
@@ -6141,6 +6142,7 @@ class ScannerView(PTScreen):
                 Window(FormattedTextControl(self.controls_text), height=1),
                 Window(FormattedTextControl(self.summary), height=1),
                 Window(FormattedTextControl(lambda: self.path_fragments(self.stats_text())), height=2),
+                Window(FormattedTextControl(self.activity_text), height=3, wrap_lines=False),
                 VSplit([Window(FormattedTextControl(' Paths/bucket '), width=len(' Paths/bucket ')),
                         self.limit, Window(FormattedTextControl(' MiB/bucket '), width=len(' MiB/bucket ')),
                         self.byte_limit, Window()], height=1),
@@ -6314,6 +6316,8 @@ class ScannerView(PTScreen):
                 self.stats = payload
             elif kind == 'expert':
                 self.phase = 'Heavy expert — processing selected bucket'
+            elif kind == 'activity':
+                self.activity_log.append(safe_text(payload))
             elif kind == 'phase':
                 self.phase = safe_text(payload)
         if dirty_buckets:
@@ -6933,6 +6937,15 @@ class ScannerView(PTScreen):
                 f'{"Scanning" if self.stats.active else "Last path"}: {safe_text(self.stats.path)}')
     # STATS TEXT FOR SCANNER VIEW ]
     # BUCKET SUMMARY FOR SCANNER VIEW [
+    def activity_text(self):
+        engine = getattr(self, 'engine', None)
+        if engine is None:
+            current = 'Worker: starting scanner'
+        else:
+            started, message = engine.activity
+            current = f'Worker ({time.monotonic() - started:.1f}s): {safe_text(message)}'
+        return '\n'.join([current, *self.activity_log])
+
     def bucket_summary(self):
         bucket = self.selected_bucket()
         if bucket is None:
