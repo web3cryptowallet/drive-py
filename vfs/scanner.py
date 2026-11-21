@@ -5,7 +5,7 @@ Existing comparison baselines are preserved.
 Path IDs have the same meaning as nodes.id throughout the existing VFS.
 """
 # IMPORT SCANNER DEPENDENCIES [
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -178,6 +178,47 @@ class ScanStore:
         return {(key.decode() if isinstance(key, bytes) else key): json.loads(value)
                 for key, value in rows}
     # ITERATE STORED LIVELOG OR SCANNER RECORDS ]
+    def checksum_directory(self, directory):
+        """Load direct file baselines and names of checksum-only child directories."""
+        prefix = directory.rstrip('/') + '/'
+        db = self.db
+        files, directories = {}, set()
+        if isinstance(db, SQLiteDBAdapter):
+            # The (kind, key) primary key bounds this lookup to the directory.
+            # Collapse descendants in SQL: their checksum JSON never enters Python.
+            rows = db.conn.execute("""
+                SELECT DISTINCT
+                    CASE WHEN instr(rest, '/') > 0
+                         THEN substr(rest, 1, instr(rest, '/') - 1) ELSE rest END,
+                    CASE WHEN instr(rest, '/') = 0 THEN value ELSE NULL END
+                FROM (SELECT substr(key, ?) AS rest, value FROM scan_state
+                      WHERE kind='checksum' AND key >= ? AND key < ?)
+                """, (len(prefix) + 1, prefix, prefix[:-1] + '0'))
+            for name, value in rows:
+                if value is None:
+                    directories.add(name)
+                else:
+                    files[prefix + name] = json.loads(value)
+        else:
+            if hasattr(db, 'client'):
+                # SCAN avoids materializing the entire Redis hash in one response.
+                rows = (db.client.hscan_iter('scan_state:checksum')
+                        if hasattr(db.client, 'hscan_iter') else
+                        db.client.hgetall('scan_state:checksum').items())
+            else:
+                rows = ((key, value) for (kind, key), value in db.scan_state.items()
+                        if kind == 'checksum')
+            for key, value in rows:
+                key = key.decode() if isinstance(key, bytes) else key
+                if not key.startswith(prefix):
+                    continue
+                name, slash, _ = key[len(prefix):].partition('/')
+                if slash:
+                    directories.add(name)
+                else:
+                    files[key] = json.loads(value)
+        return files, directories
+
     # DELETE EXACTLY ONE SCANNER RECORD, LEAVING OTHER SCOPES UNTOUCHED [
     def delete(self, kind, key):
         """Delete exactly one scanner record, leaving other scopes untouched."""
@@ -532,6 +573,10 @@ class DriveScanner:
         self.previous_ids = set(self.entries)
         self.remembered = set()
         self.pending_discoveries = {}
+        self.pending_heavy = {}
+        self.prepared_heavy = {}
+        self.heavy_flush_failed = False
+        self.heavy_flush_at = time.monotonic()
         self.discovery_flush_at = time.monotonic()
         self.paths_table_ready = False
         self.current_path = self.path or '/'
@@ -553,7 +598,7 @@ class DriveScanner:
         self.hash_started = None
         self.baseline_known = {}
         self.expert_initialized = False
-        self.checksums = None
+        self.checksum_cache = OrderedDict()
         self.automatic_unknown = set()
         self.trash_loaded = False
         self.mode_counts = [[0, 0] for _ in range(3)]
@@ -690,7 +735,10 @@ class DriveScanner:
     def save_positions(self):
         self.flush_discoveries()
         self.report_activity("Saving resume positions", self.storage_path, force=True)
-        self.store.put('position', self.storage_path, self.checkpoints)
+        if self.pending_heavy:
+            self.flush_heavy(save_position=True)
+        else:
+            self.store.put('position', self.storage_path, self.checkpoints)
     # SAVE POSITIONS FOR DRIVE SCANNER ]
     # SELECT BUCKETS FOR DRIVE SCANNER [
     def select_buckets(self):
@@ -784,17 +832,30 @@ class DriveScanner:
         self.remembered.add(entry.id)
     # PERSIST THE SCANNED FILE ID TO PATH MAPPING ]
     # LOOK UP IMPORTED OR SAVED CHECKSUM BASELINES [
+    def directory_checksums(self, directory):
+        if directory not in self.checksum_cache:
+            self.report_activity('Loading saved checksums for directory', directory, force=True)
+            result = self.store.checksum_directory(directory)
+            self.checksum_cache[directory] = result
+            if len(self.checksum_cache) > 32:
+                self.checksum_cache.popitem(last=False)
+        self.checksum_cache.move_to_end(directory)
+        return self.checksum_cache[directory]
+
     def baseline(self, db, path, *, catalog=None, resolved=False):
         node = catalog if resolved else db.get_root()
         if not resolved:
             for part in path.strip('/').split('/') if path else []:
                 node = db.get_child(node, part) if node else None
         if node is None or (not node.is_dir and not node.info.get('hash') and not node.info.get('hashinfo')):
-            saved = self.checksums.get(path)
+            parent, _, name = path.rpartition('/')
+            files, directories = self.directory_checksums(parent)
+            saved = files.get(path)
             if saved:
                 node = VFSNode(path, path.rsplit('/', 1)[-1], False,
                                size=saved['size'], info={'hash': saved['hash']})
-        node = node or self.checksum_dirs.get(path)
+            elif name in directories:
+                node = VFSNode(path, name, True)
         self.baseline_known[path] = bool(node and (node.is_dir or node.info.get('hash') or
                                                  node.info.get('hashinfo')))
         return node
@@ -810,6 +871,14 @@ class DriveScanner:
     # READ LOCAL FILE METADATA AND CAPTURE ERRORS ]
     # PUBLISH UPDATED FILE STATE TO SCANNER CONSUMERS [
     def publish(self, db, entry, account=True):
+        if isinstance(db, SQLiteDBAdapter) and self.current_mode == 3:
+            self.pending_heavy[entry.id] = (entry, account, self.prepared_heavy.pop(entry.id, None))
+            if len(self.pending_heavy) >= 128 or time.monotonic() - self.heavy_flush_at >= .25:
+                self.flush_heavy()
+            return
+        self.publish_entry(db, entry, account)
+
+    def publish_entry(self, db, entry, account=True, *, persisted=False):
         new = entry.id not in self.entries
         self.entries[entry.id] = entry
         if new and self.current_mode == 2 and self.checkpoints.get('2') is not None:
@@ -819,7 +888,7 @@ class DriveScanner:
             if (len(self.pending_discoveries) >= 1024 or
                     time.monotonic() - self.discovery_flush_at >= 1.):
                 self.flush_discoveries()
-        else:
+        elif not persisted:
             with db.write_transaction() if isinstance(db, SQLiteDBAdapter) else nullcontext():
                 self.remember(db, entry)
                 self.store.put('entry', entry.id, asdict(entry))
@@ -833,6 +902,43 @@ class DriveScanner:
         self.update_priority(entry)
         self.report_stats(path=entry.path, completed_size=entry.size)
     # PUBLISH UPDATED FILE STATE TO SCANNER CONSUMERS ]
+    def flush_heavy(self, *, save_position=False):
+        """Commit completed hashes and states together; never hash or emit under lock."""
+        if not self.pending_heavy:
+            return
+        self.report_activity(f'Saving {len(self.pending_heavy)} checksum results', force=True)
+        db = self.store.db
+        batch = list(self.pending_heavy.values())
+        newly_remembered = {entry.id for entry, _, _ in batch if entry.id not in self.remembered}
+        paths_ready = self.paths_table_ready
+        try:
+            with db.write_transaction():
+                for entry, account, promotion in batch:
+                    if promotion is not None:
+                        digest, size, saved = promotion
+                        if saved is not None:
+                            self.store.put('checksum', entry.path, saved)
+                        db.add_scanned_file(entry.path, digest, size)
+                    self.remember(db, entry)
+                    self.store.put('entry', entry.id, asdict(entry))
+                if save_position:
+                    self.store.put('position', self.storage_path, self.checkpoints)
+        except BaseException:
+            self.heavy_flush_failed = True
+            self.remembered.difference_update(newly_remembered)
+            self.paths_table_ready = paths_ready
+            raise
+        self.heavy_flush_failed = False
+        self.pending_heavy.clear()
+        self.heavy_flush_at = time.monotonic()
+        for entry, account, promotion in batch:
+            if promotion is not None and promotion[2] is not None:
+                cached = self.checksum_cache.get(entry.path.rpartition('/')[0])
+                if cached is not None:
+                    cached[0][entry.path] = promotion[2]
+                self.baseline_known[entry.id] = True
+            self.publish_entry(db, entry, account, persisted=True)
+
     def flush_discoveries(self):
         """Commit a bounded batch without holding a write lock during disk I/O."""
         if not self.pending_discoveries:
@@ -891,6 +997,8 @@ class DriveScanner:
         finally:
             try:
                 self.flush_discoveries()
+                if not self.heavy_flush_failed:
+                    self.flush_heavy()
             finally:
                 self.timing.switch(0)
     # SCAN ONCE FOR DRIVE SCANNER ]
@@ -913,23 +1021,6 @@ class DriveScanner:
             self.checkpoints = self.store.get('position', self.storage_path, {})
         self.current_mode = 0
         self.started = time.monotonic()
-        expert_only = (self.controls.modes == (False, False, True) and
-                       self.controls.heavy_order == 'expert' and
-                       self.controls.startup_mode is None)
-        if self.checksums is None or not expert_only:
-            self.report_activity("Loading saved checksum baselines", self.storage_path, force=True)
-            self.checksums = {path: value for path, value in self.store.items('checksum').items()
-                              if path == self.path or path.startswith(self.path + '/')}
-            self.report_activity("Building checksum directory index", force=True)
-            self.checksum_dirs, self.checksum_children = {}, {}
-            for path in self.checksums:
-                child = path
-                while child != self.path:
-                    parent, _, name = child.rpartition('/')
-                    self.checksum_children.setdefault(parent, set()).add(name)
-                    self.checksum_dirs.setdefault(parent, VFSNode(
-                        parent, parent.rsplit('/', 1)[-1], True))
-                    child = parent
         if self.enabled(1):
             self.begin_mode(1)
             self.emit(('phase', 'Lite — finding paths'))
@@ -1016,10 +1107,12 @@ class DriveScanner:
             self.emit(('entry', replace(entry, progress=0)))
             result = self.verify(entry, baseline, disk_stat, error)
             if self.excluded(path) or self.trashed(path):
+                self.prepared_heavy.pop(path, None)
                 pending.remove(path)
                 self.emit(('entry', replace(old, blacklisted=self.excluded(path), progress=None)))
                 continue
             if not self.enabled(mode):
+                self.prepared_heavy.pop(path, None)
                 first = path
                 self.emit(('entry', old))
                 break
@@ -1119,7 +1212,8 @@ class DriveScanner:
             if not path or is_dir:
                 self.report_activity("Listing catalog children", path)
                 children = {child.name: child for child in db.get_children(baseline)} if baseline and baseline.is_dir else {}
-                for name in self.checksum_children.get(path, ()):
+                saved_files, saved_directories = self.directory_checksums(path)
+                for name in saved_directories | {key.rsplit('/', 1)[-1] for key in saved_files}:
                     children.setdefault(name, self.baseline(db, path + '/' + name))
                 names = set(children)
                 enumerated = False
@@ -1170,6 +1264,7 @@ class DriveScanner:
     # VERIFY METADATA FOR DRIVE SCANNER ]
     # VERIFY FILE CONTENTS AGAINST CHECKSUM BASELINES [
     def verify(self, entry, baseline, disk_stat, error):
+        self.prepared_heavy.pop(entry.id, None)
         if entry.is_dir:
             return replace(entry, state='directory', progress=None)
         if self.current_mode == 2:
@@ -1227,16 +1322,20 @@ class DriveScanner:
             digest = algorithm + ':' + hasher.hexdigest()
             verified = add_checksum or hasher.hexdigest().lower() == expected.lower()
             db = self.store.db
-            # Hash reads and progress events happen before taking a write lock.
-            with db.write_transaction() if isinstance(db, SQLiteDBAdapter) else nullcontext():
-                if add_checksum:
-                    saved = {'size': after.st_size, 'hash': digest}
+            saved = {'size': after.st_size, 'hash': digest} if add_checksum else None
+            if isinstance(db, SQLiteDBAdapter):
+                if verified:
+                    self.prepared_heavy[entry.id] = (digest, after.st_size, saved)
+            else:
+                if saved is not None:
                     self.store.put('checksum', entry.path, saved)
                 if verified:
                     db.add_scanned_file(entry.path, digest, after.st_size)
-            if add_checksum:
-                self.checksums[entry.path] = saved
-                self.baseline_known[entry.id] = True
+                if saved is not None:
+                    cached = self.checksum_cache.get(entry.path.rpartition('/')[0])
+                    if cached is not None:
+                        cached[0][entry.path] = saved
+                    self.baseline_known[entry.id] = True
             return replace(entry, state='verified' if verified else 'modified')
         except (OSError, ValueError) as exc:
             return replace(entry, state='unknown', error=str(exc))

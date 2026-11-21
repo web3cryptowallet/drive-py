@@ -11,6 +11,82 @@ spec.loader.exec_module(tui)
 
 
 class DirectorySymbolsTests(unittest.TestCase):
+    def test_completed_directory_renders_settled_color_without_navigation(self):
+        import tempfile
+        from prompt_toolkit.input import DummyInput
+        from prompt_toolkit.output import DummyOutput
+        from vfs import VirtualFS
+        from vfs.scanner import ScanEntry, ScanStats
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / 'folder'
+            folder.mkdir()
+            browser = tui.DriveBrowser(VirtualFS({'files': {}}), path=directory,
+                                       input=DummyInput(), output=DummyOutput())
+            scanner = tui.ScannerView(browser, startup=False)
+            browser.scanners = [scanner]
+            path = str(folder / 'file')
+            index = next(i for i, row in enumerate(browser.rows) if row['name'] == 'folder')
+            browser.rows[index]['indicator'] = 'orange'
+            scanner.model.update(ScanEntry(path, path, False, state='unknown'))
+            scanner.stats = ScanStats(path=path, active=True)
+            browser.refresh_scan_symbols()
+            active = browser.control.create_content(80, 10).get_line(index)[0]
+            self.assertIn('fg:#ffd700', active[0])
+            scanner.model.update(ScanEntry(path, path, False, state='verified'))
+            scanner.events.put(('stats', ScanStats(path=path, active=False)))
+            scanner.drain_all()
+            settled = browser.control.create_content(80, 10).get_line(index)[0]
+            self.assertEqual(settled[1], '●')
+            self.assertIn('class:green', settled[0])
+            self.assertNotIn('fg:#ffd700', settled[0])
+            for state, symbol, color in [('modified', 'M', 'orange'), ('missing', 'U', 'red')]:
+                scanner.model.update(ScanEntry(path, path, False, state=state))
+                browser.refresh_scan_symbols()
+                marker = browser.control.create_content(80, 10).get_line(index)[0]
+                self.assertEqual(marker[1], symbol)
+                self.assertIn('class:' + color, marker[0])
+            browser.scanners = []
+            browser.refresh_scan_symbols()
+            self.assertNotIn('scan_color', browser.rows[index])
+
+    def test_pass_completion_refreshes_folder_summary_without_navigation(self):
+        from queue import Queue
+        from vfs.scanner import ScanStats
+        view = object.__new__(tui.ScannerView)
+        view.events = Queue()
+        view.browser = Mock()
+        view.stats = ScanStats(active=True)
+        view.events.put(('stats', ScanStats(active=True)))
+        view.events.put(('stats', ScanStats(active=False)))
+        view.events.put(('stats', ScanStats(active=False)))
+        view.drain_all()
+        view.browser.refresh_scan_symbols.assert_called_once_with()
+
+    def test_completed_file_marker_uses_live_result_color(self):
+        from vfs.scanner import ScanEntry
+        browser = object.__new__(tui.DriveBrowser)
+        scanner = NS(closing=False, paused_modes=None,
+                     controls=NS(modes=(False, False, True)),
+                     stats=NS(active=True, path='/scan/file'),
+                     model=NS(entries={}))
+        browser.scanners = [scanner]
+        row = dict(node=NS(id='/scan/file', is_dir=False), name='file',
+                   label='● 📄 file', indicator='orange')
+        scanner.model.entries[row['node'].id] = ScanEntry(
+            '/scan/file', '/scan/file', False, state='verified')
+        browser.scan_row_marker(row)
+        self.assertTrue(row['scan_active'])
+        scanner.stats.active = False
+        self.assertEqual(browser.scan_row_marker(row), '●')
+        self.assertFalse(row['scan_active'])
+        self.assertEqual(row['indicator'], 'green')
+        for state, expected in [('modified', 'orange'), ('missing', 'red'),
+                                ('unknown', 'white')]:
+            scanner.model.entries[row['node'].id] = ScanEntry(
+                '/scan/file', '/scan/file', False, state=state)
+            browser.scan_row_marker(row)
+            self.assertEqual(row['indicator'], expected)
+
     def test_heavy_circle_is_gold_but_settled_empty_dot_is_green(self):
         import tempfile
         from prompt_toolkit.input import DummyInput
@@ -37,6 +113,13 @@ class DirectorySymbolsTests(unittest.TestCase):
             self.assertEqual(settled[1], '·')
             self.assertIn('class:green', settled[0])
             self.assertNotIn('fg:#ffd700', settled[0])
+            scanner.stats.active = True
+            scanner.controls.modes = (False, True, False)
+            with patch.object(tui.time, 'monotonic', return_value=0):
+                medium = browser.control.create_content(80, 10).get_line(index)[0]
+            self.assertEqual(medium[1], '\\')
+            self.assertIn('fg:#af5fff', medium[0])
+
 
     def test_heavy_rotating_frames_in_files_and_map_keep_colors_and_width(self):
         from vfs.scanner import FileMap, ScanEntry
@@ -86,13 +169,13 @@ class DirectorySymbolsTests(unittest.TestCase):
                                controls=NS(modes=(False, False, False)),
                                stats=NS(active=False, path=''))]
         browser.refresh_scan_symbols()
-        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '?')
+        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '●')
         self.assertEqual(browser.rows[0]['indicator'], 'orange')
         self.assertNotIn('scan_color', browser.rows[0])
         self.assertEqual(browser.scan_row_marker(browser.rows[1]), 'M')
         self.assertEqual(browser.scan_row_marker(browser.rows[2]), '●')
         entries['a'].state = 'verified'
-        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '?')
+        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '●')
         browser.refresh_scan_symbols()
         self.assertEqual(browser.scan_row_marker(browser.rows[0]), '●')
         entries['a'].blacklisted = True
@@ -123,26 +206,26 @@ class DirectorySymbolsTests(unittest.TestCase):
                 self.assertEqual(browser.scan_row_marker(row), symbol)
                 self.assertEqual(len(symbol), 1)
             scanner.stats.path = '/scan/ab/file'
-            self.assertEqual(browser.scan_row_marker(row), '?')
+            self.assertEqual(browser.scan_row_marker(row), row['label'][0])
             scanner.stats.path = '/scan/a'
             self.assertEqual(browser.scan_row_marker(row), '-')
             scanner.paused_modes = (True, False, False)
-            self.assertEqual(browser.scan_row_marker(row), '?')
+            self.assertEqual(browser.scan_row_marker(row), row['label'][0])
             scanner.paused_modes = None
             scanner.stats.active = False
-            self.assertEqual(browser.scan_row_marker(row), '?')
+            self.assertEqual(browser.scan_row_marker(row), row['label'][0])
             scanner.stats.active = True
             scanner.closing = True
-            self.assertEqual(browser.scan_row_marker(row), '?')
+            self.assertEqual(browser.scan_row_marker(row), row['label'][0])
             scanner.closing = False
             scanner.controls.modes = (False, False, False)
-            self.assertEqual(browser.scan_row_marker(row), '?')
+            self.assertEqual(browser.scan_row_marker(row), row['label'][0])
             scanner.controls.modes = (True, False, False)
             row['name'] = '..'
             self.assertEqual(browser.scan_row_marker(row), '●')
         self.assertEqual(row['indicator'], 'green')
 
-    def test_file_rows_use_exact_scan_state_and_keep_circle_color(self):
+    def test_file_rows_use_exact_scan_state_and_color(self):
         browser = object.__new__(tui.DriveBrowser)
         browser.rows = [dict(node=NS(id=path, is_dir=False), name=path.rsplit('/', 1)[-1],
                              label='● 📄 file', indicator='green')
@@ -152,19 +235,20 @@ class DirectorySymbolsTests(unittest.TestCase):
                      controls=NS(modes=(False, False, False)), stats=NS(active=False, path=''))
         browser.scanners = [scanner]
         browser.refresh_scan_symbols()
-        self.assertEqual([browser.scan_row_marker(row) for row in browser.rows], ['?', '●', '●'])
+        self.assertEqual([browser.scan_row_marker(row) for row in browser.rows], ['●', '●', '●'])
         for state, symbol in (('modified', 'M'), ('missing', 'U'), ('verified', '●')):
             entry.state = state
             browser.refresh_scan_symbols()
             self.assertEqual(browser.scan_row_marker(browser.rows[0]), symbol)
-            self.assertEqual(browser.rows[0]['indicator'], 'green')
+            self.assertEqual(browser.rows[0]['indicator'],
+                             {'modified': 'orange', 'missing': 'red', 'verified': 'green'}[state])
         entry.state = 'unknown'
-        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '?')
+        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '●')
         scanner.close = lambda: tui.ScannerView.close(scanner)
         scanner.browser = browser
         browser.pop = Mock()
         scanner.close()
-        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '?')
+        self.assertEqual(browser.scan_row_marker(browser.rows[0]), '●')
 
     def test_live_file_state_and_rotation_without_reload(self):
         browser = object.__new__(tui.DriveBrowser)
@@ -175,7 +259,7 @@ class DirectorySymbolsTests(unittest.TestCase):
         browser.scanners = [scanner]
         row = dict(node=NS(id='/scan/file', is_dir=False), name='file',
                    label='● 📄 file', indicator='orange')
-        self.assertEqual(browser.scan_row_marker(row), '?')
+        self.assertEqual(browser.scan_row_marker(row), row['label'][0])
         entry.state = 'modified'
         self.assertEqual(browser.scan_row_marker(row), 'M')
         scanner.stats.active = True
@@ -188,7 +272,7 @@ class DirectorySymbolsTests(unittest.TestCase):
             self.assertEqual(browser.scan_row_marker(row), 'M')
         entry.state = 'verified'
         self.assertEqual(browser.scan_row_marker(row), '●')
-        self.assertEqual(row['indicator'], 'orange')
+        self.assertEqual(row['indicator'], 'green')
 
     def test_row_change_defers_work_and_redraws_immediately(self):
         browser = object.__new__(tui.DriveBrowser)

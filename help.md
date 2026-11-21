@@ -522,3 +522,26 @@ The scan popup shows the current worker operation and path, elapsed time in that
 step, and two recent activity messages. Before map paths appear, this identifies
 saved-state loading, catalog lookups, directory enumeration or database writes.
 Recent messages are sampled; a slow operation retains its current step and timer.
+
+After file scanning, the marker uses the live result: green for verified, orange
+for modified, red for missing and white for new/unverified. Active scan rotation
+is purple in Mode 2 (Medium), and gold in Lite and Heavy.
+
+Saved checksums load on demand per directory, with up to 32 directories cached
+by the worker across passes. The popup identifies the directory being loaded.
+SQLite filters by path in the database; missing checksum-only descendants remain
+visible to discovery. Large directory subtrees may still require a key scan.
+
+When rotation ends, unverified Files rows use the normal file-list marker instead
+of the map's `?`. Modified/missing and other specific results keep their symbols.
+Folder summaries refresh when a scan pass finishes, without directory navigation.
+
+Mode 3 groups SQLite checksum and scan-state writes in batches of up to 128 files,
+flushing after 0.25 seconds at file-completion boundaries and at bucket/pass end
+or stop. File reads stay outside write transactions. Completed markers and
+catalog/duplicate updates appear after the batch commits; hashing progress stays
+live. This reduces database commit overhead for small files.
+
+Completed directory summaries keep their result color: green for verified/empty,
+orange for modified and red for missing. The settled symbol and color refresh
+together after scanning; active rotation retains its stage color.

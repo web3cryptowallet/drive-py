@@ -22,7 +22,7 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
         return scanner, controls
     # SCANNER FOR EXPERT SQLITE TRANSACTION TESTS ]
     # VERIFY NEW FILES USE TWO COMMITS AND EVENTS RUN WITHOUT WRITE LOCK [
-    def test_new_files_use_two_commits_and_events_run_without_write_lock(self):
+    def test_single_file_buckets_combine_result_and_checkpoint_commit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             files = [root / str(index) for index in range(4)]
@@ -47,7 +47,7 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
                     for _ in files:
                         scanner.scan_once(fs.db)
                 commits = sum(sql == 'COMMIT' for sql in statements)
-                self.assertEqual(commits, 2 * len(files) + 1)  # One final checkpoint.
+                self.assertEqual(commits, len(files))  # Result and resume position share a commit.
                 self.assertEqual(scanner.paths, len(files))
                 self.assertTrue(all(entry.state == 'verified' for entry in scanner.entries.values()))
                 self.assertEqual(controls.selected_buckets, ())
@@ -64,6 +64,79 @@ class ExpertSQLiteTransactionTests(unittest.TestCase):
             finally:
                 reopened.db.conn.close()
     # VERIFY NEW FILES USE TWO COMMITS AND EVENTS RUN WITHOUT WRITE LOCK ]
+    def test_many_small_files_share_commits_without_io_or_events_under_lock(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = [root / str(index) for index in range(257)]
+            for file in files:
+                file.write_bytes(b'small file')
+            fs = VirtualFS(None, 'sqlite', db_path=str(root / 'cache.sqlite'))
+            try:
+                scanner, _ = self.scanner(fs, directory, files,
+                    buckets=(tuple(str(file) for file in files),))
+                statements = []
+                fs.db.conn.set_trace_callback(statements.append)
+                original_open = os.open
+                original_emit = scanner.emit
+
+                def open_file(*args, **kwargs):
+                    self.assertFalse(fs.db.conn.in_transaction)
+                    return original_open(*args, **kwargs)
+
+                def emit(event):
+                    self.assertFalse(fs.db.conn.in_transaction)
+                    if event[0] == 'entry' and event[1].state == 'verified':
+                        self.assertIsNotNone(fs.db.conn.execute(
+                            'SELECT 1 FROM nodes WHERE id=?', (event[1].path,)).fetchone())
+                        self.assertEqual(ScanStore(fs.db).get('entry', event[1].id)['state'], 'verified')
+                    original_emit(event)
+
+                with patch('vfs.scanner.os.open', side_effect=open_file), \
+                        patch.object(scanner, 'emit', side_effect=emit), \
+                        patch('vfs.scanner.time.monotonic', return_value=100.):
+                    scanner.scan_once(fs.db)
+                self.assertLessEqual(sum(sql == 'COMMIT' for sql in statements), 4)
+                self.assertEqual(scanner.paths, len(files))
+                self.assertFalse(scanner.pending_heavy)
+                self.assertEqual(fs.db.conn.execute(
+                    "SELECT COUNT(*) FROM scan_state WHERE kind='checksum'").fetchone()[0], len(files))
+                self.assertEqual(fs.db.conn.execute(
+                    "SELECT COUNT(*) FROM scan_state WHERE kind='entry'").fetchone()[0], len(files))
+            finally:
+                fs.db.conn.close()
+
+    def test_failed_batch_rolls_back_catalog_checksums_and_states(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = [root / str(index) for index in range(2)]
+            for file in files:
+                file.write_bytes(b'abc')
+            fs = VirtualFS(None, 'sqlite', db_path=str(root / 'cache.sqlite'))
+            try:
+                scanner, _ = self.scanner(fs, directory, files,
+                    buckets=(tuple(str(file) for file in files),))
+                original_add = fs.db.add_scanned_file
+
+                def fail_second(path, *args):
+                    if path == str(files[1]):
+                        raise ValueError('batch failure')
+                    return original_add(path, *args)
+
+                with patch.object(fs.db, 'add_scanned_file', side_effect=fail_second), \
+                        patch('vfs.scanner.time.monotonic', return_value=100.):
+                    with self.assertRaisesRegex(ValueError, 'batch failure'):
+                        scanner.scan_once(fs.db)
+                self.assertFalse(fs.db.conn.in_transaction)
+                self.assertFalse(scanner.remembered)
+                for file in files:
+                    self.assertIsNone(ScanStore(fs.db).get('checksum', str(file)))
+                    self.assertIsNone(ScanStore(fs.db).get('entry', str(file)))
+                    self.assertIsNone(fs.db.conn.execute(
+                        'SELECT 1 FROM nodes WHERE id=?', (str(file),)).fetchone())
+            finally:
+                fs.db.conn.close()
+
     # VERIFY NESTED METADATA WRITES ROLLBACK TOGETHER [
     def test_nested_metadata_writes_rollback_together(self):
         with tempfile.TemporaryDirectory() as directory:

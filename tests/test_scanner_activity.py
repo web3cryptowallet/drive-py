@@ -35,7 +35,7 @@ class ScannerActivityTests(unittest.TestCase):
                 kind, payload = scanner.events.get_nowait()
                 if kind == 'activity':
                     messages.append(payload)
-            self.assertTrue(any('Loading saved checksum baselines' in m for m in messages))
+            self.assertTrue(any('Loading saved checksums for directory' in m for m in messages))
             self.assertEqual(messages[-1], 'Scan pass complete')
 
     def test_log_is_throttled_but_current_step_is_not(self):

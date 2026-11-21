@@ -750,8 +750,8 @@ class FilesControl(UIControl):
             label = (fit(label[:-2], max(0, name_width - 2)) + ' ↗') if label.endswith(' ↗') and name_width >= 2 else fit(label, name_width)
             fragments = []
             if label and (browser.display_mode != 3 or 'scan_symbol' in row or label[0] != row['label'][0]):
-                marker_style = (' fg:#ffd700' if row.get('scan_active', False) else
-                                ' class:' + ('green' if label[0] == '·' else row['indicator']))
+                marker_style = (' fg:' + row.get('scan_activity_color', '#ffd700') if row.get('scan_active', False) else
+                                ' class:' + ('green' if label[0] == '·' else row.get('scan_color', row['indicator'])))
                 fragments.append((base + marker_style, label[0]))
                 fragments.extend(browser.exclusion_label(name_style, label[1:], marked, row))
             else:
@@ -2967,20 +2967,28 @@ class DriveBrowser:
                 if entry is not None:
                     symbol = '!' if entry.blacklisted else SCAN_STATES.get(
                         entry.state, SCAN_STATES['unknown'])[0]
+                    # Match the settled marker color to the live scan result,
+                    # rather than the listing's pre-scan 'new' status.
+                    row['indicator'] = {
+                        'verified': 'green', 'modified': 'orange',
+                        'missing': 'red', 'unknown': 'white', 'new': 'white',
+                    }.get(entry.state, row.get('indicator', 'white'))
             if (scanner.closing or scanner.paused_modes is not None
                     or not any(scanner.controls.modes) or not scanner.stats.active):
                 continue
             path = normalize_bookmark_path(scanner.stats.path).rstrip('/')
             if path == target or (node.is_dir and path.startswith(target + '/')):
                 row['scan_active'] = True
+                row['scan_activity_color'] = '#af5fff' if scan_activity_mode(scanner) == 2 else '#ffd700'
                 return scan_activity_frame(scanner, time.monotonic())
-        return symbol
+        return row['label'][0] if symbol == '?' else symbol
 
     def refresh_scan_symbols(self):
         """Snapshot map states once per reload, never in the redraw loop."""
         targets = {}
         for row in self.rows:
             row.pop('scan_symbol', None)
+            row.pop('scan_color', None)
             if row['name'] != '..':
                 targets[normalize_bookmark_path(row['node'].id).rstrip('/')] = row
         masks = dict.fromkeys(targets, 0)
@@ -3010,6 +3018,11 @@ class DriveBrowser:
                 if not any(entry is not None and entry.state == 'empty' for entry in exact):
                     symbol = 'D'
             targets[path]['scan_symbol'] = symbol
+            if targets[path]['node'].is_dir and state in ('verified', 'empty', 'modified', 'missing'):
+                targets[path]['scan_color'] = {
+                    'verified': 'green', 'empty': 'green',
+                    'modified': 'orange', 'missing': 'red',
+                }[state]
 
     # SCAN ROW STYLE [
     def scan_row_style(self, row):
@@ -5706,12 +5719,18 @@ class ActionsView(PTScreen):
     # APPLY ACTIONS VIEW ]
 # REVIEW EXPORT AND APPLY QUEUED FILE OPERATIONS ]
 # DEFINE SCAN STATE SYMBOLS COLORS AND LABELS [
-def scan_activity_frame(scanner, now):
-    """Use circular rotation for Heavy and line rotation for other stages."""
+def scan_activity_mode(scanner):
+    """Prefer the running worker stage over enabled-mode fallback."""
     mode = getattr(getattr(scanner, 'engine', None), 'current_mode', 0)
     if not mode:
         modes = getattr(getattr(scanner, 'controls', None), 'modes', ())
         mode = next((index for index, enabled in enumerate(modes, 1) if enabled), 0)
+    return mode
+
+
+def scan_activity_frame(scanner, now):
+    """Use circular rotation for Heavy and line rotation for other stages."""
+    mode = scan_activity_mode(scanner)
     frames = ('◐', '◓', '◑', '◒') if mode == 3 else ('\\', '|', '/', '-')
     return frames[int(now * 8) % len(frames)]
 
@@ -6313,7 +6332,10 @@ class ScannerView(PTScreen):
                 self.refresh_colors()
                 dirty_buckets.clear()
             elif kind == 'stats':
+                finished = self.stats.active and not payload.active
                 self.stats = payload
+                if finished:
+                    self.browser.refresh_scan_symbols()
             elif kind == 'expert':
                 self.phase = 'Heavy expert — processing selected bucket'
             elif kind == 'activity':
