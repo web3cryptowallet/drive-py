@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
-from vfs.video_preview import _decode_audio
+from vfs.video_preview import _decode_audio, audio_only_container
 # IMPORT TEST AUDIO PLAYBACK DEPENDENCIES ]
 # PREPARE TEST AUDIO PLAYBACK SHARED STATE [
 spec = importlib.util.spec_from_file_location('audio_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
@@ -25,6 +25,17 @@ spec.loader.exec_module(tui)
 # PREPARE TEST AUDIO PLAYBACK SHARED STATE ]
 # VERIFY AUDIO DECODER BEHAVIOR [
 class AudioDecoderTests(unittest.TestCase):
+    def test_audio_only_video_container_detection(self):
+        for streams, expected in [(['audio', 'data'], True),
+                                  (['audio', 'video'], False), (['video'], False), ([], False)]:
+            import json
+            result = SimpleNamespace(stdout=json.dumps({'streams': [{'codec_type': kind} for kind in streams]}))
+            with patch('vfs.video_preview.subprocess.run', return_value=result):
+                self.assertEqual(audio_only_container('/music/song.mp4'), expected)
+        with patch('vfs.video_preview.subprocess.run', side_effect=FileNotFoundError):
+            self.assertFalse(audio_only_container('/movie.mp4'))
+            self.assertTrue(audio_only_container('/song.mp3'))
+
     # VERIFY REAL MP3 DECODE TO EOF WITH NULL AUDIO OUTPUT [
     @unittest.skipUnless(ctypes.util.find_library('mpv') and shutil.which('ffmpeg'),
                          'Requires libmpv and ffmpeg')
@@ -33,7 +44,7 @@ class AudioDecoderTests(unittest.TestCase):
 import ctypes.util
 import sys
 import mpv
-from vfs.video_preview import _decode_audio
+from vfs.video_preview import _decode_audio, audio_only_container
 original = mpv.MPV.__init__
 def init(self, **options):
     options['ao'] = 'null'
@@ -61,9 +72,15 @@ assert connection.events[-1][0] == 'end', connection.events
             subprocess.run([shutil.which('ffmpeg'), '-nostdin', '-v', 'error', '-f', 'lavfi',
                             '-i', 'sine=frequency=440:duration=0.7', '-c:a', 'libmp3lame', str(path)],
                            check=True, capture_output=True, timeout=20)
-            result = subprocess.run([sys.executable, '-c', code, str(path)],
-                                    capture_output=True, text=True, timeout=20)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            audio_mp4 = Path(directory) / 'audio-only.mp4'
+            subprocess.run([shutil.which('ffmpeg'), '-nostdin', '-v', 'error', '-f', 'lavfi',
+                            '-i', 'sine=frequency=440:duration=0.7', '-c:a', 'aac', str(audio_mp4)],
+                           check=True, capture_output=True, timeout=20)
+            self.assertTrue(audio_only_container(str(audio_mp4)))
+            for source in (path, audio_mp4):
+                result = subprocess.run([sys.executable, '-c', code, str(source)],
+                                        capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
     # VERIFY REAL MP3 DECODE TO EOF WITH NULL AUDIO OUTPUT ]
     # VERIFY AUDIO PROGRESS SEEK EOF AND NO VIDEO RENDERER [
     def test_audio_progress_seek_eof_and_no_video_renderer(self):
@@ -84,6 +101,17 @@ assert connection.events[-1][0] == 'end', connection.events
         player.terminate.assert_called_once()
         connection.close.assert_called_once()
     # VERIFY AUDIO PROGRESS SEEK EOF AND NO VIDEO RENDERER ]
+    def test_mute_initial_state_and_live_command(self):
+        player = SimpleNamespace(play=Mock(), terminate=Mock(), time_pos=1., duration=2., idle_active=True)
+        factory = Mock(return_value=player)
+        connection = Mock()
+        connection.poll.side_effect = [True, False]
+        connection.recv.return_value = ('mute', False)
+        with patch.dict('sys.modules', mpv=SimpleNamespace(MPV=factory)), patch('vfs.video_preview.os.dup2'):
+            _decode_audio('/song.mp3', (2, 2), connection, 'libmpv.so', muted=True)
+        self.assertTrue(factory.call_args.kwargs['mute'])
+        self.assertFalse(player.mute)
+
     # VERIFY AUDIO STOP AND STARTUP ERROR CLEANUP [
     def test_audio_stop_and_startup_error_cleanup(self):
         player = Mock()
@@ -105,6 +133,25 @@ assert connection.events[-1][0] == 'end', connection.events
 # VERIFY AUDIO DECODER BEHAVIOR ]
 # VERIFY AUDIO UI BEHAVIOR [
 class AudioUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_progress_hides_video_area_for_mp4(self):
+        with create_pipe_input() as pipe, tempfile.TemporaryDirectory() as directory:
+            browser = tui.DriveBrowser(VirtualFS({'files': {}}), path=directory,
+                                       input=pipe, output=DummyOutput())
+            browser.video_path = '/music/audio-only.mp4'
+            self.assertFalse(browser.audio_selected())
+            player = SimpleNamespace(events=Queue(), close=Mock())
+            player.events.put(('progress', (2., 3600.)))
+            player.events.put(('end', None))
+            browser.video_player = player
+            browser.video_status = 'Starting…'
+            browser.native_preview = ('old poster', (2, 2), 0)
+            await browser.receive_video(player)
+            self.assertTrue(browser.audio_selected())
+            self.assertIsNone(browser.native_preview)
+            self.assertEqual(browser.video_position, 2.)
+            self.assertEqual(browser.video_status, 'Finished')
+            player.close.assert_called_once()
+
     # VERIFY MP3 EXPLICIT PLAY PROGRESS SEEK STOP [
     async def test_mp3_explicit_play_progress_seek_stop(self):
         with create_pipe_input() as pipe:

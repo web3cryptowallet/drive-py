@@ -6,6 +6,7 @@ from threading import Event
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from vfs import VirtualFS
 from vfs.scanner import DriveScanner, ScanStore
@@ -30,6 +31,65 @@ class FakeRedis:
 # MANAGE FAKE REDIS ]
 # VERIFY SCANNER WRITE BEHAVIOR [
 class ScannerWriteTests(unittest.TestCase):
+    def test_lite_batches_commits_and_flushes_on_stop(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel), tempfile.TemporaryDirectory() as directory:
+                disk = Path(directory) / 'disk'
+                disk.mkdir()
+                for index in range(130):
+                    (disk / str(index)).write_text('abc')
+                fs = VirtualFS(None, 'sqlite', db_path=str(Path(directory) / 'cache.sqlite'))
+                try:
+                    scanner = DriveScanner(fs.db, str(disk), Queue(), Event())
+                    statements = []
+                    fs.db.conn.set_trace_callback(statements.append)
+                    publish = scanner.publish
+
+                    def publish_and_stop(*args, **kwargs):
+                        publish(*args, **kwargs)
+                        if cancel and scanner.paths == 5:
+                            scanner.stop.set()
+
+                    scanner.publish = publish_and_stop
+                    with patch('vfs.scanner.time.monotonic', return_value=100.):
+                        scanner.scan_once(fs.db)
+                    commits = sum(sql == 'COMMIT' for sql in statements)
+                    self.assertLessEqual(commits, 5, statements)
+                    self.assertEqual(scanner.paths, 5 if cancel else 131)
+                    self.assertFalse(scanner.pending_discoveries)
+                    self.assertEqual(fs.db.conn.execute('SELECT COUNT(*) FROM scan_paths').fetchone()[0], scanner.paths)
+                    self.assertEqual(fs.db.conn.execute("SELECT COUNT(*) FROM scan_state WHERE kind='entry'").fetchone()[0], scanner.paths)
+                    self.assertFalse(fs.db.conn.in_transaction)
+                finally:
+                    fs.db.conn.close()
+
+    def test_lite_reuses_directory_catalog_and_batches_record_lookups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            disk = Path(directory) / 'disk'
+            disk.mkdir()
+            for index in range(512):
+                (disk / str(index)).write_text('abc')
+            fs = VirtualFS(None, 'sqlite', db_path=str(Path(directory) / 'cache.sqlite'))
+            try:
+                statements = []
+                fs.db.conn.set_trace_callback(statements.append)
+                scanner = DriveScanner(fs.db, str(disk), Queue(), Event())
+                with patch.object(fs.db, 'get_root', wraps=fs.db.get_root) as root_lookup:
+                    scanner.scan_once(fs.db)
+                # Missing catalog parents are resolved once, not for each file.
+                self.assertEqual(root_lookup.call_count, 1)
+                self.assertEqual(scanner.paths, 513)
+                selects = [sql for sql in statements if sql.startswith('SELECT')]
+                self.assertLess(len(selects), 550)
+                # A second pass must still compare/reuse saved states without
+                # rewriting unchanged entries or path mappings.
+                statements.clear()
+                scanner.scan_once(fs.db)
+                self.assertFalse(any(sql.startswith('INSERT') and
+                    ('scan_paths' in sql or "'entry'" in sql) for sql in statements))
+            finally:
+                fs.db.conn.close()
+
     # VERIFY SQLITE STORE SKIPS EQUAL AND LEGACY JSON AFTER REOPEN [
     def test_sqlite_store_skips_equal_and_legacy_json_after_reopen(self):
         with tempfile.TemporaryDirectory() as directory:

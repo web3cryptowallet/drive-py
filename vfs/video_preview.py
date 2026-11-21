@@ -11,6 +11,19 @@ import time
 
 from .thumbnails import AUDIO_SUFFIXES
 # IMPORT VIDEO PREVIEW DEPENDENCIES ]
+def audio_only_container(path):
+    """Recognize audio-only media even when its filename has a video suffix."""
+    if os.path.splitext(path)[1].lower() in AUDIO_SUFFIXES:
+        return True
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type',
+             '-of', 'json', path], capture_output=True, text=True, timeout=10, check=True)
+        kinds = {stream.get('codec_type') for stream in json.loads(result.stdout).get('streams', [])}
+        return 'audio' in kinds and 'video' not in kinds
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
 # READ THE DISPLAY MATRIX WITHOUT LIBMPVS FAILING SOFTWARE AUTO-ROTATION [
 def video_rotation_filter(path):
     """Read the display matrix without libmpv's failing software auto-rotation."""
@@ -33,7 +46,7 @@ def video_rotation_filter(path):
         return ''
 # READ THE DISPLAY MATRIX WITHOUT LIBMPVS FAILING SOFTWARE AUTO-ROTATION ]
 # DECODE FOR THE VIDEO PREVIEW WORKFLOW [
-def _decode(path, size, connection, library):
+def _decode(path, size, connection, library, muted=False):
     # A native assertion must not kill the TUI or write into its terminal.
     with open(os.devnull, 'w') as sink:
         os.dup2(sink.fileno(), 2)
@@ -54,7 +67,7 @@ def _decode(path, size, connection, library):
         stride = ctypes.c_size_t(width * 4)
         pixels = ctypes.create_string_buffer(width * height * 4)
         rotation_filter = video_rotation_filter(path)
-        player = mpv.MPV(vo='libmpv', idle=True, keep_open=False,
+        player = mpv.MPV(vo='libmpv', idle=True, keep_open=False, mute=muted,
                          input_default_bindings=False, input_vo_keyboard=False,
                          osc=False, config=False, load_scripts=False, hwdec='no', vd_lavc_dr=False, video_rotate='no',
                          vf=f'lavfi=[{rotation_filter}scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1]')
@@ -70,6 +83,8 @@ def _decode(path, size, connection, library):
                     return
                 if command == 'seek':
                     pending_seek = value
+                if command == 'mute':
+                    player.mute = bool(value)
             if pending_seek is not None and player.time_pos is not None:
                 player.command('seek', pending_seek, 'absolute+exact')
                 pending_seek = None
@@ -105,7 +120,7 @@ def _decode(path, size, connection, library):
         connection.close()
 # DECODE FOR THE VIDEO PREVIEW WORKFLOW ]
 # PLAY AUDIO WITHOUT ALLOCATING A SOFTWARE VIDEO RENDERER [
-def _decode_audio(path, size, connection, library):
+def _decode_audio(path, size, connection, library, muted=False):
     """Play audio without allocating a software video renderer."""
     with open(os.devnull, 'w') as sink:
         os.dup2(sink.fileno(), 2)
@@ -118,7 +133,7 @@ def _decode_audio(path, size, connection, library):
             import mpv
         finally:
             ctypes.util.find_library = original
-        player = mpv.MPV(vo='null', vid='no', idle=True, keep_open=False,
+        player = mpv.MPV(vo='null', vid='no', idle=True, keep_open=False, mute=muted,
                          input_default_bindings=False, input_vo_keyboard=False,
                          osc=False, config=False, load_scripts=False)
         player.play(path)
@@ -132,6 +147,8 @@ def _decode_audio(path, size, connection, library):
                     return
                 if command == 'seek':
                     pending_seek = value
+                if command == 'mute':
+                    player.mute = bool(value)
             position, duration = player.time_pos, player.duration
             if pending_seek is not None and position is not None:
                 player.command('seek', pending_seek, 'absolute+exact')
@@ -166,6 +183,8 @@ class VideoPreview:
         self.pixels = tuple(max(2, int(value) // 2 * 2) for value in pixels)
         self.stop = Event()
         self.seeks = Queue(maxsize=1)
+        self.muted = False
+        self.mutes = Queue(maxsize=1)
         self.events = Queue(maxsize=2)
         self.thread = Thread(target=self.run, name='drive-video-preview', daemon=True)
     # INITIALIZE VIDEO PREVIEW ]
@@ -196,6 +215,14 @@ class VideoPreview:
     # CLOSE VIDEO PREVIEW [
     def close(self):
         self.stop.set()
+
+    def set_muted(self, muted):
+        self.muted = bool(muted)
+        try:
+            self.mutes.get_nowait()
+        except Empty:
+            pass
+        self.mutes.put_nowait(self.muted)
     # CLOSE VIDEO PREVIEW ]
     # RUN VIDEO PREVIEW [
     def run(self):
@@ -205,13 +232,17 @@ class VideoPreview:
             from PIL import Image
             spawn = multiprocessing.get_context('spawn')
             connection, child = spawn.Pipe()
-            decode = _decode_audio if os.path.splitext(self.path)[1].lower() in AUDIO_SUFFIXES else _decode
+            decode = _decode_audio if audio_only_container(self.path) else _decode
             process = spawn.Process(target=decode,
-                                    args=(self.path, self.pixels, child, mpv.backend._name), daemon=True)
+                                    args=(self.path, self.pixels, child, mpv.backend._name, self.muted), daemon=True)
             process.start()
             child.close()
             ended = False
             while not self.stop.is_set():
+                try:
+                    connection.send(('mute', self.mutes.get_nowait()))
+                except Empty:
+                    pass
                 try:
                     target = self.seeks.get_nowait()
                     connection.send(('seek', target))

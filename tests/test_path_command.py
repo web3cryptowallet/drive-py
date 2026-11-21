@@ -52,6 +52,8 @@ class PathCommandTests(unittest.IsolatedAsyncioTestCase):
                 view = b.screen_stack[-1][0]
                 self.assertEqual(view.history_paths, [str(child / 'cat.jpg')])
                 from vfs.action_history import ActionHistory
+                await wait_for(lambda: any(e['action'] == 'path command' and e['path'] == str(child / 'cat.jpg')
+                                          for e in ActionHistory(Path(folder) / 'history.llog').entries))
                 saved = ActionHistory(Path(folder) / 'history.llog')
                 self.assertEqual([e['path'] for e in saved.entries if e['action'] == 'path command'],
                                  [str(child / 'cat.jpg')])

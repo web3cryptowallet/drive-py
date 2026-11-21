@@ -59,7 +59,7 @@ class OpenDefaultTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with patch('sys.platform', 'linux'), patch.object(tui, 'get_real_path', return_value='/tmp/a file;test'), patch.object(tui.os.path, 'exists', return_value=True), patch.object(tui.os.path, 'isdir', return_value=False), patch.object(browser, 'copy_text') as copy, patch.object(tui.shutil, 'which', return_value='/usr/bin/xterm'), patch.object(tui.subprocess, 'Popen') as popen, patch.object(tui.subprocess, 'run') as run, patch('vfs.desktop.raise_x11_file_manager'):
                     await asyncio.sleep(.03)
-                    for key, mock in [('\x19', copy), ('\x14', popen), ('\x06', run)]:
+                    for key, mock in [('\x18', copy), ('\x14', popen), ('\x06', run)]:
                         pipe.send_text(key)
                         for _ in range(100):
                             if mock.called:

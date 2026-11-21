@@ -21,6 +21,21 @@ class PlayerNavigationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def test_mute_button_and_plain_button_labels(self):
+        b = tui.DriveBrowser(VirtualFS({'files': {}}), input=DummyInput(), output=DummyOutput())
+        self.assertEqual(b.previous_button.text, 'Prev')
+        self.assertEqual(b.next_button.text, 'Next')
+        for button in (b.previous_button, b.next_button, b.play_button, b.stop_button, b.mute_button, tui.Button('Other')):
+            self.assertEqual((button.left_symbol, button.right_symbol), ('', ''))
+        b.mute_button.handler()
+        self.assertTrue(b.video_muted)
+        self.assertEqual(b.mute_button.text, '🔇')
+        b.video_player = Mock()
+        b.mute_button.handler()
+        b.video_player.set_muted.assert_called_once_with(False)
+        self.assertEqual(b.mute_button.text, '🔊')
+        b.video_player = None
+
     def test_buttons_and_double_click_playback_intent(self):
         fs = VirtualFS({'files': {'/disk/a.mp3': {'a:1'}, '/disk/b.txt': {'b:1'}, '/disk/c.mp4': {'c:1'}}})
         fs.enter('disk')
@@ -42,12 +57,15 @@ class PlayerNavigationTests(unittest.TestCase):
             play.reset_mock()
             b.video_player = Mock()
             b.auto_quick_view = True
-            with patch.object(tui.time, 'monotonic', side_effect=[10, 10.1, 11, 11.1]):
+            with patch.object(tui.time, 'monotonic', return_value=10) as clock:
                 b.click_file(last)
+                clock.return_value = 10.1
                 b.click_file(last)
                 play.assert_called_once()
                 play.reset_mock()
+                clock.return_value = 11
                 b.click_file(first)
+                clock.return_value = 11.1
                 b.click_file(first)
                 play.assert_not_called()
 

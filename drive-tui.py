@@ -14,7 +14,7 @@ Controls: arrows/PageUp/PageDown/Home/End, Enter to open, Escape/Backspace to
 parent (restores selection), Tab to scroll file info, n display mode, t theme,
 F5 refresh, q/Ctrl-C quit. h opens context help, s opens the live scanner/map,
 a opens Actions, Delete queues removal, Shift+Delete queues descendants/duplicates,
-and Ctrl+X copies info using wl-copy/xclip/xsel or terminal OSC 52.
+and Ctrl+Y copies info using wl-copy/xclip/xsel or terminal OSC 52.
 Name is clipped before left-aligned Size/Dups; scrollbar is always present.
 Listing merges local files through VFS without promoting them to tracked data.
 Cache build/update options write storage. Scanner verification stores scan state
@@ -250,6 +250,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 from threading import Event, Lock, Thread
 import time
 from datetime import datetime
@@ -265,6 +266,7 @@ try:
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.filters import Condition, has_focus
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding.key_processor import KeyPress
     from prompt_toolkit.lexers import Lexer
     from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
     from prompt_toolkit.layout.dimension import Dimension
@@ -287,7 +289,29 @@ from vfs.paths import get_real_path
 from vfs.thumbnails import thumbnail, IMAGE_SUFFIXES, THUMBNAIL_SUFFIXES, MEDIA_SUFFIXES, VIDEO_SUFFIXES, AUDIO_SUFFIXES
 from vfs.scanner import (DriveScanner, FileMap, Pagination, ScanControls, ScanEntry,
                          ScanStats, ScanStore, ScanTiming)
+from vfs.conversion import (ConversionQueue, ConversionOptions, NETWORKS, RESOLUTIONS,
+                            command as conversion_command, video_files as conversion_files, probe_media, parse_time)
+from vfs.scan_statistics import ScanStatistics
+from vfs.directory_counts import DirectoryCounts, catalog_directory_counts
+from vfs.adapter.sqlite import SQLiteDBAdapter
+from vfs.history_index import HistoryIndex, HistoryRows
+from collections import deque
+from bisect import bisect_left
+from vfs.help_index import help_entries, shortcut_key, HelpIndexControl, HelpSearchLexer
+from vfs.db_trash import DBTrash
+import sqlite3
 # IMPORT DRIVE-TUI DEPENDENCIES ]
+# Buttons use their labels without angle-bracket decorations throughout the UI.
+from prompt_toolkit.widgets import Button as _PTButton
+
+
+class Button(_PTButton):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault('left_symbol', '')
+        kwargs.setdefault('right_symbol', '')
+        super().__init__(*args, **kwargs)
+
+
 # MATCH DECIMAL AND GROUPED NUMERIC DISPLAY TEXT [
 NUMBER_TEXT = re.compile(r'(?<!\w)(?<!\d[.,])\d+(?:[.,]\d+)*(?!\w|[.,]\d)')
 # MATCH DECIMAL AND GROUPED NUMERIC DISPLAY TEXT ]
@@ -366,6 +390,29 @@ async def thumbnail_worker_call(executor, function, *args):
     return result.result()
 # WAIT FOR THE OWNED THUMBNAIL WORKER WITHOUT A GLOBAL EXECUTOR ]
 # FORMAT ELAPSED FOR THE DRIVE-TUI WORKFLOW [
+def shutdown_step(label, callback):
+    """Keep blocking cleanup visible after the terminal UI has exited."""
+    started = time.monotonic()
+    done = Event()
+    print(f'Quitting: {safe_text(label)}…', file=sys.stderr, flush=True)
+    def heartbeat():
+        while not done.wait(1.):
+            elapsed = time.monotonic() - started
+            print(f'  Still waiting: {safe_text(label)} ({elapsed:.0f}s)', file=sys.stderr, flush=True)
+    reporter = Thread(target=heartbeat, name='drive-shutdown-status', daemon=True)
+    reporter.start()
+    try:
+        result = callback()
+    except BaseException:
+        print(f'  Failed: {safe_text(label)}', file=sys.stderr, flush=True)
+        raise
+    else:
+        print(f'  Done ({time.monotonic() - started:.1f}s)', file=sys.stderr, flush=True)
+        return result
+    finally:
+        done.set()
+        reporter.join()
+
 def format_elapsed(seconds):
     seconds = max(0, int(seconds))
     hours, seconds = divmod(seconds, 3600)
@@ -668,11 +715,14 @@ class FilesControl(UIControl):
             return browser.grid_content(width, height, header=self.header)
         # Reserve metadata first; degrade gracefully in very small terminals.
         size_width, dups_width = browser.metadata_widths
-        if width < size_width + dups_width + 5:
-            size_width = min(size_width, max(0, (width - 2) // 2))
-            dups_width = min(dups_width, max(0, width - size_width - 2))
-        name_width = max(0, width - size_width - dups_width - 2)
-        browser.columns = (name_width, size_width, dups_width)
+        files_width = browser.file_count_width
+        if width < size_width + files_width + dups_width + 6:
+            available = max(0, width - 3)
+            size_width = min(size_width, available // 3)
+            files_width = min(files_width, (available - size_width) // 2)
+            dups_width = min(dups_width, available - size_width - files_width)
+        name_width = max(0, width - size_width - files_width - dups_width - 3)
+        browser.columns = (name_width, size_width, files_width, dups_width)
         if self.header:
             return UIContent(get_line=lambda _: browser.column_header(),
                              line_count=1, show_cursor=False)
@@ -690,7 +740,7 @@ class FilesControl(UIControl):
             if expanded and not selected:
                 base += ' class:expanded-dir'
             name_style = base + ' class:literal' + (' class:expanded-dir-name' if expanded else '') + browser.scan_row_style(row)
-            prefix = row['label'][:4]
+            prefix = browser.scan_row_marker(row) + row['label'][1:4]
             excluded = row['name'] != '..' and row['node'].is_dir and row['node'].id in browser.blacklist
             available = max(0, name_width - len(prefix) - (2 if browser.bookmark_path(row) in browser.bookmarks else 0) - (2 if excluded else 0))
             label = prefix + browser.fit_name(browser.file_list_path(row), available, selected=selected)
@@ -699,13 +749,20 @@ class FilesControl(UIControl):
                 label = label[:2] + 'B ' + label[2:]
             label = (fit(label[:-2], max(0, name_width - 2)) + ' ↗') if label.endswith(' ↗') and name_width >= 2 else fit(label, name_width)
             fragments = []
-            if label and browser.display_mode != 3:
-                fragments.append((base + ' class:' + row['indicator'], label[0]))
+            if label and (browser.display_mode != 3 or 'scan_symbol' in row or label[0] != row['label'][0]):
+                marker_style = (' fg:#ffd700' if row.get('scan_active', False) else
+                                ' class:' + ('green' if label[0] == '·' else row['indicator']))
+                fragments.append((base + marker_style, label[0]))
                 fragments.extend(browser.exclusion_label(name_style, label[1:], marked, row))
             else:
                 fragments.extend(browser.exclusion_label(name_style, label, marked, row, 2))
+            files = row['dups'].strip('()') if row['node'].is_dir else '1'
+            dups = '—' if row['node'].is_dir else row['dups'].strip('()')
+            if row['name'] == '..':
+                files = dups = '—'
             fragments.append((base, ' ' + fit(' ' + row['size'], size_width) +
-                              ' ' + fit(' ' + row['dups'], dups_width)))
+                              ' ' + fit(' ' + files, files_width) +
+                              ' ' + fit(' ' + dups, dups_width)))
             return fragments
         # FORMAT ONE VISIBLE DISPLAY ROW ]
 
@@ -972,6 +1029,8 @@ class DriveBrowser:
                                                             max=self.video_frame_height()))
         self.seek_control = VideoSeekControl(self)
         self.video_player = None
+        self.quickview_jobs = set()
+        self.quickview_animation_task = None
         self.video_status = ''
         self.video_first_row = 0
         self.video_dimensions = (1, 1)
@@ -982,10 +1041,12 @@ class DriveBrowser:
         self.video_workers = []
         self.preview_bookmark_path = None
         self.preview_bookmark_control = FormattedTextControl(self.preview_bookmark_fragments)
-        self.previous_button = Button('<Prev', handler=lambda: self.step_media(-1))
-        self.next_button = Button('Next>', handler=lambda: self.step_media(1))
-        self.play_button = Button('Play', handler=self.play_video)
-        self.stop_button = Button('Stop', handler=self.stop_video)
+        self.video_muted = False
+        self.mute_button = Button('🔊', width=3, handler=self.toggle_mute)
+        self.previous_button = Button('Prev', width=5, handler=lambda: self.step_media(-1))
+        self.next_button = Button('Next', width=5, handler=lambda: self.step_media(1))
+        self.play_button = Button('Play', width=5, handler=self.play_video)
+        self.stop_button = Button('Stop', width=5, handler=self.stop_video)
         self.grid_layout_key = None
         self.grid_lines = []
         self.grid_positions = {}
@@ -997,10 +1058,14 @@ class DriveBrowser:
         self.thumbnail_epoch = 0
         self.thumbnail_task = None
         self.thumbnail_executor = None
+        self.thumbnail_executors = []
         self.thumbnails = {}
         self.grid_native_drawn = None
         self.thumbnail_errors = 0
         self.vfs = vfs
+        self.navigation_store = ScanStore(vfs.db)
+        saved_depth = ScanStore(vfs.db).get('ui', 'expand_all_levels', False)
+        self.expand_all_levels = saved_depth if isinstance(saved_depth, bool) else False
         self.selected = 0
         self.scan_selection = set()
         self.display_mode = 1
@@ -1041,6 +1106,8 @@ class DriveBrowser:
             self.bookmarks = []
         self.bookmark_index = max(0, min(self.bookmark_index, len(self.bookmarks) - 1))
         self.blacklist_enabled = True
+        self.show_blacklisted = True
+        self.show_problem_files = True
         try:
             saved = json.loads(BLACKLIST_PATH.read_text(encoding='utf-8'))
             self.blacklist = set(normalize_bookmark_path(path) for path in saved
@@ -1049,10 +1116,26 @@ class DriveBrowser:
             self.blacklist = set()
         self.pending_bookmark = None
         self.info_paths = {}
+        self.cursor_idle_until = 0.
+        self.cursor_idle_task = None
+        self.cursor_refresh_pending = False
+        self.dups_pending = set()
+        self.dups_task = None
         self.scanners = []
+        self.scanner_restart_task = None
+        self.scan_statistics = ScanStatistics(self.vfs.db)
+        self.directory_counts = DirectoryCounts(self.vfs.db)
+        self.directory_count_pending = {}
+        self.directory_count_task = None
+        self.scan_statistics_scope = 'current'
+        self.conversions = ConversionQueue(self.vfs.db)
+        self.db_trash = DBTrash(self.vfs.db)
+        self.trashed_roots = self.db_trash.roots()
+        self.conversion_task = None
         self.filename_pan = None
         self.filename_width = 20
-        self.columns = (20, 8, 4)
+        self.columns = (20, 8, 6, 4)
+        self.file_count_width = 6
         self.metadata_widths = (5, 7)
         self.control = FilesControl(self)
         self.files = FilesWindow(self, self.control, right_margins=[PreviewMapMargin(self), ScrollbarMargin()],
@@ -1065,8 +1148,25 @@ class DriveBrowser:
             hasattr(self, 'app') and self.app.output.get_size().rows >= 18 else 1)
         self.info.window.right_margins = [ScrollbarMargin()]
         self.info.window.cursorline = has_focus(self.info)
-        if path is None:
-            self.vfs.start_in_current_directory()
+        try:
+            saved_directory = self.navigation_store.get('ui', 'last_directory', {})
+        except (ValueError, TypeError):
+            self.navigation_store.delete('ui', 'last_directory')
+            saved_directory = {}
+        if path is None or not os.fspath(path).strip():
+            if not isinstance(saved_directory, dict):
+                saved_directory = {}
+            directory = saved_directory.get('directory')
+            if saved_directory.get('catalog_root') is True:
+                self.vfs.cwd = self.vfs.db.get_root()
+            else:
+                try:
+                    self.vfs.start_in_current_directory(directory if isinstance(directory, str)
+                        and os.path.isabs(directory) and os.path.isdir(directory) else None)
+                except (ValueError, OSError):
+                    self.vfs.start_in_current_directory()
+            if self.is_trashed(self.vfs.pwd()):
+                self.vfs.start_in_current_directory()
         else:
             self.vfs.start_in_current_directory(path)
         self.action_history.add('chdir', self.vfs.pwd())
@@ -1087,11 +1187,15 @@ class DriveBrowser:
             bindings.add(key, eager=True, filter=Condition(self.can_pan_filename))(lambda event, action=action: self.pan_filename(action))
 
         bindings.add('x', eager=True, filter=Condition(lambda: not self.screen_stack))(lambda event: self.toggle_path_prefixes())
-        command_closed = Condition(lambda: not self.screen_stack or not isinstance(self.screen_stack[-1][0], PathCommandView))
+        command_closed = Condition(lambda: not self.screen_stack or (not isinstance(self.screen_stack[-1][0], (PathCommandView, ConversionView)) and not self.help_search_focused()))
         bindings.add('b', eager=True, filter=command_closed)(lambda event: self.toggle_bookmark())
         bindings.add('j', eager=True, filter=command_closed)(lambda event: self.push(BookmarksView(self)))
-        bindings.add('q', eager=True, filter=command_closed)(lambda event: event.app.exit())
-        bindings.add('c-c')(lambda event: event.app.exit())
+        bindings.add('q', eager=True, filter=command_closed)(lambda event: self.request_quit())
+        bindings.add('c-c')(lambda event: self.request_quit())
+        bindings.add('c-p', eager=True)(lambda event: self.pause_scanner())
+        bindings.add('c-k', eager=True)(lambda event: self.stop_scanner())
+        bindings.add('c-s', eager=True)(lambda event: self.show_scan_statistics())
+        bindings.add('f4', eager=True)(lambda event: self.show_status())
         bindings.add('p', filter=Condition(lambda: (not self.screen_stack or
             isinstance(self.screen_stack[-1][0], BookmarksView)) and bool(self.video_path) and
             not (self.screen_stack and (self.app.layout.has_focus(self.screen_stack[-1][0].path) or
@@ -1100,7 +1204,9 @@ class DriveBrowser:
         bind(['/'], lambda event: self.push(PathCommandView(self)), eager=True)
         bind(['l'], lambda event: self.push(HistoryView(self)))
         bind(['a'], lambda event: self.push(ActionsView(self)))
-        bind(['s'], lambda event: self.push(ScannerView(self)))
+        bind(['s'], lambda event: self.toggle_scanner())
+        bind(['c-e'], lambda event: self.edit_conversion())
+        bind(['Q'], lambda event: self.push(ConversionQueueView(self)))
         bind([' '], lambda event: self.toggle_scan_selection(), filter=files_focused)
         bind(['insert'], lambda event: self.toggle_scan_selection(True), filter=files_focused)
         bind(['*'], lambda event: self.invert_scan_selection(), filter=files_focused)
@@ -1109,9 +1215,9 @@ class DriveBrowser:
         bind(['h'], lambda event: self.push(HelpView(self, 'File manager help', main_help(self.display_mode))))
         bind(['delete'], lambda event: self.queue_remove())
         bind(['s-delete'], lambda event: self.queue_remove(all_duplicates=True))
-        bind(['c-x'], lambda event: self.copy_info(), eager=True)
+        bind(['c-y'], lambda event: self.copy_info(), eager=True)
         bind(['c-o'], lambda event: self.open_default(), eager=True)
-        bind(['c-y'], lambda event: self.copy_path(), eager=True)
+        bind(['c-x'], lambda event: self.copy_path(), eager=True)
         bind(['c-t'], lambda event: self.open_location(True), eager=True)
         bind(['c-f'], lambda event: self.open_location(), eager=True)
         bind(['up'], lambda event: self.move_grid_row(-1) if self.graphics_mode else self.move(-1), filter=files_focused)
@@ -1134,6 +1240,10 @@ class DriveBrowser:
         bind(['!'], lambda event: self.toggle_exclusion(), filter=files_focused)
         bind(['X'], lambda event: self.toggle_blacklist())
         bind(['L'], lambda event: self.show_blacklist())
+        bind(['c-b'], lambda event: self.toggle_blacklist_visibility())
+        bind(['c-u'], lambda event: self.toggle_problem_files(), eager=True)
+        bind(['c-d'], lambda event: self.trash_selected())
+        bind(['D'], lambda event: self.push(DBTrashView(self)))
         bind(['u'], lambda event: self.expand_subdirs(), eager=True)
         bind(['o'], lambda event: self.toggle_expansion_depth(), eager=True)
         bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
@@ -1145,7 +1255,7 @@ class DriveBrowser:
         bind(['i'], lambda event: self.toggle_image_previews())
         bind(['n'], lambda event: self.cycle_mode())
         bind(['t'], lambda event: self.cycle_theme())
-        bind(['f5'], lambda event: self.refresh(self.current_name()))
+        bind(['f5', 'c-r'], lambda event: self.refresh(self.current_name()))
         layout = HSplit([
             Window(TitleControl(), height=1, style='class:header'),
             VSplit([
@@ -1165,14 +1275,14 @@ class DriveBrowser:
                     VSplit([
                         Window(width=1),
                         HSplit([
-                            Window(FormattedTextControl(self.info_title), height=1,
+                            Window(FormattedTextControl(self.quickview_heading), height=1,
                                    style='class:info-header'),
                             Window(self.preview_bookmark_control, height=1),
                             ConditionalContainer(self.video_metadata,
                                                  filter=Condition(lambda: self.video_path is not None)),
                             ConditionalContainer(HSplit([
                                 ConditionalContainer(self.video_area, filter=Condition(lambda: not self.audio_selected())),
-                                VSplit([self.previous_button, self.play_button, self.stop_button, self.next_button,
+                                VSplit([self.previous_button, self.play_button, self.stop_button, self.next_button, self.mute_button,
                                         Window(FormattedTextControl(lambda: safe_text(self.video_status)), height=1)], height=1),
                                 Window(self.seek_control, height=1),
                             ]), filter=Condition(self.video_panel_visible)),
@@ -1184,6 +1294,13 @@ class DriveBrowser:
                       width=lambda: Dimension.exact((get_app().output.get_size().columns + 1) // 2)),
             ]),
         ])
+        layout.children.append(ConditionalContainer(VSplit([
+            Button('Convert', width=9, handler=self.edit_conversion),
+            Button('Queue +/-', width=11, handler=self.toggle_conversion),
+            Button('Queue', width=7, handler=lambda: self.push(ConversionQueueView(self))),
+            Window(FormattedTextControl(lambda: self.conversion_status()), height=1),
+        ], height=1), filter=Condition(lambda: self.app.output.get_size().rows >= 12 and
+                                      self.app.output.get_size().columns >= 40)))
         self.clipboard_notice = ''
         self.clipboard_notice_epoch = 0
         self.main_layout = Layout(self.popup_layout(layout), focused_element=self.control)
@@ -1194,6 +1311,9 @@ class DriveBrowser:
                                after_render=self.draw_native_preview)
         if hasattr(self.app.input, 'vt100_parser'):
             self.app.input.vt100_parser = KittyReplyFilter(self.app.input.vt100_parser)
+        self.app.pre_run_callables.append(self.start_conversions)
+        self.app.pre_run_callables.append(self.start_history_writer)
+        self.app.pre_run_callables.append(self.start_directory_counts)
     # INITIALIZE DRIVE BROWSER ]
     # OVERLAY TRANSIENT NOTIFICATIONS WITHOUT RESERVING A SCREEN ROW [
     def popup_layout(self, content):
@@ -1201,6 +1321,9 @@ class DriveBrowser:
             FormattedTextControl(lambda: safe_text(self.clipboard_notice)), height=1,
             style='class:header'), title='Notification'),
             filter=Condition(lambda: bool(self.clipboard_notice)))
+        content = HSplit([content, ConditionalContainer(
+            Window(FormattedTextControl(self.scan_progress), height=1, style='class:header'),
+            filter=Condition(lambda: bool(self.scanners)))])
         return NumberHighlight(FloatContainer(content, floats=[
             Float(content=notice, right=1, bottom=1,
                   width=lambda: min(len(self.clipboard_notice) + 4,
@@ -1270,6 +1393,47 @@ class DriveBrowser:
                 f' · .:{"hide" if self.hide_dotfiles else "show"}'
                 f' · i:{"on" if self.image_previews else "off"}')
     # SHOW CURRENT QUICK VIEW AND FILE DISPLAY TOGGLES ]
+    def quickview_busy(self):
+        return (bool(self.quickview_jobs) or self.video_status == 'Starting…' or
+                (getattr(self, 'cursor_refresh_pending', False) and self.auto_quick_view
+                 and self.video_player is None and not self.screen_stack))
+
+    def quickview_heading(self):
+        result = [('', self.info_title())]
+        if self.quickview_busy():
+            result.append(('fg:#ffd700', ' ' + ('\\', '|', '/', '-')[int(time.monotonic() * 8) % 4]))
+        return result
+
+    def animate_quickview(self):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self.quickview_animation_task is not None and not self.quickview_animation_task.done():
+            return
+        async def animate():
+            try:
+                while self.quickview_busy() and not self.app.is_done:
+                    self.app.invalidate()
+                    await asyncio.sleep(.125)
+                self.app.invalidate()
+            finally:
+                self.quickview_animation_task = None
+        self.quickview_animation_task = self.app.create_background_task(animate())
+
+    def begin_quickview(self):
+        token = object()
+        self.quickview_jobs.add(token)
+        if hasattr(self, 'app'):
+            self.animate_quickview()
+            self.app.invalidate()
+        return token
+
+    def end_quickview(self, token):
+        self.quickview_jobs.discard(token)
+        if hasattr(self, 'app'):
+            self.app.invalidate()
+
     # VIDEO FRAME HEIGHT [
     def video_frame_height(self):
         # Keep controls, hashes, duplicate heading and its first row below frames.
@@ -1278,7 +1442,8 @@ class DriveBrowser:
     # VIDEO FRAME HEIGHT ]
     # AUDIO SELECTED FOR DRIVE BROWSER [
     def audio_selected(self):
-        return bool(self.video_path and os.path.splitext(self.video_path)[1].lower() in AUDIO_SUFFIXES)
+        return bool(self.video_path and (getattr(self, 'video_audio_only', False) or
+                    os.path.splitext(self.video_path)[1].lower() in AUDIO_SUFFIXES))
     # AUDIO SELECTED FOR DRIVE BROWSER ]
     # VIDEO PANEL VISIBLE [
     def video_panel_visible(self):
@@ -1291,7 +1456,7 @@ class DriveBrowser:
     def focus_main(self, direction):
         controls = [self.control, self.info]
         if self.video_panel_visible():
-            controls.extend([self.previous_button, self.play_button, self.stop_button, self.next_button, self.seek_control])
+            controls.extend([self.previous_button, self.play_button, self.stop_button, self.next_button, self.mute_button, self.seek_control])
         index = next((i for i, control in enumerate(controls)
                       if self.app.layout.has_focus(control)), 0)
         self.app.layout.focus(controls[(index + direction) % len(controls)])
@@ -1307,6 +1472,13 @@ class DriveBrowser:
     # SEEK VIDEO FOR DRIVE BROWSER ]
     # LOAD VIDEO POSTER [
     async def load_video_poster(self, path, epoch):
+        token = self.begin_quickview()
+        try:
+            await self._load_video_poster(path, epoch)
+        finally:
+            self.end_quickview(token)
+
+    async def _load_video_poster(self, path, epoch):
         file_id = self.video_file_id
         try:
             from term_image.utils import get_cell_size
@@ -1356,6 +1528,13 @@ class DriveBrowser:
             self.app.invalidate()
     # STOP VIDEO FOR DRIVE BROWSER ]
     # TOGGLE PLAYBACK FOR DRIVE BROWSER [
+    def toggle_mute(self):
+        self.video_muted = not self.video_muted
+        self.mute_button.text = '🔇' if self.video_muted else '🔊'
+        if self.video_player is not None:
+            self.video_player.set_muted(self.video_muted)
+        self.app.invalidate()
+
     def toggle_playback(self):
         if self.video_player is None:
             self.play_video()
@@ -1418,10 +1597,12 @@ class DriveBrowser:
         player = VideoPreview(self.video_path, (min(1280, width * cell_width),
                                               min(720, height * cell_height)),
                               lambda image: serialize_video_frame(image, self.video_render_dimensions))
+        player.muted = self.video_muted
         self.video_player = player
         self.video_workers = [worker for worker in self.video_workers if worker.thread.is_alive()]
         self.video_workers.append(player)
         self.video_status = 'Starting…'
+        self.animate_quickview()
         self.play_history_entry = self.action_history.add('play', getattr(self, 'video_virtual_path', self.video_path),
             start_position=self.video_position, position=self.video_position, duration=self.video_duration)
         player.start()
@@ -1448,6 +1629,8 @@ class DriveBrowser:
                     self.video_player = None
                     break
                 elif kind == 'progress':
+                    self.video_audio_only = True
+                    self.native_preview = None
                     self.video_status = 'Playing'
                     self.video_position, self.video_duration = value
                 elif kind == 'frame':
@@ -1530,6 +1713,7 @@ class DriveBrowser:
     def toggle_expansion_depth(self):
         self.app.layout.focus(self.control)
         self.expand_all_levels = not self.expand_all_levels
+        ScanStore(self.vfs.db).put('ui', 'expand_all_levels', self.expand_all_levels)
         self.app.invalidate()
     # TOGGLE EXPANSION DEPTH ]
     def excluded_directory(self, node):
@@ -1554,6 +1738,15 @@ class DriveBrowser:
         temporary.replace(BLACKLIST_PATH)
 
     def apply_blacklist(self):
+        for scanner in self.scanners:
+            scanner.controls.excluded_paths = tuple(self.blacklist) if self.blacklist_enabled else ()
+            for entry in list(scanner.model.entries.values()):
+                excluded = self.excluded_directory(entry.id)
+                if entry.blacklisted != excluded:
+                    scanner.model.update(replace(entry, blacklisted=excluded), rebuild=False)
+            scanner.refresh_colors()
+            scanner.catalog_signature = None
+            scanner.request_projection()
         if self.expansion_task is not None:
             self.expansion_task.cancel()
             self.expansion_task = None
@@ -1568,6 +1761,46 @@ class DriveBrowser:
 
     def show_blacklist(self):
         self.push(BlacklistView(self))
+
+    def toggle_blacklist_visibility(self):
+        self.show_blacklisted = not self.show_blacklisted
+        self.refresh(self.current_name(), update_info=False)
+        if self.app.is_running:
+            self.show_notification('Blacklisted files: ' + ('shown' if self.show_blacklisted else 'hidden'))
+
+    def toggle_problem_files(self):
+        self.show_problem_files = not self.show_problem_files
+        self.refresh(self.current_name(), update_info=False)
+        if self.app.is_running:
+            self.show_notification('Not-found files: ' + ('shown' if self.show_problem_files else 'hidden'))
+
+    def problem_file_style(self, row):
+        return ' fg:#ff5555' if row.get('problem_file') else ''
+
+    def is_trashed(self, path):
+        return any(path == root or path.startswith(root.rstrip('/') + '/') for root in self.trashed_roots)
+
+    def trash_selected(self):
+        if not self.rows or self.rows[self.selected]['name'] == '..':
+            return
+        path = self.rows[self.selected]['node'].id
+        async def move():
+            try:
+                # Finish worker writes before removing their baseline records.
+                for scanner in tuple(self.scanners):
+                    scanner.stop_scanning()
+                while self.scanners:
+                    await asyncio.sleep(.02)
+                count = self.db_trash.move(path)
+                self.trashed_roots = self.db_trash.roots()
+                self.vfs._local_nodes = {key: value for key, value in self.vfs._local_nodes.items()
+                                         if not self.is_trashed(key)}
+                self.action_history.add('database trash', path)
+                self.refresh(update_info=False)
+                self.show_notification(f'Moved {count} database records to D; disk files kept')
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                self.show_notification(str(exc))
+        self.app.create_background_task(move())
 
     def exclusion_label(self, style, text, marked, row, offset=1):
         excluded = row['name'] != '..' and row['node'].is_dir and normalize_bookmark_path(row['node'].id) in self.blacklist
@@ -1757,6 +1990,7 @@ class DriveBrowser:
         if self.thumbnail_executor is None:
             from concurrent.futures import ThreadPoolExecutor
             self.thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drive-thumbnails')
+            self.thumbnail_executors.append(self.thumbnail_executor)
         self.thumbnail_task = self.app.create_background_task(self.generate_thumbnails())
     # START THUMBNAILS FOR DRIVE BROWSER ]
     # CLEAR THUMBNAIL FILES AND LINKS WITHOUT RACING IN-FLIGHT DECODING [
@@ -1781,6 +2015,7 @@ class DriveBrowser:
             if self.thumbnail_executor is None:
                 from concurrent.futures import ThreadPoolExecutor
                 self.thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='drive-thumbnails')
+                self.thumbnail_executors.append(self.thumbnail_executor)
             await thumbnail_worker_call(
                 self.thumbnail_executor, clear_grid_cache_files, '.cache', scope, list(records.values()))
             for key, record in records.items():
@@ -1859,6 +2094,7 @@ class DriveBrowser:
             generation_view = None
             # Probe visible JPEGs first, then fill visible misses before offscreen work.
             while pending:
+                await self.wait_cursor_idle()
                 render = self.files.render_info
                 top = getattr(self.files, 'vertical_scroll', getattr(render, 'vertical_scroll', 0))
                 height = render.window_height if render else 20
@@ -1891,6 +2127,9 @@ class DriveBrowser:
                     if item is None:
                         continue
                     pending.pop(index, None)
+                    await self.wait_cursor_idle()
+                    if epoch != self.thumbnail_epoch:
+                        break
                     # Attach only complete worker results; keep DB writes on UI thread.
                     store.put('thumbnail', f'{size}:{node.id}', item['record'])
                     self.thumbnails[node.id] = item
@@ -1970,6 +2209,7 @@ class DriveBrowser:
                 style = 'class:selected' if entries[0] == self.selected else 'class:' + row['color']
                 if not row['node'].is_dir:
                     style += ' class:muted'
+                style += self.problem_file_style(row)
                 prefix = ' B ' if self.bookmark_path(row) in self.bookmarks else ' '
                 path_label = self.file_list_path(row)
                 if row['node'].is_dir and row['name'] != '..':
@@ -1987,6 +2227,7 @@ class DriveBrowser:
                     fragments.append(('', ' '))
                 row = self.rows[entry]
                 style = 'class:selected' if entry == self.selected else 'class:' + row['color']
+                style += self.problem_file_style(row)
                 item = self.thumbnails.get(row['node'].id) if self.image_previews else None
                 if subrow == icon_height:
                     image_width = item['dimensions'][0] if item else 0
@@ -2112,6 +2353,10 @@ class DriveBrowser:
                  for row in self.rows), default=0)
             self._filename_maximum_key = key
         return self._filename_maximum_value
+
+    def help_search_focused(self):
+        return bool(self.screen_stack and isinstance(self.screen_stack[-1][0], HelpView)
+                    and self.app.layout.has_focus(self.screen_stack[-1][0].search))
 
     def can_pan_filename(self):
         control = self.app.layout.current_control
@@ -2242,6 +2487,8 @@ class DriveBrowser:
     # MARGINS HAVE NO DEFAULT PT MOUSE HANDLER; BIND THE PAINTED COLUMN ]
     # REFIT IMAGE ON RESIZE [
     def refit_image_on_resize(self, app):
+        if self.cursor_busy():
+            return False
         node = getattr(self, 'image_preview_node', None)
         if node is None or app.is_done or (self.screen_stack and
                 not isinstance(self.screen_stack[-1][0], BookmarksView)):
@@ -2257,6 +2504,8 @@ class DriveBrowser:
     # REFIT IMAGE ON RESIZE ]
     # DRAW NATIVE PREVIEW [
     def draw_native_preview(self, app):
+        if self.screen_stack and isinstance(self.screen_stack[-1][0], (ConversionView, HistoryView)):
+            self.screen_stack[-1][0].install_drag(app)
         if hasattr(self, 'files'):
             self.install_files_scrollbar(app)
         if self.refit_image_on_resize(app):
@@ -2271,11 +2520,11 @@ class DriveBrowser:
             self.video_render_dimensions = (max(1, int(width * scale)), max(1, int(height * scale)))
         if (getattr(self, 'video_path', None) and not self.video_panel_visible()
                 and any(app.layout.has_focus(control)
-                        for control in (self.previous_button, self.play_button, self.stop_button, self.next_button, self.seek_control))):
+                        for control in (self.previous_button, self.play_button, self.stop_button, self.next_button, self.mute_button, self.seek_control))):
             app.layout.focus(self.screen_stack[-1][0].table if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView) else self.control)
         if app.is_done:
             self.stop_video()
-        if (self.screen_stack and not isinstance(self.screen_stack[-1][0], BookmarksView)) or not self.native_preview or app.is_done:
+        if (self.screen_stack and not isinstance(self.screen_stack[-1][0], (BookmarksView, ConversionView))) or not self.native_preview or app.is_done:
             self.clear_native_preview()
             return
         art, (width, height), first_row = self.native_preview
@@ -2340,9 +2589,9 @@ class DriveBrowser:
     # BUILD THE CURRENT TERMINAL COLOR THEME ]
     # RENDER FILE TABLE HEADERS FOR THE CURRENT PATH DISPLAY [
     def column_header(self):
-        name, size, dups = self.columns
+        name, size, files, dups = self.columns
         title = (self.media_filter.title() + (' path' if self.show_path_prefixes else '')) if self.media_only else ('Path' if self.show_path_prefixes else 'Name')
-        return [('class:table-header', self.expansion_status() + fit(title, name) + ' ' + fit(' Size', size) + ' ' + fit(' Dups', dups))]
+        return [('class:table-header', self.expansion_status() + fit(title, name) + ' ' + fit(' Size', size) + ' ' + fit(' Files', files) + ' ' + fit(' Dups', dups))]
     # RENDER FILE TABLE HEADERS FOR THE CURRENT PATH DISPLAY ]
     # FORMAT RELATIVE OR PREFIXED FILE LABELS WITHOUT CHANGING ROW IDENTITIES [
     def file_list_path(self, row):
@@ -2394,7 +2643,11 @@ class DriveBrowser:
         changing_directory = self.expansion_cwd != self.vfs.pwd()
         notice = self.begin_working('Working… loading folder') if changing_directory else None
         try:
-            return self.refresh_rows(target, update_info=update_info, _entries=_entries, _infos=_infos)
+            result = self.refresh_rows(target, update_info=update_info, _entries=_entries, _infos=_infos)
+            if changing_directory:
+                self.navigation_store.put('ui', 'last_directory',
+                    dict(directory=self.original_path(self.vfs.pwd()), catalog_root=self.vfs.pwd() == '/'))
+            return result
         finally:
             self.end_working(notice)
 
@@ -2412,6 +2665,11 @@ class DriveBrowser:
             seen = set()
             while pending:
                 name, node = pending.pop()
+                if self.is_trashed(node.id):
+                    continue
+                if not self.show_blacklisted and any(node.id == root or node.id.startswith(root.rstrip('/') + '/')
+                                                      for root in self.blacklist):
+                    continue
                 if self.hide_dotfiles and node.name.startswith('.'):
                     continue
                 if node.id in seen:
@@ -2433,6 +2691,9 @@ class DriveBrowser:
         previous_dups = {row['node'].id: row.get('dups', '(0)') for row in self.rows}
         self.rows = []
         for name, node in entries:
+            if name != '..' and (self.is_trashed(node.id) or (not self.show_blacklisted and any(
+                    node.id == root or node.id.startswith(root.rstrip('/') + '/') for root in self.blacklist))):
+                continue
             media = not node.is_dir and os.path.splitext(name)[1].lower() in filter_suffixes
             blacklisted = node.is_dir and normalize_bookmark_path(node.id) in self.blacklist
             if self.graphics_mode and node.is_dir and name != '..' and not blacklisted:
@@ -2447,6 +2708,9 @@ class DriveBrowser:
             status = node.info.get('status', 'tracked') if name != '..' else 'tracked'
             local_info = _infos[node.id] if _infos is not None else self.vfs.get_full_info(node, True)
             exists = local_info.get('exists', False)
+            problem_file = not node.is_dir and not exists
+            if problem_file and not self.show_problem_files:
+                continue
             indicator = 'green' if exists else 'red'
             if self.display_mode == 1 and status == 'new' and not local_info.get('is_symlink'):
                 indicator = 'orange'
@@ -2454,14 +2718,38 @@ class DriveBrowser:
             marker = {'new': '*', 'deleted': '!'}.get(status, ' ') if self.display_mode == 3 else '●'
             count = (node.total_files if node.is_dir else
                      (len(self.vfs.get_hash_dups(node.info.get('hashinfo'))) if _entries is None else 0))
-            self.rows.append(dict(name=name, node=node, color=color, indicator=indicator,
+            self.rows.append(dict(name=name, node=node, color=color, indicator=indicator, problem_file=problem_file,
                                   label=f'{marker} {"📁" if node.is_dir else "📄"} {name}',
                                   size=format_size(node.size, int(not node.is_dir)).strip(),
-                                  dups=(previous_dups.get(node.id, '(0)') if _entries is not None and not node.is_dir
-                                        else f'({count})')))
+                                  dups=(previous_dups.get(node.id, '(?)') if _entries is not None and not node.is_dir
+                                        else (f'({count})' if node.is_dir or node.info.get('hashinfo') else '(?)'))))
+        self.file_rows_by_path = {row['node'].id: row for row in self.rows if not row['node'].is_dir}
+        self.dups_hash_rows = {}
+        for row in self.file_rows_by_path.values():
+            hashinfo = row['node'].info.get('hashinfo')
+            if hashinfo:
+                self.dups_hash_rows.setdefault(hashinfo, []).append(row)
+        if _entries is not None:
+            self.queue_dups_refresh(self.file_rows_by_path)
+        self.directory_size_rows = {normalize_bookmark_path(row['node'].id).rstrip('/'): row
+                                    for row in self.rows if row['node'].is_dir and row['name'] != '..'}
+        for path, row in self.directory_size_rows.items():
+            size = max([row['node'].size] + [scanner.directory_sizes.get(path, 0)
+                                           for scanner in self.scanners])
+            row['size'] = format_size(size, 0).strip()
+            count = max([row['node'].total_files, self.directory_counts.get(path)] + [scanner.directory_counts.get(path, 0)
+                                                   for scanner in self.scanners])
+            row['dups'] = f'({count})'
+            if (isinstance(self.vfs.db, SQLiteDBAdapter) and not row['node'].total_files
+                    and path not in self.directory_counts.saved and path not in self.directory_counts.observed):
+                self.directory_count_pending[path] = row['node'].id
+        if hasattr(self, 'app'):
+            self.start_directory_counts()
+        self.refresh_scan_symbols()
         self.grid_layout_key = None
         self.grid_positions = {}
         self._filename_maximum_key = None
+        self.file_count_width = max([6] + [len(row['dups'].strip('()')) + 1 for row in self.directory_size_rows.values()])
         self.metadata_widths = (max([4] + [len(row['size']) for row in self.rows]) + 1,
                                 max([4] + [len(row['dups']) for row in self.rows]) + 3)
         self.selected = next((i for i, row in enumerate(self.rows) if row['name'] == target), 0)
@@ -2493,10 +2781,9 @@ class DriveBrowser:
     def select(self, index):
         selected = max(0, min(max(0, len(self.rows) - 1), index))
         if selected != self.selected:
+            self.note_cursor_motion(refresh=True)
             self.grid_scroll_to_tile = None
             self.selected = selected
-            if self.video_player is None and self.auto_quick_view:
-                self.show_info(directory=self.current_name() == '..')
         if self.graphics_mode and selected in self.grid_positions:
             _, first, _, media = self.grid_positions[selected]
             if media:
@@ -2511,6 +2798,219 @@ class DriveBrowser:
     def move(self, delta):
         self.select(self.selected + delta)
     # MOVE DRIVE BROWSER ]
+    def cursor_busy(self):
+        return time.monotonic() < getattr(self, 'cursor_idle_until', 0.)
+
+    async def wait_cursor_idle(self):
+        while self.cursor_busy():
+            await asyncio.sleep(min(.05, self.cursor_idle_until - time.monotonic()))
+
+    def note_cursor_motion(self, refresh=False):
+        self.cursor_idle_until = time.monotonic() + 1.
+        self.cursor_refresh_pending = getattr(self, 'cursor_refresh_pending', False) or refresh
+        if refresh and getattr(self.app, 'is_running', False):
+            self.animate_quickview()
+        for scanner in self.scanners:
+            scanner.controls.interaction_until = self.cursor_idle_until
+        task = getattr(self, 'cursor_idle_task', None)
+        if task is not None and not task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def settled():
+            try:
+                await self.wait_cursor_idle()
+                pending = self.cursor_refresh_pending
+                self.cursor_refresh_pending = False
+                if pending and not self.screen_stack:
+                    self.sync_scan_symbols()
+                    if self.video_player is None and self.auto_quick_view:
+                        self.show_info(directory=self.current_name() == '..')
+                self.app.invalidate()
+            finally:
+                self.cursor_idle_task = None
+        self.cursor_idle_task = self.app.create_background_task(settled())
+
+    def queue_dups_refresh(self, paths):
+        self.dups_pending.update(path for path in paths if path in self.file_rows_by_path)
+        if not self.dups_pending or (self.dups_task is not None and not self.dups_task.done()):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def refresh_counts():
+            try:
+                while self.dups_pending:
+                    await self.wait_cursor_idle()
+                    deadline = time.monotonic() + .002
+                    for _ in range(16):
+                        if not self.dups_pending or time.monotonic() >= deadline:
+                            break
+                        path = self.dups_pending.pop()
+                        row = self.file_rows_by_path.get(path)
+                        if row is None:
+                            continue
+                        # Catalog-only lookup: never stat disk to find a hash.
+                        node = self.vfs.db.get_root()
+                        for name in path.strip('/').split('/'):
+                            node = self.vfs.db.get_child(node, name)
+                            if node is None:
+                                break
+                        hashinfo = node.info.get('hashinfo') if node is not None else None
+                        if hashinfo:
+                            row['node'].info.update(node.info)
+                            group = self.dups_hash_rows.setdefault(hashinfo, [])
+                            if not any(item is row for item in group):
+                                group.append(row)
+                            count = len(self.vfs.get_hash_dups(hashinfo))
+                            for item in group:
+                                item['dups'] = f'({count})'
+                            self.metadata_widths = (self.metadata_widths[0],
+                                                    max(self.metadata_widths[1], len(f'({count})') + 3))
+                        else:
+                            row['dups'] = '(?)'
+                    self.app.invalidate()
+                    await asyncio.sleep(.05)
+            finally:
+                self.dups_task = None
+        self.dups_task = self.app.create_background_task(refresh_counts())
+
+    def update_scan_directory_sizes(self, scanner):
+        """Apply a bounded set of cached totals, without disk or catalog reads."""
+        if self.cursor_busy():
+            return
+        deadline = time.monotonic() + .002
+        for _ in range(128):
+            if not scanner.directory_size_dirty or time.monotonic() >= deadline:
+                break
+            path = scanner.directory_size_dirty.pop()
+            row = getattr(self, 'directory_size_rows', {}).get(path)
+            if row is None:
+                continue
+            size = max([row['node'].size] + [scan.directory_sizes.get(path, 0)
+                                           for scan in self.scanners])
+            row['size'] = format_size(size, 0).strip()
+            count = max([getattr(row['node'], 'total_files', 0),
+                         self.directory_counts.get(path) if hasattr(self, 'directory_counts') else 0] +
+                        [scan.directory_counts.get(path, 0) for scan in self.scanners])
+            row['dups'] = f'({count})'
+            self.file_count_width = max(getattr(self, 'file_count_width', 6), len(str(count)) + 1)
+            self.metadata_widths = (max(self.metadata_widths[0], len(row['size']) + 1),
+                                    max(self.metadata_widths[1], len(row['dups']) + 3))
+
+    def start_directory_counts(self):
+        if (not self.directory_count_pending or
+                self.directory_count_task is not None and not self.directory_count_task.done()):
+            return
+        db = self.vfs.db
+        if not isinstance(db, SQLiteDBAdapter) or db.db_path == ':memory:':
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def recover():
+            try:
+                while self.directory_count_pending:
+                    await self.wait_cursor_idle()
+                    paths = dict(list(self.directory_count_pending.items())[:16])
+                    try:
+                        counts = await background_call(catalog_directory_counts, db.db_path,
+                                                       tuple(getattr(db, 'routes', {}).values()), paths)
+                    except sqlite3.OperationalError as exc:
+                        if 'locked' not in str(exc).lower():
+                            raise
+                        await asyncio.sleep(.1)
+                        continue
+                    await self.wait_cursor_idle()
+                    self.directory_counts.remember(counts)
+                    for path in paths:
+                        self.directory_count_pending.pop(path, None)
+                        row = self.directory_size_rows.get(path)
+                        if row is not None:
+                            count = max([row['node'].total_files, self.directory_counts.get(path)] +
+                                        [scan.directory_counts.get(path, 0) for scan in self.scanners])
+                            row['dups'] = f'({count})'
+                            self.file_count_width = max(self.file_count_width, len(str(count)) + 1)
+                    self.app.invalidate()
+                    await asyncio.sleep(.01)
+            finally:
+                self.directory_count_task = None
+        self.directory_count_task = self.app.create_background_task(recover())
+
+    def sync_scan_symbols(self):
+        """Apply pending scan events and snapshot markers on cursor movement."""
+        for scanner in self.scanners:
+            if not scanner.repacking:
+                scanner.drain_all(budget=.015)
+        self.refresh_scan_symbols()
+
+    def scan_row_marker(self, row):
+        # Exact file lookups are cheap; only directory aggregation is snapshotted.
+        row['scan_active'] = False
+        if row['name'] == '..':
+            return row['label'][0]
+        node = row['node']
+        target = normalize_bookmark_path(node.id).rstrip('/')
+        symbol = row.get('scan_symbol', row['label'][0])
+        for scanner in self.scanners:
+            if not node.is_dir:
+                entry = scanner.model.entries.get(node.id)
+                if entry is None:
+                    entry = scanner.model.entries.get(target)
+                if entry is not None:
+                    symbol = '!' if entry.blacklisted else SCAN_STATES.get(
+                        entry.state, SCAN_STATES['unknown'])[0]
+            if (scanner.closing or scanner.paused_modes is not None
+                    or not any(scanner.controls.modes) or not scanner.stats.active):
+                continue
+            path = normalize_bookmark_path(scanner.stats.path).rstrip('/')
+            if path == target or (node.is_dir and path.startswith(target + '/')):
+                row['scan_active'] = True
+                return scan_activity_frame(scanner, time.monotonic())
+        return symbol
+
+    def refresh_scan_symbols(self):
+        """Snapshot map states once per reload, never in the redraw loop."""
+        targets = {}
+        for row in self.rows:
+            row.pop('scan_symbol', None)
+            if row['name'] != '..':
+                targets[normalize_bookmark_path(row['node'].id).rstrip('/')] = row
+        masks = dict.fromkeys(targets, 0)
+        states = list(SCAN_STATES)
+        bits = {state: 1 << index for index, state in enumerate(states)}
+        for scanner in self.scanners:
+            for entry in scanner.model.entries.values():
+                bit = bits.get(entry.state, bits['unknown'])
+                if entry.blacklisted:
+                    bit |= 1 << len(states)
+                path = normalize_bookmark_path(entry.path).rstrip('/')
+                while True:
+                    if path in masks:
+                        masks[path] |= bit
+                    if not path:
+                        break
+                    path = path.rpartition('/')[0]
+        for path, mask in masks.items():
+            if not mask:
+                continue
+            state = next(state for state in states if mask & bits[state])
+            symbol = SCAN_STATES[state][0]
+            if mask & (1 << len(states)):
+                symbol = '!'
+            if symbol == '·':
+                exact = [scanner.model.entries.get(targets[path]['node'].id) for scanner in self.scanners]
+                if not any(entry is not None and entry.state == 'empty' for entry in exact):
+                    symbol = 'D'
+            targets[path]['scan_symbol'] = symbol
+
     # SCAN ROW STYLE [
     def scan_row_style(self, row):
         return ' fg:#ffd700' if row['node'].id in self.scan_selection and row['name'] != '..' else ''
@@ -2688,14 +3188,23 @@ class DriveBrowser:
     # UPDATE LISTING STATS ]
     # SHOW INFO FOR DRIVE BROWSER [
     def show_info(self, directory=False, preview_node=None):
+        self.cursor_refresh_pending = False
+        token = self.begin_quickview()
+        try:
+            return self._show_info(directory=directory, preview_node=preview_node)
+        finally:
+            self.end_quickview(token)
+
+    def _show_info(self, directory=False, preview_node=None):
         self.preview_bookmark_path = None
         self.stop_video()
         self.video_epoch += 1
         self.play_history_entry = None
         self.video_position = self.video_duration = 0.
+        self.video_audio_only = False
         self.video_path = None
         if hasattr(self, 'app') and any(self.app.layout.has_focus(control)
-                                       for control in (self.previous_button, self.play_button, self.stop_button, self.next_button, self.seek_control)):
+                                       for control in (self.previous_button, self.play_button, self.stop_button, self.next_button, self.mute_button, self.seek_control)):
             self.app.layout.focus(self.screen_stack[-1][0].table if self.screen_stack and isinstance(self.screen_stack[-1][0], BookmarksView) else self.control)
         self.info_directory = directory
         self.image_preview_node = None
@@ -2705,7 +3214,7 @@ class DriveBrowser:
         self.info_lexer.image_lines = {}
         self.info_paths = {}
         if directory and self.vfs.pwd() == "/":
-            lines = [self.display_path('/'), "╭────────╮  drive.py v0.996", "│ ━━━━ ● │  File Manager",
+            lines = [self.display_path('/'), "╭────────╮  drive.py v0.997", "│ ━━━━ ● │  File Manager",
                      "╰────────╯  Explore • Compare • Keep", "", "h: Open help view", "",
                      *main_help(self.display_mode)]
             from term_image.image import KittyImage, auto_image_class
@@ -2969,7 +3478,8 @@ class DriveBrowser:
     # OPEN A POPUP AND RETAIN THE CURRENT LAYOUT [
     def push(self, screen):
         self.files_scrollbar_dragging = False
-        self.stop_video()
+        if not isinstance(screen, (ScanStatisticsView, StatusView)):
+            self.stop_video()
         self.screen_stack.append((screen, self.app.layout))
         self.app.layout = Layout(self.popup_layout(screen.container), focused_element=screen.focus)
         self.app.layout.update_parents_relations()
@@ -2985,6 +3495,182 @@ class DriveBrowser:
         self.app.invalidate()
         self.finish_bookmark()
     # RESTORE THE PREVIOUS SCREEN LAYOUT ]
+    def toggle_scanner(self):
+        if self.scanner_restart_task is not None and not self.scanner_restart_task.done():
+            return
+        scanner = next((scan for scan in self.scanners if not scan.closing), None)
+        if (scanner is not None and not any(scanner.controls.modes)
+                and scanner.paused_modes is None and not scanner.requested_modes
+                and not (scanner.mode_thread and scanner.mode_thread.is_alive())):
+            finished = scanner.stop_scanning()
+
+            async def restart():
+                # Save/join the old session before reopening even the same path.
+                await finished
+                self.push(ScannerView(self))
+            self.scanner_restart_task = self.app.create_background_task(restart())
+            return
+        self.push(scanner if scanner is not None else ScannerView(self))
+
+    def start_history_writer(self):
+        self.action_history.start_writer()
+        async def lifetime():
+            previous_error = self.action_history.error
+            try:
+                while True:
+                    await asyncio.sleep(1)
+                    if self.action_history.error != previous_error:
+                        previous_error = self.action_history.error
+                        self.app.invalidate()
+            finally:
+                self.action_history.close_writer()
+        self.app.create_background_task(lifetime())
+
+    def start_conversions(self):
+        async def tick():
+            try:
+                while True:
+                    self.conversions.tick()
+                    if self.conversions.jobs:
+                        self.app.invalidate()
+                    await asyncio.sleep(.1)
+            finally:
+                self.conversions.close()
+        self.conversion_task = self.app.create_background_task(tick())
+
+    def conversion_source(self):
+        if not self.rows:
+            return None
+        row = self.rows[self.selected]
+        return os.path.abspath(get_real_path(self.vfs.pwd() if row['name'] == '..' else row['node'].id))
+
+    def edit_conversion(self):
+        source = self.conversion_source()
+        if source:
+            self.push(ConversionView(self, source))
+
+    def toggle_conversion(self):
+        source = self.conversion_source()
+        if not source:
+            return
+        async def toggle():
+            try:
+                if any(job['source'] == source or job['source'].startswith(source + os.sep)
+                       for job in self.conversions.jobs):
+                    self.conversions.remove(source)
+                    self.show_notification('Removed from conversion queue')
+                else:
+                    sources = await background_call(lambda: conversion_files(source))
+                    self.conversions.submit(sources, ConversionOptions())
+                    self.show_notification(f'Queued {len(sources)} video(s)')
+            except (OSError, ValueError) as exc:
+                self.show_notification(str(exc))
+        self.app.create_background_task(toggle())
+
+    def show_status(self):
+        if self.screen_stack and isinstance(self.screen_stack[-1][0], StatusView):
+            self.screen_stack[-1][0].close()
+        else:
+            self.push(StatusView(self))
+
+    def status_lines(self):
+        """Read cached activity only: no disk probes or map traversal."""
+        def running(task):
+            return task is not None and not task.done()
+        lines = ['Files', f'  Directory: {self.display_path(self.vfs.pwd())}',
+                 f'  Rows: {len(self.rows)} · marked folders: {len(self.scan_selection)}',
+                 f'  Cursor: {"moving / work deferred" if self.cursor_busy() else "idle"}',
+                 f'  Expansion: {"working" if running(self.expansion_task) else "idle"}',
+                 f'  Duplicate updates: {len(self.dups_pending)} pending', '', 'Quick View',
+                 f'  Preview: {"working" if self.quickview_busy() else "idle"} · {len(self.quickview_jobs)} jobs',
+                 f'  Pending selection: {"yes" if self.cursor_refresh_pending else "no"}',
+                 f'  Media: {self.video_status or "idle"}',
+                 f'  Path: {self.video_path or self.preview_bookmark_path or "—"}', '', 'Thumbnails',
+                 f'  Worker: {"working" if running(self.thumbnail_task) else "idle"}',
+                 f'  Ready: {len(self.thumbnails)} · errors: {self.thumbnail_errors}',
+                 f'  Cache clearing: {"yes" if self.thumbnail_cache_clearing else "no"}', '', 'Scanning']
+        if not self.scanners:
+            lines.append('  No scan session')
+        for scanner in self.scanners:
+            state = ('stopping' if scanner.closing else 'paused' if scanner.paused_modes is not None
+                     else 'running' if any(scanner.controls.modes) else 'complete / idle')
+            stats = scanner.stats
+            lines += [f'  {self.display_path(scanner.path)} · {state}',
+                      f'  {scanner.phase} · Loop {"ON" if scanner.controls.loop else "OFF"}',
+                      '  Modes: ' + ' / '.join(f'{i} {"RUN" if enabled else "STOP"}'
+                                               for i, enabled in enumerate(scanner.controls.modes, 1)),
+                      f'  {stats.paths:,} paths · {stats.paths_per_second:.1f} paths/s · {stats.mb_per_second:.2f} MB/s',
+                      f'  Current: {self.display_path(stats.path) if stats.path else "—"}',
+                      f'  Map: {len(scanner.model.entries):,} paths / {len(scanner.model.buckets):,} buckets',
+                      f'  Queued events: {scanner.events.qsize()} · repacking: {scanner.repacking}',
+                      f'  Directory size/count updates: {len(scanner.directory_size_dirty)} pending']
+            current, total = scanner.timing.display_snapshot()
+            lines.append(f'  Processing time: {format_elapsed(current)} / {format_elapsed(total)}')
+            if scanner.projection_error:
+                lines.append(f'  Error: {scanner.projection_error}')
+        lines += ['', 'Conversions', f'  {self.conversion_status()}']
+        active = next((job for job in self.conversions.jobs if job['id'] == self.conversions.current), None)
+        if active:
+            lines.append(f'  Active: {active["source"]}')
+        for job in self.conversions.jobs[:20]:
+            lines.append(f'  {job["status"]} {job.get("progress", 0) * 100:.0f}% · {job["source"]}')
+            if job.get('error'):
+                lines.append('    Error: ' + job['error'])
+        if len(self.conversions.jobs) > 20:
+            lines.append(f'  … {len(self.conversions.jobs) - 20} more jobs in Q')
+        lines += ['', 'Activity and errors', f'  Queued file actions: {len(self.actions)}',
+                  f'  History writer: {self.action_history.error or "OK"}',
+                  f'  Notification: {self.clipboard_notice or "—"}']
+        return [safe_text(line) for line in lines]
+
+    def conversion_status(self):
+        jobs = self.conversions.jobs
+        active = next((job for job in jobs if job['id'] == self.conversions.current), None)
+        state = 'Paused' if self.conversions.paused else 'Running' if self.conversions.enabled else 'Stopped'
+        return f'Convert {state} · {len(jobs)} jobs' + (f' · {active["progress"] * 100:.0f}%' if active else '')
+
+    def show_scan_statistics(self):
+        if self.screen_stack and isinstance(self.screen_stack[-1][0], ScanStatisticsView):
+            self.screen_stack[-1][0].close()
+            return
+        scanner = next((screen for screen, _ in reversed(self.screen_stack)
+                        if isinstance(screen, ScannerView)), None)
+        if scanner is not None and scanner.closing:
+            scanner = None
+        if scanner is not None:
+            path = scanner.storage_path
+        else:
+            path = self.vfs.pwd().rstrip('/') or '/'
+            roots = tuple(sorted(self.scan_selection))
+            if roots:
+                path += '::selection:' + json.dumps(roots)
+        self.push(ScanStatisticsView(self, path))
+
+    def pause_scanner(self):
+        for scanner in self.scanners:
+            if not scanner.closing:
+                scanner.pause_resume()
+
+    def stop_scanner(self):
+        for scanner in tuple(self.scanners):
+            scanner.stop_scanning()
+
+    def scan_progress(self):
+        if not self.scanners:
+            return ''
+        scanner = self.scanners[-1]
+        state = ('Stopping' if scanner.closing else 'Paused' if scanner.paused_modes is not None
+                 else 'Running' if any(scanner.controls.modes) else 'Complete / idle')
+        stats = scanner.stats
+        scope = self.scan_statistics_scope
+        rows = self.scan_statistics.record(scanner.storage_path)[scope]
+        files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
+        return safe_text(f'Scan {state} · {scanner.path} · {scanner.phase} · '
+                         f'{scope}: {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
+                         f'{stats.paths_per_second:.0f} paths/s · '
+                         f'{stats.mb_per_second:.1f} MB/s · {stats.path} · '
+                         's:view Ctrl+S:statistics Ctrl+P:pause/resume Ctrl+K:stop')
+
     # RESET CURRENT MAP [
     def reset_current_map(self):
         self.video_epoch += 1
@@ -3098,36 +3784,51 @@ class DriveBrowser:
         # COPY THE CURRENT PROJECTION OR OUTPUT STATE ]
         self.app.create_background_task(copy())
     # COPY INFO FOR DRIVE BROWSER ]
+    def request_quit(self):
+        self.clipboard_notice = 'Quitting… closing interface and background tasks'
+        self.app.invalidate()
+        if self.app.is_running:
+            self.app._redraw()
+        self.app.exit()
+
     # RUN DRIVE BROWSER [
     def run(self):
         try:
             self.app.run()
         finally:
-            self.stop_video()
-            for player in self.video_workers:
-                player.thread.join(timeout=2)
-            self.clear_native_preview()
-            self.clear_grid_native()
-            self.thumbnail_epoch += 1
-            if self.thumbnail_executor is not None:
-                self.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
-                self.thumbnail_executor = None
-            # Cancellation also wakes queue-backpressured workers before closing SQLite.
+            print('Quitting: stopping background work', file=sys.stderr, flush=True)
             for scanner in self.scanners:
                 scanner.stop.set()
                 scanner.controls.wake.set()
                 scanner.projection_wake.set()
+            shutdown_step('Stopping media playback', self.stop_video)
+            shutdown_step('Stopping and saving conversions', self.conversions.close)
+            for index, player in enumerate(self.video_workers, 1):
+                shutdown_step(f'Waiting for media worker {index}', lambda player=player: player.thread.join(timeout=2))
+            shutdown_step('Clearing terminal images', lambda: (self.clear_native_preview(), self.clear_grid_native()))
+            self.thumbnail_epoch += 1
+            executors = list(self.thumbnail_executors)
+            if self.thumbnail_executor is not None and self.thumbnail_executor not in executors:
+                executors.append(self.thumbnail_executor)
+            for index, executor in enumerate(executors, 1):
+                shutdown_step(f'Waiting for thumbnail worker {index}',
+                              lambda executor=executor: executor.shutdown(wait=True, cancel_futures=True))
+            self.thumbnail_executor = None
+            self.thumbnail_executors.clear()
             for scanner in self.scanners:
-                if scanner.projection_thread is not None:
-                    scanner.projection_thread.join()
-                if scanner.worker is not None:
-                    scanner.worker.join()
-                if scanner.mode_thread is not None:
-                    scanner.mode_thread.join()
-                if scanner.order_thread is not None:
-                    scanner.order_thread.join()
-                scanner.drain_all()
-                scanner.save()
+                root = safe_text(scanner.path)
+                for label, thread in (('map projection', scanner.projection_thread),
+                                      ('scan worker', scanner.worker),
+                                      ('mode switch', scanner.mode_thread),
+                                      ('order switch', scanner.order_thread)):
+                    if thread is not None:
+                        shutdown_step(f'Waiting for {label}: {root}', thread.join)
+                shutdown_step(f'Applying remaining scan events: {root}', scanner.drain_all)
+                shutdown_step(f'Saving scan map ({len(scanner.model.entries):,} paths): {root}', scanner.save)
+            shutdown_step('Saving scan statistics', self.scan_statistics.save)
+            shutdown_step('Saving directory file counts', self.directory_counts.save)
+            shutdown_step('Flushing action history', self.action_history.close_writer)
+            print('Quitting: cleanup complete', file=sys.stderr, flush=True)
     # RUN DRIVE BROWSER ]
 # BROWSE FILES AND COORDINATE QUICK VIEW AND POPUPS ]
 # DESCRIBE FILE MANAGER SHORTCUTS AND CURRENT MODE LEGEND [
@@ -3155,10 +3856,16 @@ def main_help(display_mode):
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
         'Info duplicates: Tab to info, arrows or click to select; Enter opens the duplicate location',
-        '[#ff8800]h / Esc[/#ff8800] (in help): Close help',
+        '[#ff8800]h[/#ff8800]: Open help from Files; close when help is focused',
+        '[#ff8800]Esc[/#ff8800] (in help): Leave search, then close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',
         'Media quick view: p toggles Play / Stop; seek bar click/wheel or focused Left/Right (5s)',
-        '[#ff8800]![/#ff8800]: Toggle directory u exclusion · X: enable/disable blacklist · L: view blacklist',
+        '[#ff8800]![/#ff8800]: Toggle directory blacklist for u and scanner',
+        '[#ff8800]X[/#ff8800]: Toggle blacklist bypass',
+        '[#ff8800]L[/#ff8800]: Open directory blacklist',
+        '[#ff8800]Ctrl+B[/#ff8800]: Show/hide blacklisted entries in Files (independent of X)',
+        '[#ff8800]Ctrl+U[/#ff8800]: Show/hide not-found files; red names in graphics mode',
+        '[#ff8800]Ctrl+D / D[/#ff8800]: Move selected database file/subtree to D trash / view D; disk files kept',
         '[#ff8800]v[/#ff8800]: Cycle all / media (images, videos, audio) / image / videos',
         '[#ff8800].[/#ff8800]: Toggle dotfiles and hidden directories (shown by default)',
         '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; G page-priority generation order; k/K clear directory/all thumbnail caches; +/- display height (minimum 1 line), cache 128/256 pixels',
@@ -3166,19 +3873,30 @@ def main_help(display_mode):
         '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
         '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
         '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
-        '[#ff8800]Arrows / Page Up / Page Down[/#ff8800]: Navigate the focused table',
-        '[#ff8800]Ctrl+X[/#ff8800]: Copy info panel text to clipboard',
-        '[#ff8800]Ctrl+Y[/#ff8800]: Copy selected absolute local path',
+        '[#ff8800]Up / Down / Left / Right[/#ff8800]: Navigate the focused table; table Left/Right go to parent/open, graphics move one entry',
+        '[#ff8800]PageUp / PageDown[/#ff8800]: Move one Files page',
+        '[#ff8800]Home / End[/#ff8800]: Select first/last Files entry',
+        '[#ff8800]Tab / Shift+Tab[/#ff8800]: Focus next/previous pane or media control',
+        '[#ff8800]Ctrl+Y[/#ff8800]: Copy info panel text to clipboard',
+        '[#ff8800]Ctrl+X[/#ff8800]: Copy selected absolute local path',
         '[#ff8800]Ctrl+T[/#ff8800]: New terminal at selection (file: parent folder)',
         '[#ff8800]Ctrl+F[/#ff8800]: Reveal selected file in Finder/file manager; open selected folder',
         '[#ff8800]~ / /[/#ff8800]: Home folder / path command (empty Enter: /; Esc: cancel)',
-        '[#ff8800]l[/#ff8800]: History · Delete: remove entry · Shift+Delete: clear · t: online/offline filter',
+        '[#ff8800]l[/#ff8800]: History · Delete: remove entry · Shift+Delete: clear · t: online/offline filter · v: preview · drag: select · F5: refresh presence',
         '[#ff8800]t[/#ff8800]: Cycle MC Default, MC Blue, Textual Dark and White themes',
         '[#ff8800]n[/#ff8800]: Cycle circles, colored names and monochrome display',
         '[#ff8800]Space / Insert / * / -[/#ff8800]: Toggle folder / toggle and down / invert folders / clear marks',
-        '[#ff8800]s[/#ff8800]: Scan marked folders, or the current directory',
+        '[#ff8800]s[/#ff8800]: Open/hide scan view; finished scans restart at current directory/marked folders',
+        '[#ff8800]Ctrl+P / Ctrl+K[/#ff8800]: Pause/resume background scan / stop and save scan',
+        '[#ff8800]Ctrl+S[/#ff8800]: Scan statistics table; v switches current/total display',
+        '[#ff8800]Ctrl+E / Q[/#ff8800]: Video conversion editor / persistent conversion queue',
+        'Convert / Queue +/- / Queue buttons: edit, toggle selected video/folder, manage queue',
         '[#ff8800]Shift+R[/#ff8800]: Clear saved map and resume positions for the current directory',
-        '[#ff8800]q[/#ff8800]: Quit',
+        '[#ff8800]F4[/#ff8800]: Live status window for scans, previews, thumbnails, duplicates, conversions and errors',
+        '[#ff8800]F5 / Ctrl+R[/#ff8800]: Reload Files metadata and scan symbols',
+        '[#ff8800]=[/#ff8800]: Grow thumbnails (same as +)',
+        '[#ff8800]_[/#ff8800]: Shrink thumbnails; graphics - also shrinks, table - clears folder marks',
+        '[#ff8800]q / Ctrl+C[/#ff8800]: Quit',
         '', '[bold]Removal queue[/bold]',
         '[#ff8800]Delete[/#ff8800]: Queue selected file for removal',
         '[#ff8800]Shift+Delete[/#ff8800]: Queue file and all duplicates for removal',
@@ -3186,11 +3904,11 @@ def main_help(display_mode):
         'In Actions: [#ff8800]x[/#ff8800] clears the queue; [#ff8800]e[/#ff8800] exports actions/action*.sh',
         'Use the Apply button to apply queued operations',
         '', '[bold]File table[/bold]',
-        'Size and Dups remain visible beside clipped long names',
+        'Size, Files and Dups remain visible beside clipped long names',
         '[#ff8800]Shift+Left / Right[/#ff8800]: Pan long names one symbol in all views',
         '[#ff8800]Shift+Home / End (or Shift+PageUp / PageDown)[/#ff8800]: Beginning / end of longest filename',
         'Horizontal sliders: click or drag to pan long filenames',
-        'Directory Dups values retain their total-file counts',
+        'Files shows directory descendant counts or 1 for a file; Dups shows file hash matches, — for directories',
         'The vertical scrollbar is always visible',
     ]
 # DESCRIBE FILE MANAGER SHORTCUTS AND CURRENT MODE LEGEND ]
@@ -3200,52 +3918,61 @@ SCANNER_HELP = [
     '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths',
     '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks',
     '[#ff8800]q[/#ff8800]: Quit the app from any view',
+    '[#ff8800]F4[/#ff8800]: Live status window for all background activity',
     '[bold]Scanning[/bold]',
     'On open: lite → medium → heavy once, then all modes stop',
-    'Changing a scan mode cancels the automatic startup sequence',
-    '[#ff8800]1 / 2 / 3[/#ff8800]: Independently run/stop lite, medium, heavy',
+    'A started mode finishes, then advances 1 → 2 → 3; L toggles loop (off by default)',
+    '[#ff8800]1 / 2 / 3[/#ff8800]: Start/stop selected stage; completion advances to the next stage',
+    '[#ff8800]L[/#ff8800]: Toggle repeat Lite → Medium → Heavy (Loop ON/OFF)',
     '[green]RUN[/green] / [red]STOP[/red]: enabled/paused mode',
     'Lite: discover paths and build buckets; directories have D state',
     'Medium: discover new paths and verify file presence/type/size without checksums',
     'Heavy: compare checksums; verified new files enter VFS and show green in main',
     'Heavy scanning keeps your map cursor and file page in place',
     'Directories are skipped by medium/heavy verification',
+    'Blacklist prunes discovery and verification; red ! chunks contain excluded entries; X bypasses from Files',
     'Start/stop resumes each mode at its saved pending path',
     '[#ff8800]Shift+1 / Shift+2 / Shift+3[/#ff8800] (also [#ff8800]! / @ / #[/#ff8800]): start from cursor bucket',
     '[#ff8800]r[/#ff8800]: Toggle known-file disk metadata reads in lite',
     '[#ff8800]t[/#ff8800]: Toggle heavy new-first/all priority within buckets',
-    '[#ff8800]J[/#ff8800]: Heavy normal (sequential) / expert (selector queue)',
-    'Expert tick: pick one random starting bucket, then mark 1–20 following buckets blue',
-    '? buckets first; skip blocked/occupied buckets, wrap at end; 1–20 added per tick',
-    'Skip fully green buckets until all file buckets are green; mixed ?/green still count',
-    'Background additions: random 0.2–1s; empty work queue refills immediately',
-    'Add new ranges while earlier ranges scan; total blue can exceed 20',
-    'Completed buckets restore their normal background; pause keeps pending work',
-    'Changing J also cancels startup; startup heavy is a finite normal pass',
+    '[#ff8800]J[/#ff8800]: Heavy normal/expert order; keeps stage sequencing',
+    'Finite expert uses a pending-file pass; the continuous blue selector is not used for sequenced runs',
+    'Default: finite expert pass, new then unknown, then stop; no verified-file checksum rereads',
+    'Manual mode starts include old files; Heavy finishes and stops unless L Loop is ON',
+    'Ctrl+S: live per-path statistics table; v switches current/total display',
     '', '[bold]Symbols[/bold]',
     '[white]D[/white] Directory',
+    '[green]·[/green] Empty directory (confirmed by discovery)',
     '[white]?[/white] Unverified/new file',
     '[green]?[/green] Bucket has both unverified and verified files',
     '[white]U[/white] Legacy new state',
     '[red]U[/red] Missing file',
     '[green]●[/green] Verified by the latest metadata/checksum check',
     '[#ff8800]M[/#ff8800] Modified file',
-    '[white on red]\\ | / -[/white on red] Recent map update in all modes; red overrides blue until animation ends; S n% is file progress',
+    '[white on red]\\ | / -[/white on red] Recent map activity in Lite/Medium; red overrides blue until animation ends; S n% is file progress',
+    '[white on red]◐ ◓ ◑ ◒[/white on red] Heavy (stage 3) activity uses a rotating circular indicator',
     '', '[bold]Map and settings[/bold]',
     '[#ff8800]m[/#ff8800]: Count/size bucket packing',
     '[#ff8800]v[/#ff8800]: Fixed/scroll packing',
-    '[#ff8800]Arrows / Page Up / Page Down[/#ff8800]: Move map cursor',
+    '[#ff8800]Up / Down / Left / Right[/#ff8800]: Move map cursor; file list Left/Right pan horizontally',
+    '[#ff8800]PageUp / PageDown[/#ff8800]: Move a map page or previous/next file page',
+    '[#ff8800]Home / End[/#ff8800]: First/last map bucket, file row, page or horizontal position according to focus',
+    '[#ff8800]Tab / Shift+Tab[/#ff8800]: Focus next/previous scanner control',
+    '[#ff8800]Enter[/#ff8800]: Apply Paths/bucket or MiB/bucket input',
+    '[#ff8800]Shift+Home / End (or Shift+PageUp / PageDown)[/#ff8800]: Beginning / end of longest filename',
+    '[#ff8800]Ctrl+C[/#ff8800]: Quit',
     '[#ff8800]Right[/#ff8800] at last bucket: follow new buckets at >',
     '[#ff8800]Right[/#ff8800] keeps follow mode; other arrows, Page Up/Down or real-bucket click exit',
-    'Paths/bucket and MiB/bucket: edit limits; [#ff8800]Enter[/#ff8800] applies',
+    'Paths/bucket and MiB/bucket: edit limits; Enter applies',
     '', '[bold]File list and pages[/bold]',
     'Click a status count to filter; click it again or All to remove filter',
     '[#ff8800]][/#ff8800] in map or file list: select /a, then /a/b for selected file /a/b/c',
-    '[#ff8800][[/#ff8800] moves back through parent directories',
+    '[#ff8800][[/#ff8800]: Move back through parent directories',
     'Both directory scope keys wrap at the ends of the ancestor chain',
     'The matching directory prefix in file paths is gold; the remaining name keeps its normal color',
     'Matching buckets get a random background; symbol foregrounds stay unchanged',
-    '[#ff8800]f[/#ff8800]: Fix matching bucket colors; [#ff8800]d[/#ff8800]: Clear all colors',
+    '[#ff8800]f[/#ff8800]: Fix matching bucket colors',
+    '[#ff8800]d[/#ff8800]: Clear all bucket colors',
     '[#ff8800]c[/#ff8800]: Clear fixed colors, keeping the active directory scope',
     'Fixed colors persist through scope changes and saved-map reopening',
     'The active directory scope previews over fixed colors; leaving it reveals the saved colors',
@@ -3264,7 +3991,8 @@ SCANNER_HELP = [
     'The Lite/Medium/Heavy controls line ends with mode / map time as M:SS or H:MM:SS (hours can exceed 24)',
     'Map time totals persist across reopening; Shift+R in main resets them with the map',
     'Map settings, selection, filter and per-mode positions save per path',
-    '[#ff8800]s / Esc[/#ff8800] (scanner): Close scanner; [#ff8800]h[/#ff8800]: Help',
+    '[#ff8800]h[/#ff8800]: Open scanner help',
+    '[#ff8800]s / Esc[/#ff8800] (scanner): Hide scanner (keeps running); Ctrl+P pause/resume; Ctrl+K stop; [#ff8800]h[/#ff8800]: Help',
     '[#ff8800]h / Esc[/#ff8800] (help) or Close button: Return to scanner',
 ]
 
@@ -3318,7 +4046,7 @@ class PTScreen:
         self.browser = browser
         self.keys = KeyBindings()
         self.bind(['x'], browser.toggle_path_prefixes, eager=True,
-                  filter=Condition(lambda: not isinstance(self, PathCommandView) and (not isinstance(self, BookmarksView) or
+                  filter=Condition(lambda: not browser.help_search_focused() and not isinstance(self, (PathCommandView, ConversionView)) and (not isinstance(self, BookmarksView) or
                       not (browser.app.layout.has_focus(self.path) or browser.app.layout.has_focus(self.number)))))
     # INITIALIZE PTSCREEN FOR PTSCREEN ]
     # START PTSCREEN FOR PTSCREEN [
@@ -3340,6 +4068,496 @@ class PTScreen:
     # REQUEST A REDRAW FOR PTSCREEN ]
 # MANAGE PTSCREEN FOR THE DRIVE-TUI WORKFLOW ]
 # EDIT BOOKMARK TARGETS AND PREVIEW SELECTED FILES [
+class ConversionSeekControl(VideoSeekControl):
+    def __init__(self, editor):
+        super().__init__(editor.browser)
+        self.editor = editor
+
+    def create_content(self, width, height):
+        self.width = max(1, width - 20)
+        duration = self.editor.duration or 1
+        start = round(self.editor.value('start') / duration * (self.width - 1))
+        end = round(self.editor.value('end') / duration * (self.width - 1))
+        current = round(self.browser.video_position / duration * (self.width - 1))
+        track = ''.join('|' if i == current else '[' if i == start else ']' if i == end
+                        else '=' if start <= i <= end else '-' for i in range(self.width))
+        text = track + f' {self.browser.video_position:.1f}/{self.editor.duration:.1f}s'
+        return UIContent(get_line=lambda _: [('class:header', fit(text, width))],
+                         line_count=1, show_cursor=False)
+
+    def mouse_handler(self, event):
+        if event.event_type == MouseEventType.MOUSE_UP:
+            editor = self.editor
+            target = next((name for name, field in editor.times.items()
+                           if editor.browser.app.layout.has_focus(field)), editor.time_target)
+            position = max(0., min(1., event.position.x / max(1, self.width - 1))) * editor.duration
+            editor.set_time(target, position - editor.value('start') if target == 'length' else position)
+            return None
+        return super().mouse_handler(event)
+
+
+class ConversionView(PTScreen):
+    def __init__(self, browser, source, job=None):
+        super().__init__(browser)
+        from prompt_toolkit.layout import ScrollablePane
+        self.source = source
+        self.job_id = job['id'] if job else None
+        self.options = ConversionOptions(**job['options']) if job else ConversionOptions()
+        self.duration = 0.
+        self.sources = []
+        self.closed = False
+        self.updating = False
+        self.time_target = 'start'
+        self.frame_epoch = 0
+        self.task = None
+        self.frame_task = None
+        self.drag = None
+        self.message = 'Reading media…'
+        self.option_error = False
+        self.times = {name: TextArea(height=1, multiline=False) for name in ('start', 'end', 'length')}
+        self.times['start'].text = str(self.options.start)
+        self.times['end'].text = str(self.options.end or 0)
+        self.times['length'].text = '0'
+        self.crf = TextArea(text=str(self.options.crf), height=1, multiline=False)
+        self.bitrate = TextArea(text=str(self.options.bitrate), height=1, multiline=False)
+        self.cap = TextArea(text=str(self.options.max_mb), height=1, multiline=False)
+        self.extra = TextArea(text=self.options.extra, height=2, multiline=False, wrap_lines=True)
+        self.cli = TextArea(read_only=True, height=3, wrap_lines=False, scrollbar=True)
+        self.network = Button('', width=28, handler=self.cycle_network)
+        self.codec = Button('', width=28, handler=self.cycle_codec)
+        self.quality = Button('', width=28, handler=self.cycle_quality)
+        self.resolution = Button('', width=28, handler=self.cycle_resolution)
+        self.seek = ConversionSeekControl(self)
+        self.focus = self.times['start']
+        self.bind(['escape'], self.close, eager=True)
+        self.bind(['tab'], lambda: browser.app.layout.focus_next())
+        self.bind(['s-tab'], lambda: browser.app.layout.focus_previous())
+        self.bind(['c-y'], lambda: browser.copy_text(self.cli.text), eager=True)
+        for name, field in self.times.items():
+            original = field.control.mouse_handler
+            state = {}
+            def mouse(event, name=name, field=field, original=original, state=state):
+                if event.event_type == MouseEventType.MOUSE_DOWN:
+                    self.time_target = name
+                    state.update(x=event.position.x, value=self.value(name))
+                    positions = browser.app.renderer._last_screen.visible_windows_to_write_positions if browser.app.renderer._last_screen else {}
+                    position = positions.get(field.window)
+                    self.drag = (name, (position.xpos if position else 0) + event.position.x, self.value(name))
+                    self.invalidate()
+                elif event.event_type == MouseEventType.MOUSE_MOVE and 'x' in state and self.drag:
+                    self.set_time(name, state['value'] + (event.position.x - state['x']) * .1)
+                    return None
+                elif event.event_type == MouseEventType.MOUSE_UP:
+                    self.drag = None
+                    state.clear()
+                return original(event)
+            field.control.mouse_handler = mouse
+            def changed(buffer, name=name):
+                if not self.updating and self.duration:
+                    try:
+                        self.set_time(name, parse_time(buffer.text), rewrite=False)
+                    except ValueError:
+                        pass
+            field.buffer.on_text_changed += changed
+        def row(label, widget):
+            return VSplit([Window(FormattedTextControl(label), width=13), widget], height=1)
+        form = HSplit([
+            self.network, self.codec, self.quality, self.resolution,
+            row('CRF 0..51', self.crf), row('kbps (0=CRF)', self.bitrate), row('Max MB (0=off)', self.cap),
+            Window(FormattedTextControl(lambda: f'Source length: {self.duration:.3f}s'), height=1),
+            row('Start seconds', self.times['start']), row('End seconds', self.times['end']),
+            row('Length seconds', self.times['length']),
+            Button('Reset full length', width=20, handler=self.reset),
+            Window(FormattedTextControl('Extra FFmpeg encoding options'), height=1), self.extra,
+        ])
+        preview = HSplit([
+            browser.video_area,
+            VSplit([Button('Play', width=6, handler=self.play), Button('Stop', width=6, handler=browser.stop_video), browser.mute_button,
+                    Window(FormattedTextControl(lambda: safe_text(browser.video_status)), height=1)], height=1),
+            Window(self.seek, height=1),
+            Window(FormattedTextControl('Choose Start/End/Length, click seek bar. Drag time field: 0.1s/column.'),
+                   height=2, wrap_lines=True),
+        ])
+        self.container = HSplit([
+            Window(FormattedTextControl(lambda: safe_text(self.source)), height=1, style='class:header'),
+            VSplit([Frame(preview, title='Preview'), Frame(ScrollablePane(form), title='Conversion settings')]),
+            Window(FormattedTextControl(lambda: safe_text(self.message)), height=2, wrap_lines=True),
+            self.cli,
+            VSplit([Button('Submit', width=8, handler=self.submit),
+                    Button('Convert now', width=13, handler=self.convert_now),
+                    Button('Pause/resume', width=14, handler=browser.conversions.pause),
+                    Button('Copy CLI', width=10, handler=lambda: browser.copy_text(self.cli.text)),
+                    Button('Queue', width=7, handler=lambda: browser.push(ConversionQueueView(browser))),
+                    Button('Close', width=7, handler=self.close)], height=1),
+        ], key_bindings=self.keys)
+        self.labels()
+
+    def value(self, name):
+        try:
+            return parse_time(self.times[name].text)
+        except ValueError:
+            return 0.
+
+    def install_drag(self, app):
+        if self.drag is None:
+            return
+        def drag(event):
+            if self.drag is None:
+                return NotImplemented
+            name, origin, initial = self.drag
+            if event.event_type in (MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP):
+                self.set_time(name, initial + (event.position.x - origin) * .1)
+                if event.event_type == MouseEventType.MOUSE_UP:
+                    self.drag = None
+                self.invalidate()
+        size = app.output.get_size()
+        app.renderer.mouse_handlers.set_mouse_handler_for_range(
+            x_min=0, x_max=size.columns, y_min=0, y_max=size.rows, handler=drag)
+
+    def labels(self):
+        self.network.text = 'Export: ' + self.options.network
+        self.codec.text = 'Codec: ' + self.options.codec
+        self.quality.text = 'Quality: ' + self.options.quality
+        self.resolution.text = 'Resolution: ' + self.options.resolution
+
+    def cycle_network(self):
+        network = NETWORKS[(NETWORKS.index(self.options.network) + 1) % len(NETWORKS)]
+        start, end = self.value('start'), self.value('end')
+        self.options = ConversionOptions.preset(network)
+        self.options.start, self.options.end = start, end
+        self.crf.text, self.bitrate.text, self.cap.text = str(self.options.crf), '0', str(self.options.max_mb)
+        self.labels()
+
+    def cycle_codec(self):
+        self.options.codec = 'h265' if self.options.codec == 'h264' else 'h264'
+        self.labels()
+
+    def cycle_quality(self):
+        self.options.quality = 'low' if self.options.quality == 'high' else 'high'
+        self.crf.text = '30' if self.options.quality == 'low' else '20'
+        self.labels()
+
+    def cycle_resolution(self):
+        self.options.resolution = RESOLUTIONS[(RESOLUTIONS.index(self.options.resolution) + 1) % len(RESOLUTIONS)]
+        self.labels()
+
+    def reset(self):
+        self.updating = True
+        self.times['start'].text = '0.000'
+        self.times['end'].text = f'{self.duration:.3f}'
+        self.times['length'].text = f'{self.duration:.3f}'
+        self.updating = False
+        self.seek_frame(0)
+
+    def set_time(self, name, value, rewrite=True):
+        if not math.isfinite(value) or not self.duration:
+            return
+        start = max(0, min(self.value('start'), max(0, self.duration - .001)))
+        end = max(start + .001, min(self.duration, self.value('end')))
+        if name == 'start':
+            start = max(0, min(value, max(0, end - .001)))
+            position = start
+        else:
+            end = max(start + .001, min(self.duration, start + value if name == 'length' else value))
+            position = end
+        self.updating = True
+        for key, number in [('start', start), ('end', end), ('length', end - start)]:
+            if rewrite or key != name:
+                self.times[key].text = f'{number:.3f}'
+        self.updating = False
+        self.time_target = name
+        self.seek_frame(position)
+
+    def seek_frame(self, seconds):
+        self.browser.seek_video(seconds)
+        self.frame_epoch += 1
+        epoch = self.frame_epoch
+        if self.browser.video_player is not None:
+            return
+        self.browser.video_epoch += 1  # Invalidate a still poster at the old time.
+        if self.frame_task:
+            self.frame_task.cancel()
+        async def preview():
+            await asyncio.sleep(.15)
+            def load():
+                import io
+                from PIL import Image
+                result = subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-ss',
+                                         str(min(seconds, max(0, self.duration - .04))), '-i', self.sources[0],
+                                         '-vf', "scale='min(640,iw)':-2", '-frames:v', '1',
+                                         '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1'],
+                                        capture_output=True, timeout=20, check=True)
+                image = Image.open(io.BytesIO(result.stdout)).convert('RGB')
+                return serialize_video_frame(image, self.browser.video_render_dimensions)
+            try:
+                frame = await background_call(load)
+                if (epoch == self.frame_epoch and not self.closed and self.browser.screen_stack
+                        and self.browser.screen_stack[-1][0] is self):
+                    self.browser.apply_video_frame(frame)
+                    self.invalidate()
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                self.message = 'Frame preview: ' + str(exc)
+        self.frame_task = self.browser.app.create_background_task(preview())
+
+    def read_options(self):
+        self.options.start = parse_time(self.times['start'].text)
+        self.options.end = parse_time(self.times['end'].text)
+        self.options.crf = int(self.crf.text)
+        self.options.bitrate = int(self.bitrate.text)
+        self.options.max_mb = float(self.cap.text)
+        self.options.extra = self.extra.text
+        output = str(Path(self.sources[0]).parent / 'youtube-conv' / f'{Path(self.sources[0]).stem}-{self.options.network}-export.mp4')
+        args = conversion_command(self.sources[0], output, self.options, self.duration)
+        return args
+
+    def play(self):
+        self.browser.play_video()
+
+    def submit(self):
+        try:
+            self.read_options()
+            options = replace(self.options)
+            if Path(self.source).is_dir() and self.value('end') == round(self.duration, 3) and not options.start:
+                options.end = None
+            self.browser.conversions.submit(self.sources, options, self.job_id)
+            if self.job_id is None and len(self.sources) == 1:
+                self.job_id = next(job['id'] for job in reversed(self.browser.conversions.jobs)
+                                   if job['source'] == self.sources[0] and job['status'] == 'queued')
+            self.message = f'Saved {len(self.sources)} conversion(s) to queue'
+            return True
+        except (ValueError, OSError, IndexError) as exc:
+            self.message = str(exc)
+            return False
+
+    def convert_now(self):
+        if self.submit():
+            try:
+                if self.job_id:
+                    self.browser.conversions.convert_now(self.job_id)
+                else:
+                    self.browser.conversions.start()
+            except ValueError as exc:
+                self.message = str(exc)
+
+    def start(self):
+        async def run():
+            try:
+                self.sources = await background_call(lambda: conversion_files(self.source))
+                if not self.sources:
+                    raise ValueError('No video files found')
+                self.duration = await background_call(lambda: probe_media(self.sources[0]))
+                if self.closed:
+                    return
+                from vfs.nodes import VFSNode
+                path = self.sources[0]
+                self.browser.show_info(preview_node=VFSNode(path, Path(path).name, False, size=Path(path).stat().st_size))
+                self.browser.video_duration = self.duration
+                self.updating = True
+                self.times['end'].text = f'{min(self.duration, self.options.end or self.duration):.3f}'
+                self.times['length'].text = f'{self.value("end") - self.value("start"):.3f}'
+                self.updating = False
+                self.message = f'{len(self.sources)} file(s) · output: source directory/youtube-conv/'
+                self.seek_frame(self.value('start'))
+                while not self.closed:
+                    try:
+                        text = shlex.join(self.read_options())
+                        if self.cli.text != text:
+                            self.cli.text = text
+                        if self.option_error:
+                            self.message = f'{len(self.sources)} file(s) · output: source directory/youtube-conv/'
+                            self.option_error = False
+                    except (ValueError, OSError) as exc:
+                        self.option_error = True
+                        self.message = str(exc)
+                    self.invalidate()
+                    await asyncio.sleep(.2)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                self.message = str(exc)
+                self.invalidate()
+        self.task = self.browser.app.create_background_task(run())
+
+    def close(self):
+        self.closed = True
+        if self.task:
+            self.task.cancel()
+        if self.frame_task:
+            self.frame_task.cancel()
+        self.browser.stop_video()
+        self.browser.video_epoch += 1
+        self.browser.pop(self)
+
+
+class ConversionQueueView(PTScreen):
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.table = RowsControl(self.rows)
+        self.focus = self.table
+        table_bindings(self, self.table)
+        self.bind(['escape'], self.close, eager=True)
+        self.bind(['enter'], self.edit, eager=True)
+        self.bind(['delete'], self.remove, eager=True)
+        self.container = HSplit([
+            Window(FormattedTextControl('Video conversion queue · Enter edit/go · Delete remove'), height=1, style='class:header'),
+            Window(self.table, right_margins=[ScrollbarMargin()], always_hide_cursor=True),
+            Window(FormattedTextControl(self.preset_text), height=3, wrap_lines=True),
+            Window(FormattedTextControl(lambda: f'{len(browser.conversions.jobs)} jobs · '
+                   f'{"Paused" if browser.conversions.paused else "Running" if browser.conversions.enabled else "Stopped"}'), height=1),
+            VSplit([Button('Start', width=7, handler=browser.conversions.start),
+                    Button('Pause/resume', width=14, handler=browser.conversions.pause),
+                    Button('Stop', width=6, handler=browser.conversions.stop),
+                    Button('Clear', width=7, handler=browser.conversions.clear),
+                    Button('Convert now', width=13, handler=self.now),
+                    Button('Edit', width=6, handler=self.edit)], height=1),
+        ], key_bindings=self.keys)
+
+    def rows(self):
+        return [[('', f'{job["status"]:7} {job["progress"] * 100:5.1f}% '),
+                 ('class:literal', job['source']),
+                 ('', ' · ' + job['options']['network'] + ' · ' + (job['error'] or job['output']))]
+                for job in self.browser.conversions.jobs]
+
+    def preset_text(self):
+        job = self.selected()
+        if not job:
+            return 'Queue is empty'
+        options = job['options']
+        return (f"{options['network']} · {options['codec']} · {options['quality']} · "
+                f"CRF {options['crf']} · {options['resolution']} · {options['bitrate']} kbps · "
+                f"cap {options['max_mb']} MB\n"
+                f"Start {options['start']:.3f}s → {options['end'] if options['end'] is not None else 'EOF'} · "
+                'Enter/Edit: go to source and edit this preset')
+
+    def selected(self):
+        jobs = self.browser.conversions.jobs
+        return jobs[min(self.table.index, len(jobs) - 1)] if jobs else None
+
+    def remove(self):
+        job = self.selected()
+        if job:
+            # Remove only this preset/job; directory toggles remove whole trees.
+            if self.browser.conversions.current == job['id']:
+                self.browser.conversions.stop()
+            self.browser.conversions.jobs.remove(job)
+            self.browser.conversions.dirty = True
+            self.browser.conversions.save()
+            self.table.move(0)
+
+    def now(self):
+        job = self.selected()
+        if job:
+            try:
+                self.browser.conversions.convert_now(job['id'])
+            except ValueError as exc:
+                self.browser.show_notification(str(exc))
+
+    def edit(self):
+        job = self.selected()
+        if job:
+            self.close()
+            while self.browser.screen_stack and isinstance(self.browser.screen_stack[-1][0], ConversionView):
+                self.browser.screen_stack[-1][0].close()
+            self.browser.go_path(str(Path(job['source']).parent))
+            self.browser.refresh(Path(job['source']).name)
+            self.browser.push(ConversionView(self.browser, job['source'], job))
+
+
+class StatusView(PTScreen):
+    """Live cached activity, with stable scroll position and no playback stop."""
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.table = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
+        self.focus = self.table
+        self.task = None
+        self.bind(['escape'], self.close, eager=True)
+        self.bind(['f5'], self.refresh, eager=True)
+        self.container = HSplit([
+            Frame(self.table, title='Status · F4 / Esc close · F5 refresh'),
+            Button('Close', handler=self.close),
+        ], key_bindings=self.keys)
+        self.bind(['tab'], lambda: browser.app.layout.focus_next())
+        self.bind(['s-tab'], lambda: browser.app.layout.focus_previous())
+        self.refresh()
+
+    def refresh(self):
+        text = '\n'.join(self.browser.status_lines())
+        if text != self.table.text:
+            cursor = self.table.buffer.cursor_position
+            self.table.text = text
+            self.table.buffer.cursor_position = min(cursor, len(text))
+        self.invalidate()
+
+    def start(self):
+        async def tick():
+            while True:
+                await asyncio.sleep(.3)
+                self.refresh()
+        self.task = self.browser.app.create_background_task(tick())
+
+    def close(self):
+        if self.task:
+            self.task.cancel()
+        super().close()
+
+
+class ScanStatisticsView(PTScreen):
+    def __init__(self, browser, path):
+        super().__init__(browser)
+        self.path = path
+        self.table = TextArea(read_only=True, scrollbar=True, wrap_lines=False)
+        self.focus = self.table
+        self.task = None
+        self.bind(['escape'], self.close, eager=True)
+        self.bind(['v'], self.switch, eager=True)
+        self.container = Frame(self.table, title='Scan statistics · v current/total · Esc close',
+                               key_bindings=self.keys)
+        self.refresh()
+
+    def switch(self):
+        self.browser.scan_statistics_scope = ('total' if self.browser.scan_statistics_scope == 'current' else 'current')
+        self.refresh()
+        self.invalidate()
+
+    def refresh(self):
+        record = self.browser.scan_statistics.record(self.path)
+        primary = self.browser.scan_statistics_scope
+        scopes = [primary] + [scope for scope in ('current', 'session', 'last', 'total') if scope != primary]
+        root, separator, selection = self.path.partition('::selection:')
+        label = safe_text(self.browser.display_path(root))
+        if separator:
+            label += ' · folders: ' + ', '.join(safe_text(self.browser.display_path(path))
+                                               for path in json.loads(selection))
+        lines = [label, f'View: {primary} · decimal MB · processing time (pauses excluded)',
+                 '', f'{"Scope / mode":<24} {"Files":>12} {"MB":>14} {"Time":>12}']
+        labels = {'current': 'Current scan', 'session': 'Current session',
+                  'last': 'Last session', 'total': 'Total scans'}
+        for scope in scopes:
+            rows = record[scope]
+            for mode, (files, size, seconds) in enumerate(rows, 1):
+                label = f'{labels[scope]} / {mode}'
+                lines.append(f'{label:<24} {files:>12,d} {size / 1_000_000:>14,.3f} {format_elapsed(seconds):>12}')
+            files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
+            lines.append(f'{"All modes":<24} {files:>12,d} {size / 1_000_000:>14,.3f} {format_elapsed(seconds):>12}')
+            lines.append('')
+        text = '\n'.join(lines)
+        if text != self.table.text:
+            cursor = self.table.buffer.cursor_position
+            self.table.text = text
+            self.table.buffer.cursor_position = min(cursor, len(text))
+
+    def start(self):
+        async def tick():
+            while True:
+                self.refresh()
+                self.invalidate()
+                await asyncio.sleep(.3)
+        self.task = self.browser.app.create_background_task(tick())
+
+    def close(self):
+        if self.task:
+            self.task.cancel()
+        super().close()
+
+
 class BookmarksView(PTScreen):
     # INITIALIZE BOOKMARKS VIEW [
     def __init__(self, browser):
@@ -3375,7 +4593,7 @@ class BookmarksView(PTScreen):
                     ConditionalContainer(browser.video_metadata, filter=Condition(lambda: browser.video_path is not None)),
                     ConditionalContainer(HSplit([
                         ConditionalContainer(browser.video_area, filter=Condition(lambda: not browser.audio_selected())),
-                        VSplit([browser.previous_button, browser.play_button, browser.stop_button, browser.next_button,
+                        VSplit([browser.previous_button, browser.play_button, browser.stop_button, browser.next_button, browser.mute_button,
                                 Window(FormattedTextControl(lambda: safe_text(browser.video_status)), height=1)], height=1),
                         Window(browser.seek_control, height=1),
                     ]), filter=Condition(browser.video_panel_visible)),
@@ -3491,6 +4709,21 @@ class BookmarksView(PTScreen):
         self.browser.go_bookmark(index)
     # CHOOSE BOOKMARKS VIEW ]
 # EDIT BOOKMARK TARGETS AND PREVIEW SELECTED FILES ]
+class DBTrashView(PTScreen):
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.table = RowsControl(self.rows)
+        self.focus = self.table
+        self.bind(['escape', 'D'], self.close, eager=True)
+        table_bindings(self, self.table)
+        self.container = Frame(Window(self.table, right_margins=[ScrollbarMargin()]),
+                               title='D · database trash · disk files kept · Esc close', key_bindings=self.keys)
+
+    def rows(self):
+        return [[('fg:#ff5555', 'D '), ('class:literal', path),
+                 ('', ' · ' + value['trashed_at'])] for path, value in self.browser.db_trash.records().items()]
+
+
 class BlacklistView(PTScreen):
     def __init__(self, browser):
         super().__init__(browser)
@@ -3543,7 +4776,22 @@ class HistoryView(PTScreen):
     def __init__(self, browser):
         super().__init__(browser)
         self.online = None
-        self.table = RowsControl(self.rows)
+        self.signature = None
+        self.presence = {}
+        self.pending = deque()
+        self.requested = set()
+        self.indexed = None
+        self.async_presence = False
+        self.presence_task = None
+        self.presence_epoch = 0
+        self.checking_paths = 0
+        self.preview_visible = False
+        self.preview_task = None
+        self.preview_epoch = 0
+        self.preview_lexer = InfoLexer()
+        self.preview = TextArea(read_only=True, scrollbar=True, lexer=self.preview_lexer)
+        self.table = HistoryRowsControl(self.rows, changed=self.update_preview)
+        self.table_window = Window(self.table, right_margins=[ScrollbarMargin()])
         self.horizontal = HorizontalBar(self.table)
         horizontal_keys(self, self.horizontal)
         self.focus = self.table
@@ -3552,49 +4800,241 @@ class HistoryView(PTScreen):
         self.bind(['s-delete'], self.clear, eager=True)
         self.bind(['enter'], self.choose, eager=True)
         self.bind(['t'], self.toggle, eager=True)
+        self.bind(['f5'], self.refresh_presence, eager=True)
+        self.bind(['v'], self.toggle_preview, eager=True)
         table_bindings(self, self.table)
         self.container = HSplit([
-            Frame(HSplit([Window(self.table, right_margins=[ScrollbarMargin()]),
+            VSplit([Frame(HSplit([Window(FormattedTextControl('#  State  Started                 Action / Path'), height=1, style='class:table-header'),
+                          self.table_window,
                           Window(self.horizontal, height=1)]), title=lambda: 'Action history' + (' · Save error: ' + safe_text(browser.action_history.error) if browser.action_history.error else '')),
-            Window(FormattedTextControl(lambda: 'All' if self.online is None else ('Online' if self.online else 'Offline')), height=1),
-            Window(FormattedTextControl('Enter: directory · Delete: entry · Shift+Delete: clear all · t: online/offline · Esc: close'), height=1),
+                    ConditionalContainer(Frame(self.preview, title='Preview · v:hide'),
+                                         filter=Condition(lambda: self.preview_visible))]),
+            Window(FormattedTextControl(lambda: ('All' if self.online is None else 'Online' if self.online else 'Offline')
+                + f' · {len(self.rows()):,} actions · {len(self.pending) + self.checking_paths:,} paths pending · #: newest first'), height=1),
+            Window(FormattedTextControl('Enter:go · Del:remove · Shift+Del:clear · t:filter · v:preview · F5:refresh · Esc:close'), height=1),
         ], key_bindings=self.keys)
 
+    def toggle_preview(self):
+        self.preview_visible = not self.preview_visible
+        self.update_preview()
+        self.invalidate()
+
+    def update_preview(self):
+        self.preview_epoch += 1
+        if self.preview_task:
+            self.preview_task.cancel()
+        if not self.preview_visible or not self.browser.app.is_running:
+            return
+        entry = self.selected_entry()
+        self.preview_lexer.image_lines = {}
+        self.preview.text = 'Loading…' if entry else '(empty)'
+        if entry is None:
+            return
+        entry = dict(entry)
+        epoch = self.preview_epoch
+        async def load():
+            # Debounce cursor drags; never read source files in the render path.
+            await asyncio.sleep(.12)
+            text, images = await background_call(self.read_preview, entry)
+            if epoch == self.preview_epoch and self.preview_visible:
+                self.preview_lexer.image_lines = images
+                self.preview.text = text
+                self.invalidate()
+        self.preview_task = self.browser.app.create_background_task(load())
+
+    @staticmethod
+    def read_preview(entry):
+        path = Path(get_real_path(entry['path']))
+        lines = [safe_text(entry['path']), safe_text(entry['action']),
+                 'Started: ' + safe_text(entry['started']),
+                 'Last known: ' + safe_text(entry['last_known'])]
+        for key in ('position', 'duration'):
+            if key in entry:
+                lines.append(f'{key.title()}: {entry[key]} s')
+        images = {}
+        try:
+            info = path.stat()
+            lines.extend(['Size: ' + format_size(info.st_size, 0).strip(), ''])
+            import stat
+            if stat.S_ISDIR(info.st_mode):
+                lines.append('Directory')
+                with os.scandir(path) as children:
+                    for index, child in enumerate(children):
+                        if index >= 100:
+                            lines.append('… (first 100 entries)')
+                            break
+                        lines.append(safe_text(child.name))
+            elif not stat.S_ISREG(info.st_mode):
+                lines.append('Special file (contents not read)')
+            elif path.suffix.lower() in THUMBNAIL_SUFFIXES:
+                from PIL import Image
+                from term_image.image import BlockImage
+                from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+                record = thumbnail(path, entry['path'], 128)
+                with Image.open(record['path']) as image:
+                    image = image.convert('RGB')
+                    with BlockImage(image, width=32, height=12) as preview:
+                        art = str(preview)
+                for line in art.splitlines():
+                    images[len(lines)] = to_formatted_text(ANSI(line))
+                    lines.append(' ')
+            else:
+                with path.open('rb') as source:
+                    data = source.read(16385)
+                if b'\x00' in data:
+                    lines.append('Binary file')
+                else:
+                    lines.extend(safe_text(line) for line in data[:16384].decode('utf-8', errors='replace').splitlines())
+                    if len(data) > 16384:
+                        lines.append('… (first 16 KiB)')
+        except (OSError, ValueError) as error:
+            lines.append('Preview unavailable: ' + safe_text(str(error)))
+        return '\n'.join(lines), images
+
+    def install_drag(self, app):
+        if not self.table.dragging:
+            return
+        screen = app.renderer._last_screen
+        position = screen.visible_windows_to_write_positions.get(self.table_window) if screen else None
+        if not position or not self.table_window.render_info:
+            return
+        def drag(event):
+            if event.event_type not in (MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP):
+                return NotImplemented
+            if event.button != MouseButton.LEFT:
+                self.table.dragging = False
+                return
+            y = event.position.y - position.ypos
+            scroll = self.table_window.vertical_scroll
+            self.table.select_row(scroll + y)
+            if event.event_type == MouseEventType.MOUSE_UP:
+                self.table.dragging = False
+            app.invalidate()
+        size = app.output.get_size()
+        app.renderer.mouse_handlers.set_mouse_handler_for_range(
+            x_min=0, x_max=size.columns, y_min=0, y_max=size.rows, handler=drag)
+
+    def prepare(self):
+        history = self.browser.action_history
+        signature = history.revision, len(history.entries)
+        if signature != self.signature:
+            self.indexed = HistoryIndex(history.entries, self.presence, self.online, safe_text)
+            self.lazy_rows = HistoryRows(self.indexed, self.request_presence, safe_text)
+            self.signature = signature
+            if self.online is not None:
+                for path in self.indexed.by_path:
+                    self.request_presence(path)
+
     def entries(self):
-        entries = reversed(self.browser.action_history.entries)
-        return [e for e in entries if self.online is None or self.present(e) == self.online]
+        self.prepare()
+        if not self.async_presence:
+            self.resolve_sync()
+        return [self.indexed.entries[i] for i in self.indexed.visible]
 
     def present(self, entry):
         return os.path.exists(get_real_path(entry['path']))
 
+    def request_presence(self, path):
+        if path not in self.presence and path not in self.requested:
+            self.pending.append(path)
+            self.requested.add(path)
+
+    def resolve_sync(self):
+        values = {path: os.path.exists(get_real_path(path)) for path in self.indexed.by_path
+                  if path not in self.presence}
+        if values:
+            self.indexed.availability(values)
+
     def rows(self):
-        return [[('class:green' if self.present(e) else 'class:red', safe_text(f"{'●' if self.present(e) else '○'} {e['started'].replace('T', ' ').removesuffix('+00:00')}  {e['action']}  {e['path']}"
-                    + (f"  start {e.get('start_position', 0):.1f}s → {e.get('position', 0):.1f}/{e.get('duration', 0):.1f}s · {e['last_known'].replace('T', ' ').removesuffix('+00:00')}" if e['action'] == 'play' else '')))]
-                for e in self.entries()]
+        self.prepare()
+        if not self.async_presence:
+            self.resolve_sync()
+        return self.lazy_rows
+
+    def start(self):
+        if not self.browser.app.is_running:
+            return
+        self.async_presence = True
+        async def check():
+            while True:
+                self.prepare()
+                if self.pending:
+                    paths = [self.pending.popleft() for _ in range(min(64, len(self.pending)))]
+                    epoch = self.presence_epoch
+                    self.checking_paths = len(paths)
+                    self.invalidate()
+                    values = await background_call(lambda: {path: os.path.exists(get_real_path(path)) for path in paths})
+                    self.checking_paths = 0
+                    if epoch != self.presence_epoch:
+                        continue
+                    visible = self.indexed.visible
+                    selected = visible[min(self.table.index, len(visible) - 1)] if visible else None
+                    self.indexed.availability(values)
+                    if selected is not None and selected in self.indexed.included:
+                        self.table.index = bisect_left(self.indexed.visible, selected)
+                    else:
+                        self.table.index = min(self.table.index, max(0, len(self.lazy_rows) - 1))
+                        self.update_preview()
+                    self.invalidate()
+                await asyncio.sleep(.05)
+        self.presence_task = self.browser.app.create_background_task(check())
+
+    def close(self):
+        if self.presence_task:
+            self.presence_task.cancel()
+        self.preview_epoch += 1
+        if self.preview_task:
+            self.preview_task.cancel()
+        self.table.dragging = False
+        super().close()
 
     def remove(self):
-        entries = self.entries()
-        if entries:
-            self.browser.action_history.remove(entries[min(self.table.index, len(entries)-1)])
-        self.table.index = max(0, min(self.table.index, len(self.entries())-1))
+        entry = self.selected_entry()
+        if entry:
+            self.browser.action_history.remove(entry)
+        self.table.index = max(0, min(self.table.index, len(self.rows())-1))
+        self.update_preview()
+        self.invalidate()
+
+    def selected_entry(self):
+        rows = self.rows()
+        if rows:
+            index = self.indexed.visible[min(self.table.index, len(rows) - 1)]
+            return self.indexed.entries[index]
+        return None
+
+    def refresh_presence(self):
+        self.presence_epoch += 1
+        self.presence.clear()
+        self.pending.clear()
+        self.requested.clear()
+        self.signature = None
+        self.prepare()
+        self.table.index = 0
+        self.update_preview()
         self.invalidate()
 
     def clear(self):
-        self.browser.action_history.entries.clear()
-        self.browser.action_history.save()
+        self.browser.action_history.clear()
         self.table.index = 0
+        self.update_preview()
         self.invalidate()
 
     def toggle(self):
         self.online = not self.online if self.online is not None else True
+        self.prepare()
+        self.indexed.set_filter(self.online)
+        for path in self.indexed.by_path:
+            self.request_presence(path)
         self.table.index = 0
+        self.update_preview()
         self.invalidate()
 
     def choose(self):
-        entries = self.entries()
-        if not entries:
+        entry = self.selected_entry()
+        if entry is None:
             return
-        path = entries[min(self.table.index, len(entries)-1)]['path']
+        path = entry['path']
         self.browser.preview_bookmark_path = normalize_bookmark_path(path)
         self.browser.preview_status_color = 'red'
         node = self.browser.vfs.get_from_path(path)
@@ -3757,27 +5197,175 @@ class PathCommandView(PTScreen):
 # ENTER A DIRECTORY PATH WITHOUT GLOBAL SHORTCUT INTERCEPTION ]
 # DISPLAY SCROLLABLE CONTEXT HELP [
 class HelpView(PTScreen):
-    # INITIALIZE HELP VIEW [
     def __init__(self, browser, title, lines):
         super().__init__(browser)
-        self.text = TextArea(text=plain_markup('\n'.join(lines)), lexer=MarkupLexer(lines),
-                             read_only=True, scrollbar=True, wrap_lines=True)
-        self.focus = self.text
-        self.bind(['h', 'escape'], self.close, eager=True)
+        self.origin_control = browser.app.layout.current_control
+        self.entries = help_entries(lines, plain_markup)
+        self.query = ''
+        self.index = 0
+        self.filtered = list(self.entries)
+        self.search = TextArea(height=1, multiline=False, prompt='/ Search: ')
+        self.text = TextArea(text=plain_markup('\n'.join(lines)), read_only=True,
+                             scrollbar=True, wrap_lines=True)
         self.bind(['tab'], lambda: browser.app.layout.focus_next())
         self.bind(['s-tab'], lambda: browser.app.layout.focus_previous())
+        if not self.entries:
+            self.focus = self.text
+            self.bind(['h', 'escape'], self.close, eager=True)
+            self.container = HSplit([Frame(self.text, title=title, style='class:info-pane'),
+                                      Button('Close', handler=self.close)], key_bindings=self.keys)
+            return
+        self.grid = HelpIndexControl(self)
+        self.window = Window(self.grid, right_margins=[ScrollbarMargin()], always_hide_cursor=True,
+                             height=Dimension(min=3, weight=3))
+        self.text.lexer = HelpSearchLexer(self)
+        self.text.window.height = Dimension(min=2, preferred=5, max=7)
+        self.focus = self.grid
+        self.bind(['/'], self.search_focus, eager=True, filter=~has_focus(self.search))
+        self.bind(['h'], self.close, eager=True, filter=~has_focus(self.search))
+        self.bind(['escape'], self.escape, eager=True)
+        for key, delta in [('up', -3), ('down', 3)]:
+            self.bind([key], lambda delta=delta: self.move(delta),
+                      filter=has_focus(self.grid) | has_focus(self.search))
+        self.bind(['left'], lambda: self.move_column(-1), filter=has_focus(self.grid))
+        self.bind(['right'], lambda: self.move_column(1), filter=has_focus(self.grid))
+        self.bind(['home'], lambda: self.select(0), filter=has_focus(self.grid))
+        self.bind(['end'], lambda: self.select(len(self.filtered) - 1), filter=has_focus(self.grid))
+        browsing = has_focus(self.grid) | has_focus(self.search) | has_focus(self.text)
+        self.bind(['pageup'], lambda: self.column_endpoint(False), filter=browsing)
+        self.bind(['pagedown'], lambda: self.column_endpoint(True), filter=browsing)
+        self.bind(['enter'], self.apply_selected, filter=browsing, eager=True)
+        self.search.buffer.on_text_changed += lambda _: self.filter_entries()
         self.container = HSplit([
-            Frame(self.text, title=title, style='class:info-pane'),
-            Button('Close', handler=self.close),
+            Window(FormattedTextControl(title + ' · arrows browse · / search · Esc close'), height=1, style='class:header'),
+            self.window,
+            Frame(self.text, title='Description', style='class:info-pane'),
+            self.search,
+            VSplit([Window(FormattedTextControl(lambda: f'{len(self.filtered)}/{len(self.entries)} entries · Enter: run · PgUp/PgDn: column top/bottom · Home/End: first/last · Esc: close'), height=1),
+                    Button('Close', width=7, handler=self.close)], height=1),
         ], key_bindings=self.keys)
-    # INITIALIZE HELP VIEW ]
+        self.preview()
+
+    def apply_selected(self):
+        if not self.filtered:
+            return
+        entry = self.filtered[self.index]
+        key = shortcut_key(entry.key)
+
+        def applied():
+            if not self.browser.app.is_done:
+                self.browser.show_notification(f'Applied key {entry.key}: {entry.short}')
+
+        if entry.local:
+            if entry.key == 'Enter':
+                self.browser.app.layout.focus(self.grid)
+                applied()
+                return
+            if entry.key == '/':
+                self.search_focus()
+                applied()
+                return
+            self.browser.app.layout.focus(self.grid)
+        elif key is not None or entry.key == '🔊/🔇':
+            self.close()
+            if self.browser.screen_stack:
+                context = self.browser.screen_stack[-1][0]
+                if isinstance(context, ScannerView):
+                    if entry.key == 'Enter':
+                        focus = (context.byte_limit if self.origin_control is context.byte_limit.control
+                                 else context.limit)
+                    elif entry.key in ('Shift+Left', 'Shift+Right', 'Shift+Home', 'Shift+End',
+                                       'Shift+PageUp', 'Shift+PageDown'):
+                        focus = context.details
+                    else:
+                        focus = context.grid
+                    self.browser.app.layout.focus(focus)
+            else:
+                self.browser.app.layout.focus(self.browser.control)
+            if entry.key == '🔊/🔇':
+                self.browser.toggle_mute()
+                applied()
+                return
+        else:
+            return
+        # Use the original binding/filter dispatch rather than duplicating actions.
+        self.browser.app.key_processor.feed(KeyPress(key), first=True)
+        asyncio.get_running_loop().call_soon(applied)
+
+    def search_focus(self):
+        self.browser.app.layout.focus(self.search)
+        self.search.buffer.cursor_position = len(self.search.text)
+
+    def escape(self):
+        if self.browser.app.layout.has_focus(self.search):
+            self.browser.app.layout.focus(self.grid)
+        else:
+            self.close()
+
+    def filter_entries(self):
+        self.query = self.search.text
+        query = self.query.casefold()
+        self.filtered = [entry for entry in self.entries if query in
+                         (entry.section + ' ' + entry.key + ' ' + entry.short + ' ' + entry.description).casefold()]
+        self.index = 0
+        self.window.vertical_scroll = 0
+        self.preview()
+        self.invalidate()
+
+    def select(self, index):
+        self.browser.note_cursor_motion()
+        _, positions = self.grid.layout_rows()
+        previous_column = positions.get(self.index, (1, 0))[1]
+        self.index = max(0, min(index, len(self.filtered) - 1))
+        y, column = positions.get(self.index, (1, 0))
+        if self.index == 0 or (column > previous_column and y <= self.grid.column_height):
+            self.window.vertical_scroll = 0
+        self.preview()
+        self.invalidate()
+
+    def move(self, delta):
+        if not self.filtered:
+            return
+        # Vertical movement follows reading order across column ends.
+        step = delta // 3 if abs(delta) >= 3 else delta
+        target = self.index + step
+        self.select(0 if target >= len(self.filtered) else
+                    len(self.filtered) - 1 if target < 0 else target)
+
+    def move_column(self, delta):
+        _, positions = self.grid.layout_rows()
+        if not positions:
+            return
+        row, column = positions.get(self.index, next(iter(positions.values())))
+        columns = sorted({col for _, col in positions.values()})
+        target = columns[(columns.index(column) + delta) % len(columns)]
+        candidates = (index for index, (_, col) in positions.items() if col == target)
+        closest = min(candidates, key=lambda index: (abs(positions[index][0] - row), positions[index][0]))
+        self.select(closest)
+
+    def column_endpoint(self, last):
+        _, positions = self.grid.layout_rows()
+        if not positions:
+            return
+        column = positions.get(self.index, next(iter(positions.values())))[1]
+        candidates = [index for index, (_, col) in positions.items() if col == column]
+        self.select(candidates[-1] if last else candidates[0])
+
+    def preview(self):
+        self.text.text = self.filtered[self.index].description if self.filtered else 'No shortcuts match this search.'
+        match = re.search(re.escape(self.query), self.text.text, re.I) if self.query else None
+        self.text.buffer.cursor_position = match.start() if match else 0
+
 # DISPLAY SCROLLABLE CONTEXT HELP ]
 # VIRTUAL TABLE WITH COLORED FRAGMENTS AND PERSISTENT HORIZONTAL PAN [
 class RowsControl(UIControl):
     """Virtual table with colored fragments and persistent horizontal pan."""
     # INITIALIZE ROWS CONTROL [
-    def __init__(self, rows, changed=None, selected=None, resized=None):
+    def __init__(self, rows, changed=None, selected=None, resized=None, cache=False):
         self.get_rows = rows
+        self.cache = cache
+        self._width_rows = None
+        self._row_width = 0
         self.changed = changed or (lambda: None)
         self.on_selected = selected
         self.on_resize = resized
@@ -3805,7 +5393,11 @@ class RowsControl(UIControl):
             fragments = rows[index] if rows else [('', '(empty)')]
             result, offset = [], 0
             for style, text in [*fragments, ('', ' ')]:
-                for char in safe_text(text):
+                if self.cache and offset >= self.pan + self.width:
+                    break
+                for char in (text if self.cache else safe_text(text)):
+                    if self.cache and offset >= self.pan + self.width:
+                        break
                     cells = get_cwidth(char)
                     if offset >= self.pan:
                         result.append((('class:selected ' if index == self.index else '') + style, char))
@@ -3819,8 +5411,12 @@ class RowsControl(UIControl):
     # CREATE CONTENT FOR ROWS CONTROL ]
     # MOVE ROWS CONTROL [
     def maximum_pan(self):
-        return max(0, max((sum(get_cwidth(part[1]) for part in row)
-                           for row in self.get_rows()), default=0) + 1 - self.width)
+        rows = self.get_rows()
+        if not self.cache or rows is not self._width_rows:
+            self._row_width = max((sum(get_cwidth(part[1]) for part in row)
+                                   for row in rows), default=0)
+            self._width_rows = rows
+        return max(0, self._row_width + 1 - self.width)
 
     def move(self, delta):
         rows = self.get_rows()
@@ -3844,6 +5440,39 @@ class RowsControl(UIControl):
         get_app().invalidate()
     # MOUSE HANDLER FOR ROWS CONTROL ]
 # VIRTUAL TABLE WITH COLORED FRAGMENTS AND PERSISTENT HORIZONTAL PAN ]
+class HistoryRowsControl(RowsControl):
+    dragging = False
+
+    def select_row(self, index):
+        index = max(0, min(max(0, len(self.get_rows()) - 1), index))
+        if index != self.index:
+            self.index = index
+            self.changed()
+
+    def mouse_handler(self, event):
+        if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+            self.dragging = True
+            get_app().layout.focus(self)
+        elif event.event_type == MouseEventType.MOUSE_MOVE:
+            if not self.dragging:
+                return NotImplemented
+            if event.button != MouseButton.LEFT:
+                self.dragging = False
+                return NotImplemented
+        elif event.event_type == MouseEventType.MOUSE_UP and event.button == MouseButton.LEFT:
+            self.dragging = False
+        else:
+            return super().mouse_handler(event)
+        self.select_row(event.position.y)
+        get_app().invalidate()
+
+    def maximum_pan(self):
+        rows = self.get_rows()
+        if isinstance(rows, HistoryRows):
+            return max(0, rows.maximum_width + 1 - self.width)
+        return super().maximum_pan()
+
+
 # TABLE BINDINGS FOR THE DRIVE-TUI WORKFLOW [
 def table_bindings(screen, control):
     focused = has_focus(control)
@@ -4068,7 +5697,7 @@ class ActionsView(PTScreen):
                 self.message = f'Apply failed: {exc}'
         self.browser.actions[:] = pending
         self.refresh_rows()
-        self.browser.refresh(self.browser.current_name())
+        self.browser.refresh(self.browser.current_name(), update_info=False)
         if not pending:
             self.close()
         else:
@@ -4077,6 +5706,16 @@ class ActionsView(PTScreen):
     # APPLY ACTIONS VIEW ]
 # REVIEW EXPORT AND APPLY QUEUED FILE OPERATIONS ]
 # DEFINE SCAN STATE SYMBOLS COLORS AND LABELS [
+def scan_activity_frame(scanner, now):
+    """Use circular rotation for Heavy and line rotation for other stages."""
+    mode = getattr(getattr(scanner, 'engine', None), 'current_mode', 0)
+    if not mode:
+        modes = getattr(getattr(scanner, 'controls', None), 'modes', ())
+        mode = next((index for index, enabled in enumerate(modes, 1) if enabled), 0)
+    frames = ('◐', '◓', '◑', '◒') if mode == 3 else ('\\', '|', '/', '-')
+    return frames[int(now * 8) % len(frames)]
+
+
 SCAN_STATES = {
     'modified': ('M', '#ff8800', 'modified'),
     'missing': ('U', '#ff0000', 'not found'),
@@ -4084,6 +5723,7 @@ SCAN_STATES = {
     'unknown': ('?', '#ffffff', 'unverified'),
     'verified': ('●', '#98e024', 'verified'),
     'directory': ('D', '#ffffff', 'directories'),
+    'empty': ('·', '#98e024', 'empty directories'),
 }
 # DEFINE SCAN STATE SYMBOLS COLORS AND LABELS ]
 # CUSTOM MAP RENDERER: CACHED CELLS BECOME COMPACT RUNS OF EQUAL STYLE [
@@ -4198,7 +5838,7 @@ class MapControl(UIControl):
             if expert_mode and index in screen.expert_blue:
                 background = '#0000ff'
             if now - bucket.updated < 1:
-                symbol, color = ('\\', '|', '/', '-')[int(now * 8) % 4], '#ffffff'
+                symbol, color = scan_activity_frame(screen, now), '#ffffff'
                 deadline = min((int(now * 8) + 1) / 8, bucket.updated + 1)
                 background = '#ff0000'
         elif screen.follow_end and index == screen.selected:
@@ -4206,6 +5846,10 @@ class MapControl(UIControl):
         style = f'fg:{color} bg:{background}'
         if index == screen.selected:
             style += ' bg:#00ffff fg:#000000 underline'
+        if index < len(screen.model.buckets) and screen.model.buckets[index].blacklisted:
+            symbol = '!'
+            style = ('bg:#00ffff underline' if index == screen.selected else 'bg:#000000') + ' fg:#ff5555'
+            deadline = None
         return (style, symbol), deadline
     # RENDER CELL FOR MAP CONTROL ]
     # DIRTY CELL FOR MAP CONTROL [
@@ -4363,13 +6007,20 @@ class ScannerView(PTScreen):
         self.controls = ScanControls(saved.get('modes', (True, False, False)),
             saved.get('read_known', False), saved.get('new_first', True), startup=startup,
             heavy_order=saved.get('heavy_order', 'normal'))
+        self.controls.excluded_paths = tuple(browser.blacklist) if browser.blacklist_enabled else ()
+        self.controls.trashed_paths = browser.trashed_roots
+        self.directory_sizes = {}
+        self.directory_counts = {}
+        self.directory_size_files = {}
+        self.directory_size_dirty = set()
         self.model = FileMap()
         self.model.fixed = False
         for name in ('mode', 'fixed', 'limit', 'byte_limit'):
             if name in saved:
                 setattr(self.model, name, saved[name])
-        self.model.entries = {value['id']: ScanEntry(**dict(value, progress=None))
-                              for value in saved.get('entries', [])}
+        self.model.entries = {value['id']: ScanEntry(**dict(value, progress=None,
+                              blacklisted=browser.excluded_directory(value['id'])))
+                              for value in saved.get('entries', []) if not browser.is_trashed(value['id'])}
         self.model.rebuild()
         self.pagination = Pagination()
         self.pagination.page = saved.get('page', 1)
@@ -4389,6 +6040,8 @@ class ScannerView(PTScreen):
         self.catalog_signature = None
         self.catalog_model = None
         self.catalog_cache = ()
+        self.catalog_filtered_cache = ()
+        self.catalog_filter_signature = None
         self.projection_wake = Event()
         self.projection_thread = None
         self.projection_error = None
@@ -4404,18 +6057,21 @@ class ScannerView(PTScreen):
         self.requested_modes = {}
         self.mode_thread = None
         self.phase = 'Starting scanner'
+        self.paused_modes = None
         self.stats = ScanStats(path=self.path)
         self.detail_ids = []
+        self.filtered_count = 0
         self.pages = 1
         self.page_size = 10
         self.detail_signature = None
+        self.detail_revision = 0
         self.filter_fragments = []
         self.grid = MapControl(self)
         self.map_window = Window(self.grid, height=Dimension(min=3, weight=2),
                                  right_margins=[ScrollbarMargin()], style='bg:#000000',
                                  wrap_lines=False, always_hide_cursor=True)
         self.map_window.vertical_scroll = saved.get('scroll_y', 0)
-        self.details = RowsControl(self.detail_rows, resized=self.details_resized)
+        self.details = RowsControl(self.detail_rows, resized=self.details_resized, cache=True)
         self.detail_window = Window(self.details, height=Dimension(min=2, weight=1),
                                     right_margins=[ScrollbarMargin()], wrap_lines=False,
                                     always_hide_cursor=True)
@@ -4448,6 +6104,7 @@ class ScannerView(PTScreen):
         self.bind(['r'], lambda: self.toggle_flag('read_known'), filter=not_input)
         self.bind(['t'], lambda: self.toggle_flag('new_first'), filter=not_input)
         self.bind(['J'], self.order, filter=not_input)
+        self.bind(['L'], self.toggle_loop, filter=not_input)
         self.bind(['m'], self.mode, filter=not_input)
         self.bind(['v'], self.view, filter=not_input)
         self.bind(['['], lambda: self.scope(-1), filter=not_input)
@@ -4533,6 +6190,8 @@ class ScannerView(PTScreen):
                 self.projection_wake.clear()
                 if self.stop.is_set():
                     break
+                if self.browser.cursor_busy():
+                    continue
                 try:
                     self.update_catalog()
                     self.update_expert()
@@ -4550,35 +6209,84 @@ class ScannerView(PTScreen):
     # REQUEST PROJECTION FOR SCANNER VIEW ]
     # START SCANNER VIEW [
     def start(self):
+        if self.worker is not None:
+            return
         self.browser.scanners.append(self)
+        self.statistics_token = object()
+        self.browser.scan_statistics.begin(self.storage_path, self.statistics_token,
+                                          self.timing.statistics_snapshot()[0])
         self.start_projection()
         scanner = DriveScanner(self.vfs.db, self.path, self.events, self.stop, controls=self.controls,
             timing=self.timing, scan_roots=self.scan_roots, storage_path=self.storage_path,
             entries=self.model.entries.values(),
             root_names=tuple(node.name for node in self.vfs.list_nodes(self.vfs.db.get_root())) if self.path == '/' else ())
+        self.engine = scanner
         self.worker = Thread(target=scanner.run, name='drive-pt-scanner', daemon=True)
         self.worker.start()
         self.tick_task = self.browser.app.create_background_task(self.tick())
     # START SCANNER VIEW ]
     # REFRESH LIVE SCAN STATE AND ANIMATION [
     async def tick(self):
+        presented = 0.
         while not self.stop.is_set():
+            if self.browser.cursor_busy():
+                await asyncio.sleep(.05)
+                continue
             if not self.repacking:
-                self.drain_all(budget=.015)
-                self.request_projection()
-                self.update_details()
-            self.invalidate()
-            await asyncio.sleep(.1)
+                self.drain_all(budget=.008)
+            now = time.monotonic()
+            if now - presented >= .1:
+                if not self.repacking:
+                    self.browser.update_scan_directory_sizes(self)
+                    self.request_projection()
+                    if self.browser.screen_stack and self.browser.screen_stack[-1][0] is self:
+                        self.update_details()
+                self.invalidate()
+                self.update_statistics()
+                presented = now
+            # Catch up with discovery independently of the display refresh rate.
+            # Short slices still let keyboard input and rendering run between batches.
+            await asyncio.sleep(.005 if not self.events.empty() and not self.repacking
+                                else max(.005, .1 - (time.monotonic() - presented)))
     # REFRESH LIVE SCAN STATE AND ANIMATION ]
+    def account_directory_size(self, entry=None, removed=None):
+        key = entry.id if entry is not None else removed
+        previous = self.directory_size_files.pop(key, None)
+        current = ((normalize_bookmark_path(entry.path).rstrip('/'), max(0, entry.size))
+                   if entry is not None and not entry.is_dir and not entry.blacklisted else None)
+        if current is not None:
+            self.directory_size_files[key] = current
+        if previous == current:
+            return
+        for value, sign in ((previous, -1), (current, 1)):
+            if value is None:
+                continue
+            path, size = value
+            while path:
+                path = path.rpartition('/')[0]
+                self.directory_sizes[path] = max(0, self.directory_sizes.get(path, 0) + sign * size)
+                self.directory_counts[path] = max(0, self.directory_counts.get(path, 0) + sign)
+                self.directory_size_dirty.add(path)
+
     # DRAIN ALL FOR SCANNER VIEW [
     def drain_all(self, budget=None):
         deadline = time.monotonic() + budget if budget is not None else float('inf')
+        dirty_buckets = set()
         while time.monotonic() < deadline:
             try:
                 kind, payload = self.events.get_nowait()
             except Empty:
                 break
             if kind == 'entry':
+                if self.browser.is_trashed(payload.id):
+                    continue
+                blacklisted = self.browser.excluded_directory(payload.id)
+                if payload.blacklisted != blacklisted:
+                    payload = replace(payload, blacklisted=blacklisted)
+                self.detail_revision = getattr(self, 'detail_revision', 0) + 1
+                self.account_directory_size(payload)
+                if not payload.is_dir and payload.state == 'verified':
+                    self.browser.queue_dups_refresh((payload.id,))
                 repack = self.model.update(payload, rebuild=False)
                 self.detail_signature = None
                 if repack and not self.closing and budget is not None:
@@ -4587,9 +6295,13 @@ class ScannerView(PTScreen):
                 if repack:
                     self.model.rebuild()
                     self.refresh_colors()
+                    dirty_buckets.clear()
                 else:
-                    self.refresh_colors([self.model.locations[payload.id]])
+                    dirty_buckets.add(self.model.locations[payload.id])
             elif kind == 'removed':
+                self.detail_revision = getattr(self, 'detail_revision', 0) + 1
+                for key in payload:
+                    self.account_directory_size(removed=key)
                 if not self.closing and budget is not None:
                     self.repack(removed=set(payload))
                     break
@@ -4597,29 +6309,43 @@ class ScannerView(PTScreen):
                     self.model.entries.pop(key, None)
                 self.model.rebuild()
                 self.refresh_colors()
+                dirty_buckets.clear()
             elif kind == 'stats':
                 self.stats = payload
             elif kind == 'expert':
                 self.phase = 'Heavy expert — processing selected bucket'
             elif kind == 'phase':
                 self.phase = safe_text(payload)
+        if dirty_buckets:
+            self.refresh_colors(dirty_buckets)
     # DRAIN ALL FOR SCANNER VIEW ]
     # UPDATE CATALOG FOR SCANNER VIEW [
     def update_catalog(self):
         # Only the projection worker publishes catalog snapshots. Discovery is
         # append-only between repacks, so old immutable buckets can be reused.
         model = self.model
-        signature = (id(model), len(model.entries))
+        filter_signature = (self.browser.blacklist_enabled, tuple(self.browser.blacklist),
+                            self.browser.trashed_roots)
+        signature = (id(model), len(model.entries), filter_signature)
         if signature == self.catalog_signature:
             return
-        if model is self.catalog_model and self.catalog_cache:
+        if (model is self.catalog_model and self.catalog_cache and
+                filter_signature == self.catalog_filter_signature):
             start = len(self.catalog_cache) - 1
             catalog = self.catalog_cache[:start] + tuple(
                 tuple(bucket.ids) for bucket in model.buckets[start:])
+            filtered_prefix = self.catalog_filtered_cache[:start]
         else:
+            start = 0
+            filtered_prefix = ()
             catalog = tuple(tuple(bucket.ids) for bucket in model.buckets)
-        self.controls.buckets = catalog
+        filtered = filtered_prefix + tuple(tuple(path for path in bucket
+            if not self.browser.excluded_directory(path) and not self.browser.is_trashed(path))
+            for bucket in catalog[start:])
+        self.controls.buckets = filtered
         self.catalog_cache = catalog
+        self.catalog_filtered_cache = filtered
+        self.catalog_filter_signature = filter_signature
         self.catalog_model = model
         self.catalog_signature = signature
     # UPDATE CATALOG FOR SCANNER VIEW ]
@@ -4721,8 +6447,24 @@ class ScannerView(PTScreen):
     # REPACK FILE ENTRIES INTO DISPLAY BUCKETS ]
     # CLOSE SCANNER VIEW [
     def close(self):
+        self.browser.refresh_scan_symbols()
+        self.browser.pop(self)
+
+    def pause_resume(self):
+        if self.paused_modes is None:
+            self.paused_modes = tuple(self.requested_modes.get(i + 1, enabled)
+                                      for i, enabled in enumerate(self.controls.modes))
+            targets = (False, False, False)
+        else:
+            targets = self.paused_modes
+            self.paused_modes = None
+        self.requested_modes = dict(enumerate(targets, 1))
+        self.apply_requested_modes()
+        self.invalidate()
+
+    def stop_scanning(self):
         if self.closing:
-            return
+            return self.stop_task
         self.closing = True
         self.stop.set()
         self.controls.wake.set()
@@ -4741,16 +6483,27 @@ class ScannerView(PTScreen):
                 await self.repack_task
             self.drain_all()
             self.save()
-            self.browser.vfs.cwd = self.vfs.get_from_path(self.vfs.pwd())
-            self.browser.refresh(self.return_name)
+            self.browser.refresh(self.browser.current_name(), update_info=False)
             self.browser.pop(self)
+            # A global stop can arrive while help or bookmarks covers the map.
+            # Unlink the hidden map so closing that popup returns to browsing.
+            for index, (screen, previous_layout) in enumerate(self.browser.screen_stack):
+                if screen is self:
+                    next_screen, _ = self.browser.screen_stack[index + 1]
+                    self.browser.screen_stack[index + 1] = (next_screen, previous_layout)
+                    del self.browser.screen_stack[index]
+                    break
             if self in self.browser.scanners:
                 self.browser.scanners.remove(self)
+            self.invalidate()
         # INSTALL COMPLETED BACKGROUND RESULTS ]
-        self.browser.app.create_background_task(finish())
+        self.stop_task = self.browser.app.create_background_task(finish())
+        return self.stop_task
     # CLOSE SCANNER VIEW ]
     # SAVE SCANNER VIEW [
     def save(self):
+        self.update_statistics(final=self.worker is not None and not self.worker.is_alive())
+        self.browser.directory_counts.remember(self.directory_counts)
         snapshot = {name: getattr(self.model, name) for name in ('mode', 'fixed', 'limit', 'byte_limit')}
         snapshot.update(entries=[asdict(replace(entry, progress=None)) for entry in self.model.entries.values()],
             modes=self.controls.modes, read_known=self.controls.read_known, new_first=self.controls.new_first,
@@ -4759,6 +6512,15 @@ class ScannerView(PTScreen):
             scope_path=self.scope_path, scope_color=self.scope_color, fixed_colors=self.fixed_colors)
         snapshot['mode_elapsed'] = self.timing.snapshot()[1]
         self.store.put('map', self.storage_path, snapshot)
+
+    def update_statistics(self, final=False):
+        if not hasattr(self, 'statistics_token'):
+            return
+        counts = self.engine.mode_counts if final else self.stats.mode_counts
+        current = self.engine.mode_current if final else self.stats.mode_current
+        elapsed, current_elapsed = self.timing.statistics_snapshot()
+        self.browser.scan_statistics.update(self.storage_path, self.statistics_token,
+                                            counts, current, elapsed, current_elapsed)
     # SAVE SCANNER VIEW ]
     # SELECTED BUCKET FOR SCANNER VIEW [
     def selected_bucket(self):
@@ -4769,11 +6531,12 @@ class ScannerView(PTScreen):
         self.pagination.page = 1
         self.details.index = 0
         self.detail_signature = None
-        self.update_details()
+        self.update_details(immediate=True)
         self.invalidate()
     # SELECTION CHANGED FOR SCANNER VIEW ]
     # MOVE MAP FOR SCANNER VIEW [
     def move_map(self, delta, arrow=False):
+        self.browser.note_cursor_motion()
         if self.follow_end and arrow and delta == 1:
             return
         if arrow and delta == 1 and self.selected == max(0, len(self.model.buckets) - 1):
@@ -4795,16 +6558,27 @@ class ScannerView(PTScreen):
     def details_resized(self):
         self.page_size = max(1, min(100, self.details.height))
         self.detail_signature = None
-        self.update_details()
+        self.update_details(immediate=True)
     # DETAILS RESIZED FOR SCANNER VIEW ]
     # UPDATE DETAILS FOR SCANNER VIEW [
-    def update_details(self):
+    def update_details(self, *, immediate=False):
+        if not immediate and self.browser.cursor_busy():
+            return
         bucket = self.selected_bucket()
         signature = (id(bucket), self.filter, self.pagination.page, self.page_size, len(self.model.entries))
         if signature == self.detail_signature:
             return
-        ids = ([] if bucket is None else bucket.ids if self.filter is None else
-               [key for key in bucket.ids if self.model.entries[key].state == self.filter])
+        filter_key = (id(bucket), self.filter, getattr(self, 'detail_revision', 0),
+                      len(bucket.ids) if bucket else 0)
+        if bucket is None:
+            ids = []
+        elif self.filter is None:
+            ids = bucket.ids
+        elif filter_key == getattr(self, '_filtered_ids_key', None):
+            ids = self._filtered_ids_value
+        else:
+            ids = [key for key in bucket.ids if self.model.entries[key].state == self.filter]
+            self._filtered_ids_key, self._filtered_ids_value = filter_key, ids
         self.pages = max(1, math.ceil(len(ids) / self.page_size))
         self.pagination.select(self.pagination.page, self.pages)
         first = (self.pagination.page - 1) * self.page_size
@@ -4815,6 +6589,11 @@ class ScannerView(PTScreen):
     # UPDATE DETAILS FOR SCANNER VIEW ]
     # FORMAT SCANNER FILE ROWS WITH STATUS AND DIRECTORY SCOPE [
     def detail_rows(self):
+        cache_key = (id(self.model), tuple(self.detail_ids),
+                     tuple(self.model.entries.get(key) for key in self.detail_ids),
+                     self.scope_path, getattr(getattr(self, 'browser', None), 'show_path_prefixes', None))
+        if cache_key == getattr(self, '_detail_rows_key', None):
+            return self._detail_rows_value
         result = []
         for key in self.detail_ids:
             entry = self.model.entries.get(key)
@@ -4842,6 +6621,7 @@ class ScannerView(PTScreen):
                 ('fg:#ffd700', safe_text(prefix)),
                 ('class:literal', safe_text(path[len(prefix):])),
                 ('', '' if entry.is_dir else '  ' + format_size(entry.size, 0).strip())])
+        self._detail_rows_key, self._detail_rows_value = cache_key, result
         return result
     # FORMAT SCANNER FILE ROWS WITH STATUS AND DIRECTORY SCOPE ]
     # UPDATE PAGE FOR SCANNER VIEW [
@@ -4849,11 +6629,12 @@ class ScannerView(PTScreen):
         self.pagination.select(page, self.pages)
         self.details.index = 0
         self.detail_signature = None
-        self.update_details()
+        self.update_details(immediate=True)
         self.invalidate()
     # UPDATE PAGE FOR SCANNER VIEW ]
     # MOVE DETAILS FOR SCANNER VIEW [
     def move_details(self, delta):
+        self.browser.note_cursor_motion()
         if delta < 0 and self.details.index == 0 and self.pagination.page > 1:
             self.set_page(self.pagination.page - 1)
             self.details.index = max(0, len(self.detail_ids) - 1)
@@ -4867,6 +6648,7 @@ class ScannerView(PTScreen):
     def toggle_mode(self, mode):
         if self.closing:
             return
+        self.paused_modes = None
         current = self.requested_modes.get(mode, self.controls.modes[mode - 1])
         self.requested_modes = {**self.requested_modes, mode: not current}
         self.invalidate()
@@ -4884,9 +6666,7 @@ class ScannerView(PTScreen):
                 if not targets:
                     return
                 with self.controls.lock:
-                    # A manual mode key cancels startup even if rapid presses
-                    # coalesce back to the existing enabled state.
-                    self.controls.cancel_startup()
+                    # Starting a mode also starts its remaining stage sequence.
                     for mode, enabled in targets.items():
                         if self.controls.modes[mode - 1] != enabled:
                             self.controls.toggle(mode)
@@ -4918,12 +6698,18 @@ class ScannerView(PTScreen):
 
     # START FROM FOR SCANNER VIEW [
     def start_from(self, mode):
+        self.paused_modes = None
         bucket = self.selected_bucket()
         if bucket and bucket.ids:
             self.controls.start_from(mode, bucket.ids[0])
             self.save()
             self.invalidate()
     # START FROM FOR SCANNER VIEW ]
+    def toggle_loop(self):
+        if not self.closing:
+            self.controls.toggle_loop()
+            self.invalidate()
+
     # TOGGLE FLAG FOR SCANNER VIEW [
     def toggle_flag(self, name):
         setattr(self.controls, name, not getattr(self.controls, name))
@@ -5069,8 +6855,10 @@ class ScannerView(PTScreen):
                 self.scope_indices.add(index)
             else:
                 self.scope_indices.discard(index)
-            fixed = next((self.fixed_colors[key] for key in reversed(bucket.ids) if key in self.fixed_colors), None)
-            background = (self.scope_color if scoped else None) or fixed
+            background = self.scope_color if scoped else None
+            if not background and self.fixed_colors:
+                background = next((self.fixed_colors[key] for key in reversed(bucket.ids)
+                                   if key in self.fixed_colors), None)
             if background:
                 self.backgrounds[index] = background
             else:
@@ -5108,6 +6896,7 @@ class ScannerView(PTScreen):
             running = self.requested_modes.get(i, running)
             result.extend([('', f'{i} {label} '), ('class:green' if running else 'class:red', 'RUN' if running else 'STOP'), ('', ' · ')])
         result.append(('', f'r {"on" if self.controls.read_known else "off"} · t {"new" if self.controls.new_first else "all"} · J {self.requested_order or self.controls.heavy_order}'))
+        result.append(('', f' · L Loop {"ON" if self.controls.loop else "OFF"}'))
         if (self.requested_order or self.controls.heavy_order) == 'expert':
             result.append(('', f' · Expert selected {self.expert_selected_count} buckets'))
         current, total = self.timing.display_snapshot()
@@ -5135,8 +6924,11 @@ class ScannerView(PTScreen):
                 break
             rate /= 1000
         first = min(self.map_window.vertical_scroll * self.grid.columns + 1, len(self.model.buckets)) if self.model.buckets else 0
+        scope = self.browser.scan_statistics_scope
+        rows = self.browser.scan_statistics.record(self.storage_path)[scope]
+        files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
         return (f'{self.stats.paths_per_second:.1f} paths/s · {rate:.2f} {unit} · '
-                f'Total {self.stats.paths} paths / {format_size(self.stats.size_scanned or 0, 0).strip()} · '
+                f'{scope.title()} {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
                 f'bucket {first}/{len(self.model.buckets)}\n'
                 f'{"Scanning" if self.stats.active else "Last path"}: {safe_text(self.stats.path)}')
     # STATS TEXT FOR SCANNER VIEW ]
@@ -5145,7 +6937,8 @@ class ScannerView(PTScreen):
         bucket = self.selected_bucket()
         if bucket is None:
             return 'End of buckets > — following new buckets' if self.follow_end else 'Waiting for paths…'
-        errors = [self.model.entries[key].error for key in self.detail_ids if self.model.entries[key].error]
+        errors = [entry.error for key in self.detail_ids
+                  if (entry := self.model.entries.get(key)) is not None and entry.error]
         text = (f'Bucket {self.selected + 1} · {bucket.files} files · '
                 f'{len(bucket.ids) - bucket.files} dirs · {format_size(bucket.size, 0).strip()} · '
                 f'M {bucket.file_states["modified"]} / deleted {bucket.file_states["missing"]} / green {bucket.file_states["verified"]} · '
@@ -5200,7 +6993,7 @@ def main():
         description='Browse disk catalogs and live drive maps with prompt_toolkit.',
         epilog='Example: ./drive-tui.py ~/mypath\nUses config.sh drive aliases when available.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('path', nargs='?', help='Startup directory (default: current directory; supports ~)')
+    parser.add_argument('path', nargs='?', help='Startup directory (empty/omitted: last directory, initially cwd; supports ~)')
     parser.add_argument('-d', '--db', action='append', help='Directory containing LLOG files (repeatable)')
     parser.add_argument('-c', '--cache', choices=['memory', 'sqlite', 'redis'], default='memory')
     modes = parser.add_mutually_exclusive_group()
@@ -5213,7 +7006,7 @@ def main():
     args = parser.parse_args()
     if args.update and args.cache != 'sqlite':
         parser.error('--update requires -c sqlite')
-    if args.path is not None and not Path(args.path).expanduser().is_dir():
+    if args.path is not None and args.path.strip() and not Path(args.path).expanduser().is_dir():
         parser.error(f'Startup path is not a directory: {args.path}')
     if (args.refragment or args.export_livelog) and args.cache != 'sqlite':
         parser.error('--refragment and --export-livelog require -c sqlite')
@@ -5232,7 +7025,7 @@ def main():
         browser.run()
     finally:
         if args.cache == 'sqlite':
-            fs.db.conn.close()
+            shutdown_step('Closing SQLite database', fs.db.conn.close)
 # START THE APPLICATION WORKFLOW ]
 # RUN DRIVE-TUI ENTRY POINT [
 if __name__ == '__main__':

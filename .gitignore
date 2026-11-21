@@ -29,6 +29,7 @@ TRANSPLIT.md
 
 pack.sh
 copy-dir.sh
+copy-main.sh
 
 .cache
 profile.*

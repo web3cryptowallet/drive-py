@@ -28,7 +28,7 @@ tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
 # PREPARE TEST VIDEO PREVIEW SHARED STATE ]
 # ABORT DECODER FOR THE TEST VIDEO PREVIEW WORKFLOW [
-def abort_decoder(path, size, connection, library):
+def abort_decoder(path, size, connection, library, muted=False):
     os._exit(23)  # Simulate a fatal libmpv assertion, not a catchable exception.
 # ABORT DECODER FOR THE TEST VIDEO PREVIEW WORKFLOW ]
 # VERIFY WORKER BEHAVIOR [
@@ -205,7 +205,11 @@ print(connection.frames)
             rotated = str(Path(directory) / 'rotated.mov')
             subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', video, '-c', 'copy',
                             '-metadata:s:v:0', 'rotate=90', rotated], check=True, capture_output=True)
-            for source, bounds in ((video, (160, 90)), (rotated, (95, 63))):
+            short = str(Path(directory) / 'short.mp4')
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                            'testsrc=size=32x24:rate=25:duration=0.12', '-c:v', 'mpeg4',
+                            '-threads', '1', short], check=True, capture_output=True)
+            for source, bounds in ((video, (160, 90)), (rotated, (95, 63)), (short, (160, 90))):
                 player = VideoPreview(source, bounds, lambda image: {'dimensions': image.size})
                 player.start()
                 events = []
@@ -226,6 +230,44 @@ print(connection.frames)
 # VERIFY WORKER BEHAVIOR ]
 # VERIFY CONTROLS BEHAVIOR [
 class ControlsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_player_controls_fit_narrow_panes(self):
+        class SmallOutput(DummyOutput):
+            columns = 80
+            def get_size(self):
+                return Size(rows=24, columns=self.columns)
+
+        with create_pipe_input() as pipe, tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'short.mp4').write_bytes(b'fixture')
+            browser = tui.DriveBrowser(VirtualFS({'files': {}}), path=directory,
+                                       input=pipe, output=SmallOutput())
+            browser.image_previews = False
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == 'short.mp4')
+            browser.open()
+            fake = SimpleNamespace(events=Queue(), thread=Mock(), start=Mock(), close=Mock(), seek=Mock())
+            with patch.object(tui, 'VideoPreview', return_value=fake):
+                task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
+                try:
+                    for columns in (80, 60, 100):
+                        browser.app.output.columns = columns
+                        browser.app._on_resize()
+                        await asyncio.sleep(.08)
+                        positions = browser.app.renderer._last_screen.visible_windows_to_write_positions
+                        for button in (browser.previous_button, browser.play_button,
+                                       browser.stop_button, browser.next_button, browser.mute_button):
+                            self.assertIn(button.window, positions, (columns, button.text))
+                            self.assertEqual(positions[button.window].height, 1)
+                        self.assertIn(browser.video_area.window, positions)
+                        self.assertIn(browser.files, positions)
+                    pipe.send_text('p')
+                    await asyncio.sleep(.06)
+                    fake.start.assert_called_once()
+                    pipe.send_text('p')
+                    await asyncio.sleep(.06)
+                    fake.close.assert_called()
+                finally:
+                    browser.app.exit()
+                    await task
+
     # VERIFY GRAPHICS REPLIES DO NOT NAVIGATE OR TOGGLE PREVIEWS [
     async def test_graphics_replies_do_not_navigate_or_toggle_previews(self):
         with create_pipe_input() as pipe:
@@ -352,7 +394,7 @@ class ControlsTests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(browser.app.run_async())
                 try:
                     await asyncio.sleep(.03)
-                    pipe.send_text('\t\t\r')  # files -> info -> Play, activate.
+                    pipe.send_text('\t\t\t\r')  # files -> Info -> Prev -> Play, activate.
                     for _ in range(100):
                         if fake.start.called:
                             break

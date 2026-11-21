@@ -1,6 +1,6 @@
 [project]
 name = "drive-py"
-version = "0.996"
+version = "0.997"
 description = "Drive file browser"
 requires-python = ">=3.10"
 dependencies = [

@@ -1,4 +1,4 @@
-"""Clipboard utility failures, Unicode transport and real Ctrl+X dispatch."""
+"""Clipboard utility failures, Unicode transport and real Ctrl+Y dispatch."""
 # VERIFY CLIPBOARD TRANSPORT WITHOUT MODIFYING THE DESKTOP CLIPBOARD [
 import asyncio
 import base64
@@ -58,7 +58,7 @@ class ClipboardTransportTests(unittest.TestCase):
 # VERIFY CLIPBOARD TRANSPORT WITHOUT MODIFYING THE DESKTOP CLIPBOARD ]
 # VERIFY INFO COPY SHORTCUT AND TERMINAL FALLBACK IN A RUNNING APPLICATION [
 class ClipboardInputTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ctrl_x_from_info_reaches_fallback(self):
+    async def test_ctrl_y_from_info_reaches_fallback(self):
         spec = importlib.util.spec_from_file_location('clipboard_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
         tui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(tui)
@@ -73,7 +73,7 @@ class ClipboardInputTests(unittest.IsolatedAsyncioTestCase):
                 b.app.layout.focus(b.info)
                 with patch('vfs.clipboard.copy_native', return_value=False) as native, \
                         patch.dict(os.environ, {}, clear=True), patch.object(output, 'write_raw') as write:
-                    pipe.send_text('\x18')
+                    pipe.send_text('\x19')
                     expected = clipboard_escape(b.info.text)
                     for _ in range(100):
                         if any(expected == c.args[0] for c in write.call_args_list):
@@ -161,7 +161,7 @@ class ClipboardX11Tests(unittest.TestCase):
 
 # VERIFY CTRL Y REACHES THE NATIVE UBUNTU FALLBACK [
 class ClipboardPathInputTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ctrl_y_files_and_info_use_x11_without_terminal_escape(self):
+    async def test_ctrl_x_files_and_info_use_x11_without_terminal_escape(self):
         spec = importlib.util.spec_from_file_location('clipboard_path_tui', Path(__file__).resolve().parents[1] / 'drive-tui.py')
         tui = importlib.util.module_from_spec(spec); spec.loader.exec_module(tui)
         fs = VirtualFS({'files': {'/disk/image.png': {'MD5:test:1'}}})
@@ -180,7 +180,7 @@ class ClipboardPathInputTests(unittest.IsolatedAsyncioTestCase):
                         patch.object(output, 'write_raw') as write:
                     for index, focus in enumerate((b.control, b.info), start=1):
                         b.app.layout.focus(focus)
-                        pipe.send_text('\x19')
+                        pipe.send_text('\x18')
                         for _ in range(100):
                             if copy.call_count == index:
                                 break
