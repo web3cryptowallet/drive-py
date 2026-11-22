@@ -11,6 +11,33 @@ spec.loader.exec_module(tui)
 
 
 class DirectorySymbolsTests(unittest.TestCase):
+    def test_listing_confirms_empty_before_scan_and_rechecks_on_refresh(self):
+        import tempfile
+        from prompt_toolkit.input import DummyInput
+        from prompt_toolkit.output import DummyOutput
+        from vfs import VirtualFS
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / 'empty'
+            folder.mkdir()
+            browser = tui.DriveBrowser(VirtualFS({'files': {}}), path=directory,
+                                       input=DummyInput(), output=DummyOutput())
+            def marker():
+                index = next(i for i, row in enumerate(browser.rows) if row['name'] == 'empty')
+                return browser.control.create_content(80, 10).get_line(index)[0]
+            self.assertEqual(marker()[1], '·')
+            self.assertIn('class:green', marker()[0])
+            browser.refresh_scan_symbols()
+            self.assertEqual(marker()[1], '·')
+            (folder / '.hidden').touch()
+            browser.refresh()
+            self.assertEqual(marker()[1], '●')
+            self.assertIn('class:orange', marker()[0])
+            (folder / '.hidden').unlink()
+            entries = [(row['name'], row['node']) for row in browser.rows]
+            with patch.object(tui.os, 'scandir', side_effect=PermissionError('denied')):
+                browser.refresh(_entries=entries)
+            self.assertEqual(marker()[1], '●')
+
     def test_completed_directory_renders_settled_color_without_navigation(self):
         import tempfile
         from prompt_toolkit.input import DummyInput

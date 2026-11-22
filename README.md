@@ -256,3 +256,7 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 *AI-Independet code. Created through human work*
 
 
+
+Empty folders in the file list show a small green middle dot (`·`) immediately,
+before scanning. Listing refresh checks for any child, including hidden entries;
+unreadable folders keep their usual status marker.

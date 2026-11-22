@@ -2716,9 +2716,17 @@ class DriveBrowser:
                 indicator = 'orange'
             color = {'new': 'yellow', 'deleted': 'red'}.get(status, 'white') if self.display_mode == 2 else 'white'
             marker = {'new': '*', 'deleted': '!'}.get(status, ' ') if self.display_mode == 3 else '●'
+            listing_empty = False
+            if node.is_dir and name != '..' and exists:
+                try:
+                    with os.scandir(get_real_path(node.id)) as children:
+                        listing_empty = next(children, None) is None
+                except OSError:
+                    pass
             count = (node.total_files if node.is_dir else
                      (len(self.vfs.get_hash_dups(node.info.get('hashinfo'))) if _entries is None else 0))
             self.rows.append(dict(name=name, node=node, color=color, indicator=indicator, problem_file=problem_file,
+                                  listing_empty=listing_empty,
                                   label=f'{marker} {"📁" if node.is_dir else "📄"} {name}',
                                   size=format_size(node.size, int(not node.is_dir)).strip(),
                                   dups=(previous_dups.get(node.id, '(?)') if _entries is not None and not node.is_dir
@@ -2989,6 +2997,8 @@ class DriveBrowser:
         for row in self.rows:
             row.pop('scan_symbol', None)
             row.pop('scan_color', None)
+            if row.get('listing_empty', False):
+                row['scan_symbol'] = '·'
             if row['name'] != '..':
                 targets[normalize_bookmark_path(row['node'].id).rstrip('/')] = row
         masks = dict.fromkeys(targets, 0)
