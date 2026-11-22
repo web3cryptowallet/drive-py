@@ -297,7 +297,7 @@ from vfs.adapter.sqlite import SQLiteDBAdapter
 from vfs.history_index import HistoryIndex, HistoryRows
 from collections import deque
 from bisect import bisect_left
-from vfs.help_index import help_entries, shortcut_key, HelpIndexControl, HelpSearchLexer
+from vfs.help_index import help_entries, shortcut_key, HelpIndexControl, HelpSearchLexer, highlighted
 from vfs.db_trash import DBTrash
 import sqlite3
 # IMPORT DRIVE-TUI DEPENDENCIES ]
@@ -3937,7 +3937,6 @@ def main_help(display_mode):
         '[#ff8800]L[/#ff8800]: Open directory blacklist',
         '[#ff8800]Ctrl+B[/#ff8800]: Show/hide blacklisted entries in Files (independent of X)',
         '[#ff8800]Ctrl+U[/#ff8800]: Show/hide not-found files; red names in graphics mode',
-        '[#ff8800]Ctrl+D / D[/#ff8800]: Move selected database file/subtree to D trash / view D; disk files kept',
         '[#ff8800]v[/#ff8800]: Cycle all / media (images, videos, audio) / image / videos',
         '[#ff8800].[/#ff8800]: Toggle dotfiles and hidden directories (shown by default)',
         '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; G page-priority generation order; k/K clear directory/all thumbnail caches; +/- display height (minimum 1 line), cache 128/256 pixels',
@@ -3969,6 +3968,15 @@ def main_help(display_mode):
         '[#ff8800]=[/#ff8800]: Grow thumbnails (same as +)',
         '[#ff8800]_[/#ff8800]: Shrink thumbnails; graphics - also shrinks, table - clears folder marks',
         '[#ff8800]q / Ctrl+C[/#ff8800]: Quit',
+        '', '[bold]Trash[/bold]',
+        '[#ff8800]Ctrl+D[/#ff8800]: Move selected database file/subtree to Trash; disk files kept',
+        'Stops active scans first; trashed paths remain excluded from scanning. Restore/purge is not available.',
+        '[#ff8800]D[/#ff8800]: Open database Trash',
+        'Deleted (UTC) is first: yyyy-mm-dd hh:mm:ss. Right column: size and last six hash characters; full hashes remain saved.',
+        'In Trash, / focuses live case-insensitive filename search; matches are bold black on yellow, like Help.',
+        'Enter on an archive row expands/collapses active duplicates underneath. Arrows/PageUp/PageDown select rows; Enter on a duplicate jumps to its file in Files.',
+        'Expanded duplicate names also match search; archive parents remain visible as context. Clear search text to show all entries.',
+        'Esc leaves search with the filter retained, then closes Trash. D closes outside search; horizontal keys/slider pan narrow views.',
         '', '[bold]Removal queue[/bold]',
         '[#ff8800]Delete[/#ff8800]: Queue selected file for removal',
         '[#ff8800]Shift+Delete[/#ff8800]: Queue file and all duplicates for removal',
@@ -4816,16 +4824,114 @@ class BookmarksView(PTScreen):
 class DBTrashView(PTScreen):
     def __init__(self, browser):
         super().__init__(browser)
+        self.records = browser.db_trash.records()
+        self.expanded = {}
+        self.items = []
+        self.search = TextArea(height=1, multiline=False, prompt='/ Search: ')
+        self.search.buffer.on_text_changed += lambda _: self.filter_entries()
         self.table = RowsControl(self.rows)
+        self.horizontal = HorizontalBar(self.table)
         self.focus = self.table
-        self.bind(['escape', 'D'], self.close, eager=True)
+        horizontal_keys(self, self.horizontal)
+        self.bind(['escape'], self.escape, eager=True)
+        self.bind(['D'], self.close, eager=True, filter=~has_focus(self.search))
+        self.bind(['/'], self.search_focus, eager=True, filter=~has_focus(self.search))
+        for key, delta in [('up', -1), ('down', 1), ('pageup', -10), ('pagedown', 10)]:
+            self.bind([key], lambda delta=delta: self.table.move(delta), filter=has_focus(self.search))
+        self.bind(['enter'], self.choose, eager=True)
         table_bindings(self, self.table)
-        self.container = Frame(Window(self.table, right_margins=[ScrollbarMargin()]),
-                               title='D · database trash · disk files kept · Esc close', key_bindings=self.keys)
+        self.container = Frame(HSplit([
+            Window(FormattedTextControl(self.header), height=1),
+            Window(self.table, right_margins=[ScrollbarMargin()], wrap_lines=False),
+            Window(self.horizontal, height=1),
+            self.search,
+            Window(FormattedTextControl('Enter: expand/collapse duplicates or jump · / search · Esc: browse/close'), height=1),
+        ]), title='D · database trash · disk files kept', key_bindings=self.keys)
+
+    def header(self):
+        self.rows()
+        return fit('Deleted (UTC)', 19) + '  ' + fit('Path', self.path_width) + '  ' + 'Size Hash'.rjust(self.hash_width)
+
+    def search_focus(self):
+        self.browser.app.layout.focus(self.search)
+        self.search.buffer.cursor_position = len(self.search.text)
+
+    def escape(self):
+        if self.browser.app.layout.has_focus(self.search):
+            self.browser.app.layout.focus(self.table)
+        else:
+            self.close()
+
+    def filter_entries(self):
+        self.table.index = 0
+        self.table.pan = 0
+        self.invalidate()
+
+    @staticmethod
+    def summary(node):
+        digest = (node.get('info') or {}).get('hashinfo') or ''
+        # Catalog identities are algorithm:digest:size; never take the size suffix.
+        parts = digest.split(':')
+        tail = (parts[-2] if len(parts) >= 3 else parts[-1])[-6:]
+        size = format_size(node.get('size', 0), 0).strip()
+        return size + (' ' + tail if tail else '')
+
+    @staticmethod
+    def timestamp(value):
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            return safe_text(value)
 
     def rows(self):
-        return [[('fg:#ff5555', 'D '), ('class:literal', path),
-                 ('', ' · ' + value['trashed_at'])] for path, value in self.browser.db_trash.records().items()]
+        entries = []
+        self.items = []
+        query = self.search.text.casefold()
+        for path, value in self.records.items():
+            own_match = query in path.rstrip('/').rsplit('/', 1)[-1].casefold()
+            duplicates = [candidate for candidate in self.expanded.get(path, [])
+                          if own_match or query in candidate.rstrip('/').rsplit('/', 1)[-1].casefold()]
+            if not own_match and not duplicates:
+                continue
+            digest = self.summary(value['node'])
+            entries.append((self.timestamp(value['trashed_at']), 'D ' + safe_text(self.browser.display_path(path)), digest, False))
+            self.items.append(('trash', path))
+            if path in self.expanded:
+                for duplicate in duplicates:
+                    entries.append(('', '    ↳ ' + safe_text(self.browser.display_path(duplicate)), digest, True))
+                    self.items.append(('duplicate', duplicate))
+                if not self.expanded[path]:
+                    entries.append(('', '    No active duplicates.', '', True))
+                    self.items.append(('message', path))
+        hash_width = max([9] + [get_cwidth(str(entry[2])) for entry in entries])
+        path_width = max(4, self.table.width - 23 - hash_width)
+        self.path_width, self.hash_width = path_width, hash_width
+        return [[('', fit(stamp, 19) + '  '),
+                 *highlighted(fit(path, path_width), self.search.text,
+                              'class:literal' if duplicate else 'class:literal fg:#ff5555'),
+                 ('', '  ' + str(digest).rjust(hash_width))]
+                for stamp, path, digest, duplicate in entries]
+
+    def choose(self):
+        self.rows()
+        if not self.items:
+            return
+        kind, path = self.items[min(self.table.index, len(self.items) - 1)]
+        if kind == 'duplicate':
+            if self.browser.vfs.get_from_path(path) is None:
+                self.browser.show_notification('Duplicate is no longer in the catalog', error=True)
+                return
+            self.browser.pending_bookmark = path
+            self.browser.finish_bookmark()
+        elif kind == 'trash':
+            if path in self.expanded:
+                del self.expanded[path]
+            else:
+                digest = (self.records[path]['node'].get('info') or {}).get('hashinfo')
+                self.expanded[path] = sorted({self.browser.vfs.decode_source_path(candidate)
+                    for candidate in self.browser.vfs.get_hash_dups(digest)
+                    if not self.browser.is_trashed(self.browser.vfs.decode_source_path(candidate))})
+            self.invalidate()
 
 
 class BlacklistView(PTScreen):

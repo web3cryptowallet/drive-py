@@ -576,3 +576,38 @@ path after the statistics. Long paths use `start...end` to fit the terminal;
 In the Files Size column, unscanned directories with no known content total show
 `-`; confirmed empty directories show `0`. Known scan/catalog totals show content
 sizes, excluding the filesystem directory-entry size.
+
+### Trash
+
+**Ctrl+D** moves the selected database entry/subtree to Trash, keeping disk files.
+**D** opens Trash. Active scans stop before removal; trashed paths stay excluded
+from scanning. Restore/purge is not available.
+
+In D (database Trash), deletion time is the first column in UTC
+`yyyy-mm-dd hh:mm:ss` format; the right-aligned column shows size and the last six hash characters. Enter expands
+active duplicates beneath an entry. Select a duplicate with arrows and press
+Enter to jump to it in Files; Enter on the archive row collapses it.
+
+Trash filename search: press `/` and type to filter names live (case-insensitive).
+Expanded duplicate names also match. Esc returns to the list with the filter
+retained; clear the search text to show all entries. The right column uses
+`size hash-last-6`, such as `4 bytes 678901`; full hashes remain stored.
+
+Trash `/` search highlights matching path text in bold black on yellow, matching
+Help, including expanded duplicates and the selected row.
+
+In D (database Trash), deletion time is the first column in UTC
+`yyyy-mm-dd hh:mm:ss` format; the right-aligned column shows size and the last six hash characters. Enter expands
+active duplicates beneath an entry. Select a duplicate with arrows and press
+Enter to jump to it in Files; Enter on the archive row collapses it.
+
+Trash filename search: press `/` and type to filter names live (case-insensitive).
+Expanded duplicate names also match. Esc returns to the list with the filter
+retained; clear the search text to show all entries. The right column uses
+`size hash-last-6`, such as `4 bytes 678901`; full hashes remain stored.
+
+Trash `/` search highlights matching path text in bold black on yellow, matching
+Help, including expanded duplicates and the selected row.
+
+Press `h` for Help's dedicated **Trash** section, covering Ctrl+D/D, search,
+highlighting and duplicate navigation.

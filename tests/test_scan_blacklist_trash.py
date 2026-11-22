@@ -111,6 +111,74 @@ class ScanExclusionTests(unittest.TestCase):
 
 
 class ExclusionInputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trash_hash_expansion_timestamp_and_duplicate_jump(self):
+        from prompt_toolkit.input import DummyInput
+        for backend in ('memory', 'sqlite'):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                removed, duplicate = root / 'removed', root / 'copy'
+                removed.write_bytes(b'same')
+                duplicate.write_bytes(b'same')
+                options = {'db_path': str(root / 'catalog.sqlite')} if backend == 'sqlite' else {}
+                fs = VirtualFS({'files': {}}, backend, **options)
+                digest = 'md5:01234567890123456789012345678901'
+                fs.db.add_scanned_file(str(removed), digest, 4)
+                fs.db.add_scanned_file(str(duplicate), digest, 4)
+                digest = fs.get_from_path(str(removed)).info['hashinfo']
+                trash = DBTrash(fs.db)
+                trash.move(str(removed))
+                if backend == 'sqlite':
+                    fs.db.conn.close()
+                    fs = VirtualFS(None, backend, **options)
+                    trash = DBTrash(fs.db)
+                self.assertEqual(trash.records()[str(removed)]['node']['info']['hashinfo'], digest)
+                browser = tui.DriveBrowser(fs, path=directory, input=DummyInput(), output=DummyOutput())
+                view = tui.DBTrashView(browser)
+                browser.push(view)
+                view.table.width = 150
+                rows = view.rows()
+                text = ''.join(part for _, part in rows[0])
+                self.assertRegex(text, r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}  ')
+                self.assertTrue(text.endswith('4 bytes ' + digest.split(':')[-2][-6:]))
+                self.assertEqual(tui.get_cwidth(text), 150)
+                view.choose()
+                self.assertEqual(view.items, [('trash', str(removed))])
+                rows = view.rows()
+                self.assertEqual(view.items[1], ('duplicate', str(duplicate)))
+                view.search_focus()
+                self.assertTrue(browser.app.layout.has_focus(view.search))
+                view.search.text = 'REMOVED'
+                rows = view.rows()
+                self.assertEqual(len(rows), 2)
+                self.assertEqual([text for style, text in rows[0] if 'bg:#ffff00' in style], ['removed'])
+                self.assertEqual(tui.get_cwidth(''.join(text for _, text in rows[0])), 150)
+                view.search.text = 'COPY'
+                self.assertEqual(view.items[0][0], 'trash')
+                self.assertEqual(len(view.rows()), 2)
+                self.assertEqual([text for style, text in view.rows()[1] if 'bg:#ffff00' in style], ['copy'])
+                # Selected rendering retains the Help highlight colors.
+                view.table.index = 1
+                rendered = view.table.create_content(150, 10).get_line(1)
+                self.assertTrue(any('class:selected' in style and 'bg:#ffff00' in style for style, _ in rendered))
+                view.search.text = 'no-such-file'
+                self.assertEqual(view.rows(), [])
+                view.search.text = ''
+                self.assertFalse(any('bg:#ffff00' in style for row in view.rows() for style, _ in row))
+                view.escape()
+                self.assertTrue(browser.app.layout.has_focus(view.table))
+                self.assertEqual(tui.DBTrashView.summary({'size': 0}), '0 bytes')
+                view.choose()  # collapse
+                self.assertEqual(len(view.rows()), 1)
+                view.choose()  # expand again
+                view.rows()
+                view.table.index = 1
+                view.choose()
+                self.assertFalse(browser.screen_stack)
+                self.assertEqual(browser.current_name(), 'copy')
+                self.assertTrue(removed.exists())
+                if backend == 'sqlite':
+                    fs.db.conn.close()
+
     async def test_visibility_and_database_trash_keys(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)

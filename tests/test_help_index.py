@@ -23,6 +23,16 @@ class ShortOutput(DummyOutput):
 
 
 class HelpIndexTests(unittest.IsolatedAsyncioTestCase):
+    def test_trash_section_describes_current_controls(self):
+        entries = help_entries(tui.main_help(0), tui.plain_markup)
+        trash = [entry for entry in entries if entry.section == 'Trash']
+        self.assertEqual({entry.key for entry in trash}, {'Ctrl+D', 'D'})
+        description = next(entry.description for entry in trash if entry.key == 'D')
+        for detail in ('yyyy-mm-dd hh:mm:ss', 'last six hash', 'case-insensitive',
+                       'bold black on yellow', 'expands/collapses', 'jumps', 'Esc'):
+            self.assertIn(detail, description)
+        self.assertEqual(sum(entry.key == 'D' for entry in entries), 1)
+
     async def test_enter_runs_main_search_scanner_and_local_help_actions(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe, \
                 patch.object(tui, 'HISTORY_PATH', Path(directory) / 'history.llog'):
