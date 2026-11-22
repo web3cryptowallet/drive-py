@@ -612,3 +612,7 @@ Help, including expanded duplicates and the selected row.
 Press `h` for Help's dedicated **Trash** section, covering Ctrl+D/D, search,
 highlighting and duplicate navigation.
 
+
+Trash duplicate rows show a green `●` for files present on disk and red `●` for
+missing/inaccessible files. Collapse and expand again to refresh status; cursor
+movement uses cached status. Green indicates presence, not checksum verification.

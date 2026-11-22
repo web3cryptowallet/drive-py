@@ -3975,6 +3975,7 @@ def main_help(display_mode):
         'Deleted (UTC) is first: yyyy-mm-dd hh:mm:ss. Right column: size and last six hash characters; full hashes remain saved.',
         'In Trash, / focuses live case-insensitive filename search; matches are bold black on yellow, like Help.',
         'Enter on an archive row expands/collapses active duplicates underneath. Arrows/PageUp/PageDown select rows; Enter on a duplicate jumps to its file in Files.',
+        'Duplicate status: green circle means present on disk; red circle means missing/inaccessible. Status refreshes when expanding, with no disk checks during cursor movement.',
         'Expanded duplicate names also match search; archive parents remain visible as context. Clear search text to show all entries.',
         'Esc leaves search with the filter retained, then closes Trash. D closes outside search; horizontal keys/slider pan narrow views.',
         '', '[bold]Removal queue[/bold]',
@@ -4826,6 +4827,7 @@ class DBTrashView(PTScreen):
         super().__init__(browser)
         self.records = browser.db_trash.records()
         self.expanded = {}
+        self.duplicate_status = {}
         self.rows_revision = 0
         self.rows_key = None
         self.cached_rows = None
@@ -4913,11 +4915,24 @@ class DBTrashView(PTScreen):
         hash_width = max([9] + [get_cwidth(str(entry[2])) for entry in entries])
         path_width = max(4, self.table.width - 23 - hash_width)
         self.path_width, self.hash_width = path_width, hash_width
-        self.cached_rows = [[('', fit(stamp, 19) + '  '),
-                 *highlighted(fit(path, path_width), self.search.text,
-                              'class:literal' if duplicate else 'class:literal fg:#ff5555'),
-                 ('', '  ' + str(digest).rjust(hash_width))]
-                for stamp, path, digest, duplicate in entries]
+        self.cached_rows = []
+        for index, (stamp, path, digest, duplicate) in enumerate(entries):
+            row = [('', fit(stamp, 19) + '  ')]
+            kind, target = self.items[index]
+            if kind == 'duplicate':
+                prefix = [('class:literal', '    ↳ '),
+                          (self.duplicate_status.get(target, 'class:red'), '● ')]
+                available = path_width
+                for style, text in prefix:
+                    clipped = fit(text, max(0, min(get_cwidth(text), available)))
+                    row.append((style, clipped))
+                    available -= get_cwidth(clipped)
+                row += highlighted(fit(path[6:], max(0, available)), self.search.text, 'class:literal')
+            else:
+                row += highlighted(fit(path, path_width), self.search.text,
+                                   'class:literal' if duplicate else 'class:literal fg:#ff5555')
+            row.append(('', '  ' + str(digest).rjust(hash_width)))
+            self.cached_rows.append(row)
         self.rows_key = key
         return self.cached_rows
 
@@ -4940,6 +4955,9 @@ class DBTrashView(PTScreen):
                 self.expanded[path] = sorted({self.browser.vfs.decode_source_path(candidate)
                     for candidate in self.browser.vfs.get_hash_dups(digest)
                     if not self.browser.is_trashed(self.browser.vfs.decode_source_path(candidate))})
+                for duplicate in self.expanded[path]:
+                    self.duplicate_status[duplicate] = ('class:green' if get_stat_info(duplicate).get('exists')
+                                                        else 'class:red')
             self.rows_revision += 1
             self.invalidate()
 

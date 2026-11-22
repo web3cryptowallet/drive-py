@@ -261,3 +261,7 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 Trash caches formatted rows during cursor movement; search, expansion, width
 and path-display changes rebuild the view.
+
+Trash duplicate rows show a green `●` for files present on disk and red `●` for
+missing/inaccessible files. Collapse and expand again to refresh status; cursor
+movement uses cached status. Green indicates presence, not checksum verification.

@@ -145,6 +145,12 @@ class ExclusionInputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(view.items, [('trash', str(removed))])
                 rows = view.rows()
                 self.assertEqual(view.items[1], ('duplicate', str(duplicate)))
+                self.assertIn(('class:green', '● '), rows[1])
+                with patch.object(tui, 'get_stat_info', side_effect=AssertionError('stat during redraw')):
+                    view.rows()
+                    view.table.move(1)
+                    view.table.create_content(150, 10).get_line(1)
+                view.table.index = 0
                 view.search_focus()
                 self.assertTrue(browser.app.layout.has_focus(view.search))
                 view.search.text = 'REMOVED'
@@ -169,8 +175,13 @@ class ExclusionInputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tui.DBTrashView.summary({'size': 0}), '0 bytes')
                 view.choose()  # collapse
                 self.assertEqual(len(view.rows()), 1)
-                view.choose()  # expand again
-                view.rows()
+                duplicate.unlink()
+                view.choose()  # expand again; refresh disk status
+                self.assertIn(('class:red', '● '), view.rows()[1])
+                duplicate.write_bytes(b'same')
+                view.choose()  # collapse
+                view.choose()  # expand again; present -> green
+                self.assertIn(('class:green', '● '), view.rows()[1])
                 view.table.index = 1
                 view.choose()
                 self.assertFalse(browser.screen_stack)
