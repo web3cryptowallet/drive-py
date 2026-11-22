@@ -1262,6 +1262,14 @@ class DriveBrowser:
         bind(['u'], lambda event: self.expand_subdirs(), eager=True)
         bind(['o'], lambda event: self.toggle_expansion_depth(), eager=True)
         bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
+        duplicate_focused = has_focus(self.info) & Condition(lambda: bool(self.info_paths))
+        for key, step in [('up', -1), ('down', 1), ('pageup', -10), ('pagedown', 10),
+                          ('home', 'first'), ('end', 'last')]:
+            bind([key], lambda event, step=step: self.move_info_duplicate(step),
+                 filter=has_focus(self.info), eager=True)
+        bind(['right'], lambda event: self.open_duplicate(), filter=duplicate_focused, eager=True)
+        bind(['left'], lambda event: self.app.layout.focus(self.control),
+             filter=has_focus(self.info), eager=True)
         bind(['v'], lambda event: self.toggle_media_filter())
         bind(['.'], lambda event: self.toggle_dotfiles(), filter=files_focused)
         bind(['+', '='], lambda event: self.resize_icons(1), filter=files_focused)
@@ -3511,6 +3519,31 @@ class DriveBrowser:
             self.app.layout.focus(self.control)
     # FINISH BOOKMARK FOR DRIVE BROWSER ]
     # OPEN DUPLICATE FOR DRIVE BROWSER [
+    def move_info_duplicate(self, step):
+        """Navigate cached duplicate rows, skipping Quick View metadata."""
+        lines = sorted(self.info_paths)
+        if not lines:
+            if step in ('first', 'last'):
+                self.info.buffer.cursor_position = 0 if step == 'first' else len(self.info.text)
+            elif step < 0:
+                self.info.buffer.cursor_up(count=-step)
+            else:
+                self.info.buffer.cursor_down(count=step)
+            return
+        current = self.info.buffer.document.cursor_position_row
+        if step == 'first':
+            target = lines[0]
+        elif step == 'last':
+            target = lines[-1]
+        elif current in self.info_paths:
+            index = lines.index(current)
+            target = lines[max(0, min(len(lines) - 1, index + step))]
+        else:
+            candidates = [line for line in lines if line > current] if step > 0 else [line for line in lines if line < current]
+            target = (candidates[0] if step > 0 else candidates[-1]) if candidates else (lines[-1] if step > 0 else lines[0])
+        self.info.buffer.cursor_position = self.info.buffer.document.translate_row_col_to_index(target, 0)
+        self.app.invalidate()
+
     def open_duplicate(self):
         path = self.selected_path()
         if not path:
@@ -3927,7 +3960,7 @@ def main_help(display_mode):
         '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths (all screens)',
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
-        'Info duplicates: Tab to info, arrows or click to select; Enter opens the duplicate location',
+        'Quick View duplicates: Tab to info; Up/Down select duplicate rows, PageUp/PageDown move ten, Home/End select first/last; Right/Enter jumps to the duplicate, Left returns to Files. Without duplicates, text scrolls normally.',
         '[#ff8800]h[/#ff8800]: Open help from Files; close when help is focused',
         '[#ff8800]Esc[/#ff8800] (in help): Leave search, then close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',

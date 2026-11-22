@@ -616,3 +616,8 @@ highlighting and duplicate navigation.
 Trash duplicate rows show a green `●` for files present on disk and red `●` for
 missing/inaccessible files. Collapse and expand again to refresh status; cursor
 movement uses cached status. Green indicates presence, not checksum verification.
+
+Quick View duplicate navigation: Tab to Info, then Up/Down selects duplicates,
+PageUp/PageDown moves ten, Home/End selects first/last, Right/Enter jumps to the
+file, and Left returns focus to Files. Without duplicates, vertical keys move
+through text.
