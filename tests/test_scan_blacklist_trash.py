@@ -179,6 +179,37 @@ class ExclusionInputTests(unittest.IsolatedAsyncioTestCase):
                 if backend == 'sqlite':
                     fs.db.conn.close()
 
+    async def test_trash_cursor_redraw_reuses_formatted_rows(self):
+        from prompt_toolkit.input import DummyInput
+        with tempfile.TemporaryDirectory() as directory:
+            browser = tui.DriveBrowser(VirtualFS({'files': {}}), path=directory,
+                                       input=DummyInput(), output=DummyOutput())
+            view = tui.DBTrashView(browser)
+            view.records = {f'/folder/file{i}': {
+                'trashed_at': '2026-11-22T12:00:00+00:00',
+                'node': {'size': i, 'info': {'hashinfo': 'md5:abcdef123456:4'}}}
+                for i in range(5000)}
+            view.table.width, view.table.height = 100, 20
+            initial = view.rows()
+            with patch.object(view, 'summary', side_effect=AssertionError('reformatted on movement')), \
+                    patch.object(view, 'timestamp', side_effect=AssertionError('parsed date on movement')), \
+                    patch.object(browser, 'display_path', side_effect=AssertionError('converted path on movement')):
+                for _ in range(20):
+                    view.table.move(1)
+                    view.header()
+                    view.table.create_content(100, 20).get_line(view.table.index)
+                    view.table.maximum_pan()
+                    self.assertIs(view.rows(), initial)
+            view.search.text = 'file42'
+            filtered = view.rows()
+            self.assertIsNot(filtered, initial)
+            self.assertLess(len(filtered), len(initial))
+            view.table.width = 120
+            resized = view.rows()
+            self.assertIsNot(resized, filtered)
+            browser.show_path_prefixes = not browser.show_path_prefixes
+            self.assertIsNot(view.rows(), resized)
+
     async def test_visibility_and_database_trash_keys(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)

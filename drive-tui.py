@@ -4826,10 +4826,13 @@ class DBTrashView(PTScreen):
         super().__init__(browser)
         self.records = browser.db_trash.records()
         self.expanded = {}
+        self.rows_revision = 0
+        self.rows_key = None
+        self.cached_rows = None
         self.items = []
         self.search = TextArea(height=1, multiline=False, prompt='/ Search: ')
         self.search.buffer.on_text_changed += lambda _: self.filter_entries()
-        self.table = RowsControl(self.rows)
+        self.table = RowsControl(self.rows, cache=True)
         self.horizontal = HorizontalBar(self.table)
         self.focus = self.table
         horizontal_keys(self, self.horizontal)
@@ -4884,6 +4887,10 @@ class DBTrashView(PTScreen):
             return safe_text(value)
 
     def rows(self):
+        key = (self.table.width, self.search.text, self.rows_revision,
+               self.browser.show_path_prefixes)
+        if key == self.rows_key:
+            return self.cached_rows
         entries = []
         self.items = []
         query = self.search.text.casefold()
@@ -4906,11 +4913,13 @@ class DBTrashView(PTScreen):
         hash_width = max([9] + [get_cwidth(str(entry[2])) for entry in entries])
         path_width = max(4, self.table.width - 23 - hash_width)
         self.path_width, self.hash_width = path_width, hash_width
-        return [[('', fit(stamp, 19) + '  '),
+        self.cached_rows = [[('', fit(stamp, 19) + '  '),
                  *highlighted(fit(path, path_width), self.search.text,
                               'class:literal' if duplicate else 'class:literal fg:#ff5555'),
                  ('', '  ' + str(digest).rjust(hash_width))]
                 for stamp, path, digest, duplicate in entries]
+        self.rows_key = key
+        return self.cached_rows
 
     def choose(self):
         self.rows()
@@ -4931,6 +4940,7 @@ class DBTrashView(PTScreen):
                 self.expanded[path] = sorted({self.browser.vfs.decode_source_path(candidate)
                     for candidate in self.browser.vfs.get_hash_dups(digest)
                     if not self.browser.is_trashed(self.browser.vfs.decode_source_path(candidate))})
+            self.rows_revision += 1
             self.invalidate()
 
 

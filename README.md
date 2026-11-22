@@ -258,3 +258,6 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 
 
 
+
+Trash caches formatted rows during cursor movement; search, expansion, width
+and path-display changes rebuild the view.

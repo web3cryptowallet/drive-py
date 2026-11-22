@@ -611,3 +611,4 @@ Help, including expanded duplicates and the selected row.
 
 Press `h` for Help's dedicated **Trash** section, covering Ctrl+D/D, search,
 highlighting and duplicate navigation.
+
