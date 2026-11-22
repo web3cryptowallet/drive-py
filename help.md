@@ -621,3 +621,9 @@ Quick View duplicate navigation: Tab to Info, then Up/Down selects duplicates,
 PageUp/PageDown moves ten, Home/End selects first/last, Right/Enter jumps to the
 file, and Left returns focus to Files. Without duplicates, vertical keys move
 through text.
+
+Click a Quick View row to focus the pane and select that row immediately; then
+use arrows to select duplicates and Enter/Right to jump. Tab also focuses Info.
+
+Double-click a Quick View duplicate to jump to its location, just like Enter.
+Single-click selects it.

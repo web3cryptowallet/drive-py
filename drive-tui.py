@@ -1143,7 +1143,31 @@ class DriveBrowser:
         self.filename_slider = HorizontalBar(FilenameViewport(self))
         self.info_lexer = InfoLexer()
         self.info = TextArea(read_only=True, scrollbar=True, wrap_lines=True,
-                             lexer=self.info_lexer)
+                             lexer=self.info_lexer, focus_on_click=True)
+        info_mouse_handler = self.info.control.mouse_handler
+        info_click = {'last': None, 'time': 0., 'down': None}
+        def focus_info_row(event):
+            left = event.button == MouseButton.LEFT
+            if event.event_type == MouseEventType.MOUSE_DOWN and left:
+                self.app.layout.focus(self.info)
+                info_click['down'] = event.position
+            result = info_mouse_handler(event)
+            if event.event_type == MouseEventType.MOUSE_UP and left:
+                path = self.info_paths.get(self.info.buffer.document.cursor_position_row)
+                now = time.monotonic()
+                down = info_click['down']
+                click = down is not None and down.y == event.position.y and abs(down.x - event.position.x) <= 1
+                if (click and path and not self.screen_stack and path == info_click['last']
+                        and 0 <= now - info_click['time'] < .3):
+                    info_click['last'] = None
+                    self.info.buffer.exit_selection()
+                    self.open_duplicate()
+                else:
+                    info_click['last'] = path if click else None
+                    info_click['time'] = now
+                info_click['down'] = None
+            return result
+        self.info.control.mouse_handler = focus_info_row
         self.info.window.height = lambda: Dimension(min=4 if self.video_path and
             hasattr(self, 'app') and self.app.output.get_size().rows >= 18 else 1)
         self.info.window.right_margins = [ScrollbarMargin()]
@@ -3960,7 +3984,7 @@ def main_help(display_mode):
         '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths (all screens)',
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
-        'Quick View duplicates: Tab to info; Up/Down select duplicate rows, PageUp/PageDown move ten, Home/End select first/last; Right/Enter jumps to the duplicate, Left returns to Files. Without duplicates, text scrolls normally.',
+        'Quick View duplicates: click a row or Tab to info; Up/Down select duplicate rows, PageUp/PageDown move ten, Home/End select first/last; Right/Enter or double-click jumps to the duplicate, Left returns to Files. Without duplicates, text scrolls normally.',
         '[#ff8800]h[/#ff8800]: Open help from Files; close when help is focused',
         '[#ff8800]Esc[/#ff8800] (in help): Leave search, then close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',
