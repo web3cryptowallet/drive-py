@@ -25,6 +25,7 @@ class DirectorySymbolsTests(unittest.TestCase):
                 index = next(i for i, row in enumerate(browser.rows) if row['name'] == 'empty')
                 return browser.control.create_content(80, 10).get_line(index)[0]
             self.assertEqual(marker()[1], '·')
+            self.assertEqual(next(r for r in browser.rows if r['name'] == 'empty')['size'], '0')
             self.assertIn('class:green', marker()[0])
             browser.refresh_scan_symbols()
             self.assertEqual(marker()[1], '·')
@@ -32,6 +33,7 @@ class DirectorySymbolsTests(unittest.TestCase):
             browser.refresh()
             self.assertEqual(marker()[1], '●')
             self.assertIn('class:orange', marker()[0])
+            self.assertEqual(next(r for r in browser.rows if r['name'] == 'empty')['size'], '-')
             (folder / '.hidden').unlink()
             entries = [(row['name'], row['node']) for row in browser.rows]
             with patch.object(tui.os, 'scandir', side_effect=PermissionError('denied')):

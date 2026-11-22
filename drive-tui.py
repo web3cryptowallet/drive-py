@@ -2746,7 +2746,7 @@ class DriveBrowser:
             self.rows.append(dict(name=name, node=node, color=color, indicator=indicator, problem_file=problem_file,
                                   listing_empty=listing_empty,
                                   label=f'{marker} {"📁" if node.is_dir else "📄"} {name}',
-                                  size=format_size(node.size, int(not node.is_dir)).strip(),
+                                  size=('-' if node.is_dir else format_size(node.size, 1).strip()),
                                   dups=(previous_dups.get(node.id, '(?)') if _entries is not None and not node.is_dir
                                         else (f'({count})' if node.is_dir or node.info.get('hashinfo') else '(?)'))))
         self.file_rows_by_path = {row['node'].id: row for row in self.rows if not row['node'].is_dir}
@@ -2760,9 +2760,7 @@ class DriveBrowser:
         self.directory_size_rows = {normalize_bookmark_path(row['node'].id).rstrip('/'): row
                                     for row in self.rows if row['node'].is_dir and row['name'] != '..'}
         for path, row in self.directory_size_rows.items():
-            size = max([row['node'].size] + [scanner.directory_sizes.get(path, 0)
-                                           for scanner in self.scanners])
-            row['size'] = format_size(size, 0).strip()
+            row['size'] = self.directory_size_label(row, path)
             count = max([row['node'].total_files, self.directory_counts.get(path)] + [scanner.directory_counts.get(path, 0)
                                                    for scanner in self.scanners])
             row['dups'] = f'({count})'
@@ -2906,6 +2904,19 @@ class DriveBrowser:
                 self.dups_task = None
         self.dups_task = self.app.create_background_task(refresh_counts())
 
+    def directory_size_label(self, row, path):
+        """Distinguish unknown totals from measured zero; ignore disk inode sizes."""
+        node = row['node']
+        live = [scan.directory_sizes[path] for scan in self.scanners
+                if path in scan.directory_sizes]
+        if row.get('listing_empty') and not any(live):
+            return '0'
+        catalog_size = (node.size if getattr(node, 'info', {}).get('status') != 'new' else 0)
+        if live or catalog_size or getattr(node, 'total_files', 0):
+            size = max([catalog_size] + live)
+            return format_size(size, 0).strip() if size else '0'
+        return '-'
+
     def update_scan_directory_sizes(self, scanner):
         """Apply a bounded set of cached totals, without disk or catalog reads."""
         if self.cursor_busy():
@@ -2918,9 +2929,7 @@ class DriveBrowser:
             row = getattr(self, 'directory_size_rows', {}).get(path)
             if row is None:
                 continue
-            size = max([row['node'].size] + [scan.directory_sizes.get(path, 0)
-                                           for scan in self.scanners])
-            row['size'] = format_size(size, 0).strip()
+            row['size'] = self.directory_size_label(row, path)
             count = max([getattr(row['node'], 'total_files', 0),
                          self.directory_counts.get(path) if hasattr(self, 'directory_counts') else 0] +
                         [scan.directory_counts.get(path, 0) for scan in self.scanners])
@@ -3713,9 +3722,25 @@ class DriveBrowser:
         rows = self.scan_statistics.record(scanner.storage_path)[scope]
         files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
         result.append(('', f'{scope}: {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
-                           f'{scanner.stats.paths_per_second:.0f} paths/s · {scanner.stats.mb_per_second:.1f} MB/s · '
-                           's:view Ctrl+S:statistics Ctrl+P:pause/resume Ctrl+K:stop'))
-        return result
+                           f'{scanner.stats.paths_per_second:.0f} paths/s · {scanner.stats.mb_per_second:.1f} MB/s'))
+        width = self.app.output.get_size().columns if hasattr(self, 'app') else 80
+        available = width - sum(get_cwidth(text) for _, text in result) - 3
+        path = safe_text(getattr(scanner.stats, 'path', '') or '')
+        if path and available > 0:
+            if get_cwidth(path) > available:
+                if available < 5:
+                    path = '.' * min(3, available)
+                else:
+                    left = (available - 2) // 2
+                    right = available - 3 - left
+                    path = fit(path, left).rstrip() + '...' + path[filename_end(path, right):]
+            result.append(('', ' · ' + path))
+        clipped = []
+        remaining = max(0, width)
+        for style, text in result:
+            clipped.append((style, fit(text, remaining).rstrip() if get_cwidth(text) > remaining else text))
+            remaining -= get_cwidth(clipped[-1][1])
+        return clipped
 
     # RESET CURRENT MAP [
     def reset_current_map(self):

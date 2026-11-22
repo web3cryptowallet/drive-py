@@ -47,6 +47,29 @@ class BackgroundScannerTests(unittest.IsolatedAsyncioTestCase):
         browser.scanners = []
         self.assertEqual(browser.scan_progress(), '')
 
+    def test_status_path_fits_terminal(self):
+        browser = object.__new__(tui.DriveBrowser)
+        browser.app = NS(output=NS())
+        browser.scan_statistics_scope = 'session'
+        browser.scan_statistics = NS(record=lambda path: {'session': []})
+        stats = NS(active=False, paths_per_second=0., mb_per_second=0.,
+                   path='/start/' + '界' * 100 + '/final.txt')
+        browser.scanners = [NS(closing=False, paused_modes=None,
+                               controls=NS(modes=(False, False, False)),
+                               storage_path='/', stats=stats)]
+        for width in (100, 120, 60, 10, 1):
+            browser.app.output.get_size = lambda: NS(columns=width)
+            text = ''.join(text for _, text in browser.scan_progress())
+            self.assertLessEqual(tui.get_cwidth(text), width)
+            self.assertNotIn('s:view', text)
+            if width >= 100:
+                self.assertIn('/start/', text)
+                self.assertIn('...', text)
+                self.assertTrue(text.endswith('/final.txt'))
+        stats.path = '/short'
+        browser.app.output.get_size = lambda: NS(columns=120)
+        self.assertTrue(''.join(t for _, t in browser.scan_progress()).endswith('/short'))
+
     async def test_hide_navigate_reopen_pause_and_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -61,6 +61,20 @@ class DirectorySizeTests(unittest.TestCase):
         self.assertEqual(row['size'], tui.format_size(100, 0).strip())
         self.assertEqual(row['node'].size, 100)
 
+    def test_unknown_inode_size_and_live_zero(self):
+        view = scanner()
+        browser = object.__new__(tui.DriveBrowser)
+        browser.scanners = [view]
+        row = dict(node=NS(size=4096, total_files=0, info={'status': 'new'}))
+        self.assertEqual(browser.directory_size_label(row, '/a'), '-')
+        row['listing_empty'] = True
+        self.assertEqual(browser.directory_size_label(row, '/a'), '0')
+        row['listing_empty'] = False
+        view.directory_sizes['/a'] = 0
+        self.assertEqual(browser.directory_size_label(row, '/a'), '0')
+        view.directory_sizes['/a'] = 5000
+        self.assertEqual(browser.directory_size_label(row, '/a'), tui.format_size(5000, 0).strip())
+
     def test_each_tick_updates_at_most_128_dirty_directories(self):
         view = scanner()
         view.directory_size_dirty = {f'/dir{i}' for i in range(300)}

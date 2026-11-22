@@ -556,6 +556,23 @@ refresh. These are database file sizes and volume capacity, not total catalogued
 file content sizes. Memory and remote backends have no local database file size.
 
 The main scan status line shows the mode's rotating indicator (purple for Medium,
-gold for Lite/Heavy), scope file count/size/time, paths/s, MB/s and shortcut hints.
-Verbose paths and phase text are omitted. Paused/idle scans keep statistics without
+gold for Lite/Heavy), scope file count/size/time, paths/s, MB/s and the current/last
+scanned path. Shortcut hints are hidden; long paths keep their beginning and end
+as `start...end` within the terminal width. Phase text is omitted. Paused/idle scans keep statistics without
 rotation. Open s, F4 or Ctrl+S for more detail.
+
+### More
+
+Empty folders in the file list show a small green middle dot (`·`) immediately,
+before scanning. Listing refresh checks for any child, including hidden entries;
+unreadable folders keep their usual status marker.
+Unhandled shortcuts show a red `Unknown key <key>` popup for three seconds.
+Editable text fields continue to accept normal input.
+
+The main scan status row hides shortcut hints and shows the current/last scanned
+path after the statistics. Long paths use `start...end` to fit the terminal;
+`s` still opens/hides the scanner.
+
+In the Files Size column, unscanned directories with no known content total show
+`-`; confirmed empty directories show `0`. Known scan/catalog totals show content
+sizes, excluding the filesystem directory-entry size.
