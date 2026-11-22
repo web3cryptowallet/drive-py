@@ -260,3 +260,5 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 Empty folders in the file list show a small green middle dot (`·`) immediately,
 before scanning. Listing refresh checks for any child, including hidden entries;
 unreadable folders keep their usual status marker.
+Unhandled shortcuts show a red `Unknown key <key>` popup for three seconds.
+Editable text fields continue to accept normal input.

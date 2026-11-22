@@ -1172,6 +1172,21 @@ class DriveBrowser:
         self.action_history.add('chdir', self.vfs.pwd())
         self.refresh()
         bindings = KeyBindings()
+        @bindings.add('<any>', filter=Condition(lambda: not (
+            getattr(self.app.layout.current_control, 'buffer', None) is not None
+            and not self.app.layout.current_control.buffer.read_only())))
+        def unknown_key(event):
+            key = event.key_sequence[-1].key
+            self.show_notification(f'Unknown key {getattr(key, "value", key)}', error=True)
+
+        # Replace toolkit no-op defaults while keeping concrete UI bindings later
+        # in the registry (and focused widget bindings) in charge.
+        from prompt_toolkit.key_binding.bindings.basic import load_basic_bindings
+        fallback_filter = bindings.bindings[-1].filter
+        for binding in load_basic_bindings().bindings:
+            if binding.handler.__name__ == '_ignore' and str(binding.keys[-1]) != 'Keys.Ignore':
+                bindings.add(*binding.keys, filter=fallback_filter)(unknown_key)
+
         main_focused = Condition(lambda: not self.screen_stack)
         files_focused = has_focus(self.control)
 
@@ -1302,6 +1317,7 @@ class DriveBrowser:
         ], height=1), filter=Condition(lambda: self.app.output.get_size().rows >= 12 and
                                       self.app.output.get_size().columns >= 40)))
         self.clipboard_notice = ''
+        self.clipboard_notice_error = False
         self.clipboard_notice_epoch = 0
         self.main_layout = Layout(self.popup_layout(layout), focused_element=self.control)
         self.app = Application(layout=self.main_layout,
@@ -1317,9 +1333,11 @@ class DriveBrowser:
     # INITIALIZE DRIVE BROWSER ]
     # OVERLAY TRANSIENT NOTIFICATIONS WITHOUT RESERVING A SCREEN ROW [
     def popup_layout(self, content):
-        notice = ConditionalContainer(Frame(Window(
+        notice = ConditionalContainer(HSplit([Frame(Window(
             FormattedTextControl(lambda: safe_text(self.clipboard_notice)), height=1,
-            style='class:header'), title='Notification'),
+            style=lambda: 'fg:#ffffff bg:#cc0000' if self.clipboard_notice_error else 'class:header'),
+            title='Notification')],
+            style=lambda: 'fg:#ffffff bg:#cc0000' if self.clipboard_notice_error else ''),
             filter=Condition(lambda: bool(self.clipboard_notice)))
         content = HSplit([content, ConditionalContainer(
             Window(FormattedTextControl(self.scan_progress), height=1, style='class:header'),
@@ -3782,8 +3800,9 @@ class DriveBrowser:
             self.app.invalidate()
 
     # SHOW TEMPORARY ACTION FEEDBACK WITHOUT STEALING FOCUS [
-    def show_notification(self, message):
+    def show_notification(self, message, *, error=False):
         self.clipboard_notice = message
+        self.clipboard_notice_error = error
         self.clipboard_notice_epoch += 1
         epoch = self.clipboard_notice_epoch
         self.app.invalidate()
