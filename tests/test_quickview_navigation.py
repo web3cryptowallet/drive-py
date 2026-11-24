@@ -19,6 +19,85 @@ spec.loader.exec_module(tui)
 
 
 class QuickViewNavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_path_filter_excludes_selected_aliases_and_toggle(self):
+        with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
+            root = Path(directory)
+            folder = root / 'folder'
+            folder.mkdir()
+            original = folder / 'original.txt'
+            original.write_text('same')
+            (root / 'copy.txt').write_text('same')
+            (root / 'link.txt').symlink_to(original)
+            (root / 'copy-link.txt').symlink_to(root / 'copy.txt')
+            (root / 'alias').symlink_to(folder, target_is_directory=True)
+            paths = [original, root / 'link.txt', root / 'alias' / 'original.txt', root / 'copy.txt', root / 'copy-link.txt']
+            fs = VirtualFS({'files': {}})
+            for path in paths:
+                fs.db.add_scanned_file(str(path), 'md5:' + '0' * 32, 4)
+            with patch.object(tui, 'HISTORY_PATH', root / 'history.llog'):
+                browser = tui.DriveBrowser(fs, path=directory, input=pipe, output=DummyOutput())
+            browser.image_previews = False
+            browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == 'link.txt')
+            browser.show_info()
+            self.assertIn('Duplicates (1/4)', browser.info.text)
+            self.assertEqual(list(browser.info_paths.values()), [str(root / 'copy-link.txt')])
+            browser.app.layout.focus(browser.info)
+            task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
+            try:
+                await asyncio.sleep(.04)
+                with patch.object(tui.os.path, 'realpath', side_effect=AssertionError('toggle must use cached paths')), patch.object(browser, 'show_info', side_effect=AssertionError('preview restarted')):
+                    browser.app.layout.focus(browser.control)
+                    pipe.send_text('f')
+                    await asyncio.sleep(.04)
+                    self.assertTrue(browser.app.layout.has_focus(browser.control))
+                    self.assertEqual(len(browser.info_paths), 4)
+                    self.assertEqual(set(browser.info_paths.values()), {str(original), str(root / 'alias' / 'original.txt'), str(root / 'copy-link.txt'), str(root / 'copy.txt')})
+                    self.assertIn('Duplicates (4/4)', browser.info.text)
+                    self.assertNotIn(str(root / 'link.txt'), browser.info_paths.values())
+                    self.assertIn('· all ·', browser.info.text)
+                    pipe.send_text('f')
+                    await asyncio.sleep(.04)
+                    self.assertEqual(len(browser.info_paths), 1)
+                    self.assertIn('· filtered ·', browser.info.text)
+            finally:
+                browser.app.exit()
+                await task
+
+    async def test_selected_path_alias_counts_and_empty_filter_toggle(self):
+        from prompt_toolkit.input import DummyInput
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / 'selected.txt'
+            selected.write_text('same')
+            alias = root / 'symlink.txt'
+            alias.symlink_to(selected)
+            another = root / 'another.txt'
+            another.write_text('same')
+            fs = VirtualFS({'files': {}})
+            for path in (selected, alias, another):
+                fs.db.add_scanned_file(str(path), 'md5:' + '0' * 32, 4)
+            with patch.object(tui, 'HISTORY_PATH', root / 'history.llog'):
+                browser = tui.DriveBrowser(fs, path=directory, input=DummyInput(), output=DummyOutput())
+            browser.image_previews = False
+            browser.show_info(preview_node=fs.get_from_path(str(selected)))
+            self.assertIn('Duplicates (1/2)', browser.info.text)
+            self.assertEqual(list(browser.info_paths.values()), [str(another)])
+            browser.toggle_duplicate_filter()
+            self.assertIn('Duplicates (2/2)', browser.info.text)
+            self.assertEqual(set(browser.info_paths.values()), {str(another), str(alias)})
+            self.assertNotIn(str(selected), browser.info_paths.values())
+            browser.db_trash.move(str(another), archive=False)
+            browser.quickview_filter_duplicates = True
+            browser.show_info(preview_node=fs.get_from_path(str(selected)))
+            self.assertIn('Duplicates (0/1)', browser.info.text)
+            self.assertFalse(browser.info_paths)
+            browser.toggle_duplicate_filter()
+            self.assertIn('Duplicates (1/1)', browser.info.text)
+            self.assertEqual(list(browser.info_paths.values()), [str(alias)])
+            browser.toggle_duplicate_filter()
+            self.assertIn('Duplicates (0/1)', browser.info.text)
+            self.assertFalse(browser.info_paths)
+
     async def test_arrow_selection_focus_and_duplicate_jump(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)

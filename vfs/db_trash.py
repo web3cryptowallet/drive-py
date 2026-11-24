@@ -2,10 +2,11 @@
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
+import os
 
 from .adapter.sqlite import SQLiteDBAdapter
 from .scanner import ScanStore
-from .paths import catalog_identity_path, path_update_prefix
+from .paths import catalog_identity_path, path_update_prefix, get_real_path
 from .utils import normalize_path
 
 
@@ -25,17 +26,30 @@ class DBTrash:
         return self.store.items('trashed')
 
     def roots(self):
-        return tuple(sorted({value['root'] for value in self.records().values()}))
+        return tuple(sorted({value['root'] for value in self.records().values()
+                             if not os.path.exists(get_real_path(value['root']))}))
 
-    def move(self, path):
+    def remove(self, paths=None):
+        """Permanently forget exact archive rows, or all rows; never touch files."""
+        db = self.db
+        if isinstance(db, SQLiteDBAdapter):
+            with db.write_transaction():
+                if paths is None:
+                    return db.conn.execute('DELETE FROM D').rowcount
+                return sum(db.conn.execute('DELETE FROM D WHERE path=?', (path,)).rowcount
+                           for path in set(paths))
+        keys = self.records() if paths is None else set(paths)
+        return sum(self.store.delete('trashed', path) for path in keys)
+
+    def move(self, path, *, archive=True):
         if not path or path == '/':
             raise ValueError('Cannot trash the catalog root')
         node = self.db.get_root()
         for part in path.strip('/').split('/'):
             node = self.db.get_child(node, part) if node else None
-        if node is None:
+        if node is None and archive:
             raise ValueError('This path has no active database record')
-        nodes, pending = {}, [node]
+        nodes, pending = {}, [node] if node else []
         while pending:
             item = pending.pop()
             if item.id in nodes:
@@ -52,7 +66,7 @@ class DBTrash:
             return '/' + normalize_path(path_update_prefix(value))[0]
         context = db.write_transaction() if isinstance(db, SQLiteDBAdapter) else nullcontext()
         with context:
-            for key, data in nodes.items():
+            for key, data in (nodes.items() if archive else ()):
                 if isinstance(db, SQLiteDBAdapter):
                     db.conn.execute('INSERT OR REPLACE INTO D VALUES (?,?,?,?)',
                                     (key, path, stamp, json.dumps(data)))
@@ -74,7 +88,7 @@ class DBTrash:
                                 if store._duplicate_path_id(candidate['path']) == key:
                                     store.conn.execute('DELETE FROM hashes WHERE rowid=?', (candidate['rowid'],))
                         store.conn.execute('DELETE FROM nodes WHERE id=?', (key,))
-                    parent = nodes[path]['parent_id']
+                    parent = nodes[path]['parent_id'] if nodes else None
                     while parent is not None:
                         row = store.conn.execute('SELECT parent_id FROM nodes WHERE id=?', (parent,)).fetchone()
                         if row is None:
@@ -90,7 +104,7 @@ class DBTrash:
                     db.children_idx.get(data['parent_id'], {}).pop(data['name'], None)
                 for digest, paths in list(db.hashes.items()):
                     db.hashes[digest] = {value for value in paths if identity(value) not in nodes}
-                parent = nodes[path]['parent_id']
+                parent = nodes[path]['parent_id'] if nodes else None
                 while parent is not None and parent in db.nodes:
                     ancestor = db.nodes[parent]
                     ancestor.size = max(0, ancestor.size - removed_size)
@@ -109,7 +123,7 @@ class DBTrash:
                             if identity(value) == key:
                                 pipe.srem('hash:' + digest, value)
                 removed_size = sum(data['size'] for data in nodes.values() if not data['is_dir'])
-                parent = nodes[path]['parent_id']
+                parent = nodes[path]['parent_id'] if nodes else None
                 while parent is not None:
                     ancestor = db.client.hgetall('node:' + parent)
                     if not ancestor:
@@ -121,4 +135,15 @@ class DBTrash:
                 pipe.execute()
             else:
                 raise ValueError('Database backend does not support trash')
+            if not archive:
+                matches = lambda key: key == path or key.startswith(path.rstrip('/') + '/')
+                for kind in ('entry', 'checksum'):
+                    for key in self.store.items(kind):
+                        if matches(key):
+                            self.store.delete(kind, key)
+                for kind in ('map', 'position'):
+                    for key in self.store.items(kind):
+                        scope = key.partition('::selection:')[0].rstrip('/')
+                        if matches(scope) or path.startswith(scope + '/'):
+                            self.store.delete(kind, key)
         return len(nodes)

@@ -41,7 +41,7 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(browser.selected, index + 1)
             self.assertFalse(browser.scan_selection)
             browser.invert_scan_selection()
-            self.assertEqual(len(browser.scan_selection), 2)
+            self.assertEqual(len(browser.scan_selection), 3)
             browser.invert_scan_selection()
             self.assertFalse(browser.scan_selection)
             browser.selected = index
@@ -59,6 +59,19 @@ class SelectionTests(unittest.TestCase):
             browser.parent()
             browser.selected = next(i for i, row in enumerate(browser.rows) if row['name'] == 'plain')
             browser.toggle_scan_selection()
-            self.assertFalse(browser.scan_selection)
+            selected_file = browser.rows[browser.selected]['node'].id
+            self.assertEqual(browser.scan_selection, {selected_file})
+            scanner = DriveScanner(fs.db, fs.pwd(), Queue(), Event(),
+                controls=ScanControls((True, False, False), startup=False),
+                scan_roots=(selected_file,))
+            scanner.scan_once(fs.db)
+            self.assertEqual(set(scanner.entries), {selected_file})
+            browser.scan_selection.add(selected)
+            view = tui.ScannerView(browser, startup=False)
+            scanner = DriveScanner(fs.db, fs.pwd(), Queue(), Event(),
+                controls=ScanControls((True, False, False), startup=False),
+                scan_roots=view.scan_roots)
+            scanner.scan_once(fs.db)
+            self.assertEqual(set(scanner.entries), {selected, selected + '/file', selected_file})
     # VERIFY MARKS CURSOR STYLES NAVIGATION AND SCOPE ]
 # VERIFY SELECTION BEHAVIOR ]

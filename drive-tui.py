@@ -277,7 +277,7 @@ try:
     from prompt_toolkit.mouse_events import MouseEventType, MouseButton
     from prompt_toolkit.styles import DynamicStyle, Style
     from prompt_toolkit.utils import get_cwidth
-    from prompt_toolkit.widgets import Button, Frame, TextArea
+    from prompt_toolkit.widgets import Box, Button, Frame, TextArea
 except ImportError as exc:
     raise SystemExit('Install prompt_toolkit: python -m pip install prompt_toolkit') from exc
 # LOAD PROMPT TOOLKIT WITH A CLEAR MISSING DEPENDENCY ERROR ]
@@ -1116,6 +1116,8 @@ class DriveBrowser:
             self.blacklist = set()
         self.pending_bookmark = None
         self.info_paths = {}
+        self.quickview_filter_duplicates = True
+        self.quickview_duplicate_rows = None
         self.cursor_idle_until = 0.
         self.cursor_idle_task = None
         self.cursor_refresh_pending = False
@@ -1282,10 +1284,12 @@ class DriveBrowser:
         bind(['c-b'], lambda event: self.toggle_blacklist_visibility())
         bind(['c-u'], lambda event: self.toggle_problem_files(), eager=True)
         bind(['c-d'], lambda event: self.trash_selected())
-        bind(['D'], lambda event: self.push(DBTrashView(self)))
+        bind(['d'], lambda event: self.push(DBTrashView(self)))
         bind(['u'], lambda event: self.expand_subdirs(), eager=True)
         bind(['o'], lambda event: self.toggle_expansion_depth(), eager=True)
         bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
+        bind(['f'], lambda event: self.toggle_duplicate_filter(from_files=files_focused()),
+             filter=has_focus(self.info) | files_focused, eager=True)
         duplicate_focused = has_focus(self.info) & Condition(lambda: bool(self.info_paths))
         for key, step in [('up', -1), ('down', 1), ('pageup', -10), ('pagedown', 10),
                           ('home', 'first'), ('end', 'last')]:
@@ -1831,9 +1835,20 @@ class DriveBrowser:
         return any(path == root or path.startswith(root.rstrip('/') + '/') for root in self.trashed_roots)
 
     def trash_selected(self):
-        if not self.rows or self.rows[self.selected]['name'] == '..':
+        if self.screen_stack:
             return
-        path = self.rows[self.selected]['node'].id
+        paths = tuple(sorted({row['node'].id for row in self.rows
+                              if row['name'] != '..' and row['node'].id in self.scan_selection}))
+        if not paths:
+            if not self.rows or self.rows[self.selected]['name'] == '..':
+                return
+            paths = (self.rows[self.selected]['node'].id,)
+        self.push(RemoveDBConfirmView(self, paths))
+
+    def trash_paths(self, paths):
+        # An explicitly selected ancestor already includes its descendants.
+        roots = tuple(path for path in paths if not any(
+            path.startswith(parent.rstrip('/') + '/') for parent in paths if parent != path))
         async def move():
             try:
                 # Finish worker writes before removing their baseline records.
@@ -1841,15 +1856,21 @@ class DriveBrowser:
                     scanner.stop_scanning()
                 while self.scanners:
                     await asyncio.sleep(.02)
-                count = self.db_trash.move(path)
+                count = 0
+                for path in roots:
+                    present = os.path.exists(get_real_path(path))
+                    count += self.db_trash.move(path, archive=not present)
+                    self.action_history.add('reset scan info' if present else 'database trash', path)
                 self.trashed_roots = self.db_trash.roots()
                 self.vfs._local_nodes = {key: value for key, value in self.vfs._local_nodes.items()
-                                         if not self.is_trashed(key)}
-                self.action_history.add('database trash', path)
+                                         if not any(key == root or key.startswith(root.rstrip('/') + '/') for root in roots)}
+                self.scan_selection.difference_update(paths)
                 self.refresh(update_info=False)
-                self.show_notification(f'Moved {count} database records to D; disk files kept')
+                self.show_notification(f'Removed {count} database records; disk files kept, ready to rescan')
             except (ValueError, OSError, sqlite3.Error) as exc:
-                self.show_notification(str(exc))
+                self.trashed_roots = self.db_trash.roots()
+                self.refresh(update_info=False)
+                self.show_notification(str(exc), error=True)
         self.app.create_background_task(move())
 
     def exclusion_label(self, style, text, marked, row, offset=1):
@@ -2715,8 +2736,6 @@ class DriveBrowser:
             seen = set()
             while pending:
                 name, node = pending.pop()
-                if self.is_trashed(node.id):
-                    continue
                 if not self.show_blacklisted and any(node.id == root or node.id.startswith(root.rstrip('/') + '/')
                                                       for root in self.blacklist):
                     continue
@@ -2741,8 +2760,8 @@ class DriveBrowser:
         previous_dups = {row['node'].id: row.get('dups', '(0)') for row in self.rows}
         self.rows = []
         for name, node in entries:
-            if name != '..' and (self.is_trashed(node.id) or (not self.show_blacklisted and any(
-                    node.id == root or node.id.startswith(root.rstrip('/') + '/') for root in self.blacklist))):
+            if name != '..' and (not self.show_blacklisted and any(
+                    node.id == root or node.id.startswith(root.rstrip('/') + '/') for root in self.blacklist)):
                 continue
             media = not node.is_dir and os.path.splitext(name)[1].lower() in filter_suffixes
             blacklisted = node.is_dir and normalize_bookmark_path(node.id) in self.blacklist
@@ -3024,6 +3043,10 @@ class DriveBrowser:
         if row['name'] == '..':
             return row['label'][0]
         node = row['node']
+        if self.is_trashed(node.id) and node.info.get('status') == 'new':
+            row['indicator'] = 'orange'
+            row.pop('scan_color', None)
+            return row['label'][0]
         target = normalize_bookmark_path(node.id).rstrip('/')
         symbol = row.get('scan_symbol', row['label'][0])
         for scanner in self.scanners:
@@ -3101,7 +3124,7 @@ class DriveBrowser:
     def toggle_scan_selection(self, advance=False):
         if self.rows:
             row = self.rows[self.selected]
-            if row['name'] != '..' and row['node'].is_dir:
+            if row['name'] != '..':
                 self.scan_selection.symmetric_difference_update([row['node'].id])
         if advance:
             self.move(1)
@@ -3110,7 +3133,7 @@ class DriveBrowser:
     # INVERT SCAN SELECTION [
     def invert_scan_selection(self):
         self.scan_selection.symmetric_difference_update(
-            row['node'].id for row in self.rows if row['name'] != '..' and row['node'].is_dir)
+            row['node'].id for row in self.rows if row['name'] != '..')
         self.app.invalidate()
     # INVERT SCAN SELECTION ]
     # CLEAR SCAN SELECTION [
@@ -3278,6 +3301,7 @@ class DriveBrowser:
             self.end_quickview(token)
 
     def _show_info(self, directory=False, preview_node=None):
+        self.quickview_duplicate_rows = None
         self.preview_bookmark_path = None
         self.stop_video()
         self.video_epoch += 1
@@ -3401,9 +3425,24 @@ class DriveBrowser:
                 lines.append('')
             self.info_lexer.hash_lines.add(len(lines))
             hashes = node.info.get('hashinfo') or ''
-            lines.extend([', '.join(sorted(hashes)) if isinstance(hashes, set) else str(hashes), '',
-                          f'Other Duplicates ({len(info.get("dups", []))}):'])
+            self.quickview_duplicate_node = node.id
+            selected_real = os.path.normcase(os.path.realpath(get_real_path(node.id)))
+            all_paths = []
+            known, filtered = set(), []
             for path, state in zip(info.get('dups', []), info.get('dups_states', [])):
+                if path == node.id:
+                    continue
+                all_paths.append((path, state))
+                real = os.path.normcase(os.path.realpath(get_real_path(path)))
+                if real == selected_real:
+                    continue
+                if real not in known:
+                    known.add(real)
+                    filtered.append((path, state))
+            self.quickview_duplicate_rows = (filtered, all_paths)
+            lines.extend([', '.join(sorted(hashes)) if isinstance(hashes, set) else str(hashes), '',
+                          self.duplicate_heading()])
+            for path, state in (filtered if self.quickview_filter_duplicates else all_paths):
                 self.info_lexer.colors[len(lines)] = 'green' if state.get('exists') else 'red'
                 self.info_paths[len(lines)] = path
                 lines.append('● ' + self.display_path(path))
@@ -3422,6 +3461,43 @@ class DriveBrowser:
         self.info.text = '\n'.join(safe_text(line) for line in lines)
         self.info.buffer.cursor_position = 0
     # SHOW INFO FOR DRIVE BROWSER ]
+    def duplicate_heading(self):
+        filtered, all_paths = self.quickview_duplicate_rows
+        mode = 'filtered' if self.quickview_filter_duplicates else 'all'
+        shown = len(filtered) if self.quickview_filter_duplicates else len(all_paths)
+        return f'Duplicates ({shown}/{len(all_paths)}) · {mode} · f: filter/all:'
+
+    def toggle_duplicate_filter(self, *, from_files=False):
+        if (from_files and not self.screen_stack
+                and (self.quickview_duplicate_rows is None
+                     or getattr(self, 'quickview_duplicate_node', None) != self.selected_path())):
+            self.show_info()
+        if self.quickview_duplicate_rows is None:
+            return
+        lines = self.info.text.split('\n')
+        start = next((index for index, line in enumerate(lines) if line.startswith('Duplicates (')), None)
+        if start is None:
+            return
+        end = max(self.info_paths) + 1 if self.info_paths else start + 1
+        current = self.info_paths.get(self.info.buffer.document.cursor_position_row)
+        self.quickview_filter_duplicates = not self.quickview_filter_duplicates
+        filtered, all_paths = self.quickview_duplicate_rows
+        rows = filtered if self.quickview_filter_duplicates else all_paths
+        self.info_paths = {}
+        self.info_lexer.colors = {index: color for index, color in self.info_lexer.colors.items()
+                                  if index < start}
+        replacement = [self.duplicate_heading()]
+        for path, state in rows:
+            index = start + len(replacement)
+            self.info_paths[index] = path
+            self.info_lexer.colors[index] = 'green' if state.get('exists') else 'red'
+            replacement.append('● ' + self.display_path(path))
+        self.info.text = '\n'.join(lines[:start] + replacement + lines[end:])
+        index = next((index for index, path in self.info_paths.items() if path == current),
+                     min(self.info_paths, default=start))
+        self.info.buffer.cursor_position = self.info.buffer.document.translate_row_col_to_index(index, 0)
+        self.app.invalidate()
+
     def preview_bookmark_fragments(self):
         marked = self.preview_bookmark_path in self.bookmarks
         path = self.preview_bookmark_path
@@ -3685,7 +3761,7 @@ class DriveBrowser:
         def running(task):
             return task is not None and not task.done()
         lines = ['Files', f'  Directory: {self.display_path(self.vfs.pwd())}',
-                 f'  Rows: {len(self.rows)} · marked folders: {len(self.scan_selection)}',
+                 f'  Rows: {len(self.rows)} · marked items: {len(self.scan_selection)}',
                  f'  Cursor: {"moving / work deferred" if self.cursor_busy() else "idle"}',
                  f'  Expansion: {"working" if running(self.expansion_task) else "idle"}',
                  f'  Duplicate updates: {len(self.dups_pending)} pending', '', 'Quick View',
@@ -3985,6 +4061,7 @@ def main_help(display_mode):
         '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths (all screens)',
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
+        '[#ff8800]f[/#ff8800] (Files or Quick View focus): Toggle real-path filtered/all duplicates; shown/total excludes selected path, all mode retains its aliases',
         'Quick View duplicates: click a row or Tab to info; Up/Down select duplicate rows, PageUp/PageDown move ten, Home/End select first/last; Right/Enter or double-click jumps to the duplicate, Left returns to Files. Without duplicates, text scrolls normally.',
         '[#ff8800]h[/#ff8800]: Open help from Files; close when help is focused',
         '[#ff8800]Esc[/#ff8800] (in help): Leave search, then close help',
@@ -4002,9 +4079,6 @@ def main_help(display_mode):
         '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
         '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
         '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
-        '[#ff8800]Up / Down / Left / Right[/#ff8800]: Navigate the focused table; table Left/Right go to parent/open, graphics move one entry',
-        '[#ff8800]PageUp / PageDown[/#ff8800]: Move one Files page',
-        '[#ff8800]Home / End[/#ff8800]: Select first/last Files entry',
         '[#ff8800]Tab / Shift+Tab[/#ff8800]: Focus next/previous pane or media control',
         '[#ff8800]Ctrl+Y[/#ff8800]: Copy info panel text to clipboard',
         '[#ff8800]Ctrl+X[/#ff8800]: Copy selected absolute local path',
@@ -4014,8 +4088,8 @@ def main_help(display_mode):
         '[#ff8800]l[/#ff8800]: History · Delete: remove entry · Shift+Delete: clear · t: online/offline filter · v: preview · drag: select · F5: refresh presence',
         '[#ff8800]t[/#ff8800]: Cycle MC Default, MC Blue, Textual Dark and White themes',
         '[#ff8800]n[/#ff8800]: Cycle circles, colored names and monochrome display',
-        '[#ff8800]Space / Insert / * / -[/#ff8800]: Toggle folder / toggle and down / invert folders / clear marks',
-        '[#ff8800]s[/#ff8800]: Open/hide scan view; finished scans restart at current directory/marked folders',
+        '[#ff8800]Space / Insert / * / -[/#ff8800]: Toggle file/folder / toggle and down / invert items / clear marks',
+        '[#ff8800]s[/#ff8800]: Open/hide scan view; finished scans restart at current directory/marked items',
         '[#ff8800]Ctrl+P / Ctrl+K[/#ff8800]: Pause/resume background scan / stop and save scan',
         '[#ff8800]Ctrl+S[/#ff8800]: Scan statistics table; v switches current/total display',
         '[#ff8800]Ctrl+E / Q[/#ff8800]: Video conversion editor / persistent conversion queue',
@@ -4027,15 +4101,17 @@ def main_help(display_mode):
         '[#ff8800]_[/#ff8800]: Shrink thumbnails; graphics - also shrinks, table - clears folder marks',
         '[#ff8800]q / Ctrl+C[/#ff8800]: Quit',
         '', '[bold]Trash[/bold]',
-        '[#ff8800]Ctrl+D[/#ff8800]: Move selected database file/subtree to Trash; disk files kept',
-        'Stops active scans first; trashed paths remain excluded from scanning. Restore/purge is not available.',
-        '[#ff8800]D[/#ff8800]: Open database Trash',
+        '[#ff8800]Ctrl+D[/#ff8800]: Confirm removal of marked items (or cursor item) from db to Trash; disk files kept',
+        'Stops active scans first; trashed paths remain excluded from scanning. Restore is not available; D supports Delete for marked/cursor archive entries and Ctrl+Delete to clear all.',
+        '[#ff8800]d[/#ff8800]: Open database Trash',
         'Deleted (UTC) is first: yyyy-mm-dd hh:mm:ss. Right column: size and last six hash characters; full hashes remain saved.',
         'In Trash, / focuses live case-insensitive filename search; matches are bold black on yellow, like Help.',
         'Enter on an archive row expands/collapses active duplicates underneath. Arrows/PageUp/PageDown select rows; Enter on a duplicate jumps to its file in Files.',
         'Duplicate status: green circle means present on disk; red circle means missing/inaccessible. Status refreshes when expanding, with no disk checks during cursor movement.',
         'Expanded duplicate names also match search; archive parents remain visible as context. Clear search text to show all entries.',
-        'Esc leaves search with the filter retained, then closes Trash. D closes outside search; horizontal keys/slider pan narrow views.',
+        'Esc in search clears the filter and focuses the list; Enter focuses the list keeping the filter. Esc from the list closes Trash. d closes outside search; horizontal keys/slider pan narrow views.',
+        'In Trash, h opens quick help with highlighted keys. Insert marks/unmarks archive rows and moves down; - deselects all.',
+        'Delete permanently removes marked archive entries (or the cursor entry); Ctrl+Delete clears all D entries including hidden results. Disk files and active duplicates remain untouched.',
         '', '[bold]Removal queue[/bold]',
         '[#ff8800]Delete[/#ff8800]: Queue selected file for removal',
         '[#ff8800]Shift+Delete[/#ff8800]: Queue file and all duplicates for removal',
@@ -4093,15 +4169,10 @@ SCANNER_HELP = [
     '', '[bold]Map and settings[/bold]',
     '[#ff8800]m[/#ff8800]: Count/size bucket packing',
     '[#ff8800]v[/#ff8800]: Fixed/scroll packing',
-    '[#ff8800]Up / Down / Left / Right[/#ff8800]: Move map cursor; file list Left/Right pan horizontally',
-    '[#ff8800]PageUp / PageDown[/#ff8800]: Move a map page or previous/next file page',
-    '[#ff8800]Home / End[/#ff8800]: First/last map bucket, file row, page or horizontal position according to focus',
     '[#ff8800]Tab / Shift+Tab[/#ff8800]: Focus next/previous scanner control',
     '[#ff8800]Enter[/#ff8800]: Apply Paths/bucket or MiB/bucket input',
     '[#ff8800]Shift+Home / End (or Shift+PageUp / PageDown)[/#ff8800]: Beginning / end of longest filename',
     '[#ff8800]Ctrl+C[/#ff8800]: Quit',
-    '[#ff8800]Right[/#ff8800] at last bucket: follow new buckets at >',
-    '[#ff8800]Right[/#ff8800] keeps follow mode; other arrows, Page Up/Down or real-bucket click exit',
     'Paths/bucket and MiB/bucket: edit limits; Enter applies',
     '', '[bold]File list and pages[/bold]',
     'Click a status count to filter; click it again or All to remove filter',
@@ -4880,10 +4951,76 @@ class BookmarksView(PTScreen):
         self.browser.go_bookmark(index)
     # CHOOSE BOOKMARKS VIEW ]
 # EDIT BOOKMARK TARGETS AND PREVIEW SELECTED FILES ]
+class RemoveDBConfirmView(PTScreen):
+    def __init__(self, browser, paths):
+        from prompt_toolkit.layout.containers import HorizontalAlign, WindowAlign
+        super().__init__(browser)
+        self.paths = tuple(paths)
+        self.question = f'Remove {len(self.paths)} items from db?'
+        cancel = Button('Cancel', handler=self.close)
+        remove = Button('Remove', handler=self.confirm)
+        self.focus = remove
+        self.bind(['escape', 'n'], self.close)
+        self.bind(['y'], self.confirm)
+        self.bind(['left', 'right', 'tab', 's-tab'], lambda: browser.app.layout.focus(
+            cancel if browser.app.layout.has_focus(remove) else remove), eager=True)
+        dialog = Frame(Box(HSplit([
+            Window(FormattedTextControl(self.question), height=1, width=30, align=WindowAlign.CENTER),
+            Window(height=1),
+            VSplit([remove, cancel], align=HorizontalAlign.CENTER, height=1, width=30),
+        ], width=30), padding=1, width=32), style='fg:#ffffff bg:#cc0000', key_bindings=self.keys,
+            modal=True, width=34, height=7)
+        self.container = FloatContainer(browser.app.layout.container, floats=[
+            Float(content=dialog, width=34, height=7)])
+
+    def confirm(self):
+        if not self.browser.screen_stack or self.browser.screen_stack[-1][0] is not self:
+            return
+        self.close()
+        self.browser.trash_paths(self.paths)
+
+
+class TrashHelpView(PTScreen):
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.bind(['escape', 'h', 'enter'], self.close, eager=True)
+        lines = [
+            '[#ff8800]Enter[/#ff8800]: expand/collapse duplicates or jump to file',
+            '[#ff8800]Insert[/#ff8800]: select/deselect archive row and move down',
+            '[#ff8800]-[/#ff8800]: deselect all',
+            '[#ff8800]Delete[/#ff8800]: remove marked archive entries, or cursor entry',
+            '[#ff8800]Ctrl+Delete[/#ff8800]: clear ALL archive entries, including hidden',
+            '[#ff8800]/[/#ff8800]: search filenames (clear text to show all)',
+            'Search: [#ff8800]Enter[/#ff8800] keeps filter, focuses list; [#ff8800]Esc[/#ff8800] clears filter, focuses list',
+            'List: [#ff8800]Esc / d[/#ff8800] closes D',
+            '[#ff8800]Shift+Left/Right[/#ff8800]: pan names; [#ff8800]Shift+PageUp/Down[/#ff8800]: ends',
+            '',
+            'Removal is permanent archive metadata only. Disk files stay intact.',
+            'Restore is not available. Duplicate rows cannot be marked/deleted.',
+            '[#ff8800]Ctrl+D[/#ff8800] in Files resets present files; missing paths enter D.',
+            '',
+            '[#ff8800]Esc / Enter / h[/#ff8800]: close this help',
+        ]
+        self.text = '\n'.join(plain_markup(line) for line in lines)
+        fragments = []
+        for index, line in enumerate(markup_lines(lines)):
+            if index:
+                fragments.append(('', '\n'))
+            fragments.extend(line)
+        self.focus = FormattedTextControl(fragments, focusable=True)
+        dialog = Frame(Box(Window(self.focus, wrap_lines=True), padding=1),
+            title='D · quick help', key_bindings=self.keys, modal=True,
+            width=72, height=19)
+        self.container = FloatContainer(browser.app.layout.container, floats=[
+            Float(content=dialog, width=72, height=19)])
+
+
 class DBTrashView(PTScreen):
     def __init__(self, browser):
         super().__init__(browser)
-        self.records = browser.db_trash.records()
+        self.records = dict(sorted(browser.db_trash.records().items(),
+            key=lambda item: (item[1]['trashed_at'], item[0]), reverse=True))
+        self.marked = set()
         self.expanded = {}
         self.duplicate_status = {}
         self.rows_revision = 0
@@ -4897,19 +5034,71 @@ class DBTrashView(PTScreen):
         self.focus = self.table
         horizontal_keys(self, self.horizontal)
         self.bind(['escape'], self.escape, eager=True)
-        self.bind(['D'], self.close, eager=True, filter=~has_focus(self.search))
+        self.bind(['d'], self.close, eager=True, filter=~has_focus(self.search))
+        self.bind(['h'], lambda: browser.push(TrashHelpView(browser)), eager=True,
+                  filter=~has_focus(self.search))
         self.bind(['/'], self.search_focus, eager=True, filter=~has_focus(self.search))
+        self.bind(['insert'], self.toggle_mark, eager=True, filter=has_focus(self.table))
+        self.bind(['-'], self.clear_marks, eager=True, filter=has_focus(self.table))
+        self.bind(['delete'], self.remove_marked, eager=True, filter=has_focus(self.table))
+        self.bind(['c-delete'], lambda: self.remove_marked(all_entries=True), eager=True,
+                  filter=has_focus(self.table))
         for key, delta in [('up', -1), ('down', 1), ('pageup', -10), ('pagedown', 10)]:
             self.bind([key], lambda delta=delta: self.table.move(delta), filter=has_focus(self.search))
-        self.bind(['enter'], self.choose, eager=True)
+        self.bind(['enter'], lambda: self.browser.app.layout.focus(self.table),
+                  eager=True, filter=has_focus(self.search))
+        self.bind(['enter'], self.choose, eager=True, filter=has_focus(self.table))
         table_bindings(self, self.table)
         self.container = Frame(HSplit([
             Window(FormattedTextControl(self.header), height=1),
             Window(self.table, right_margins=[ScrollbarMargin()], wrap_lines=False),
             Window(self.horizontal, height=1),
             self.search,
-            Window(FormattedTextControl('Enter: expand/collapse duplicates or jump · / search · Esc: browse/close'), height=1),
+            Window(FormattedTextControl('h: help · Enter: expand/collapse or jump · / search · Esc: browse/close'), height=1),
         ]), title='D · database trash · disk files kept', key_bindings=self.keys)
+
+    def toggle_mark(self):
+        self.rows()
+        if self.items:
+            kind, path = self.items[min(self.table.index, len(self.items) - 1)]
+            if kind == 'trash':
+                self.marked.symmetric_difference_update((path,))
+                self.rows_revision += 1
+                self.table.move(1)
+                self.invalidate()
+
+    def clear_marks(self):
+        self.marked.clear()
+        self.rows_revision += 1
+        self.invalidate()
+
+    def remove_marked(self, *, all_entries=False):
+        self.rows()
+        paths = set(self.marked)
+        if not all_entries and not paths and self.items:
+            kind, path = self.items[min(self.table.index, len(self.items) - 1)]
+            if kind == 'trash':
+                paths.add(path)
+        if not all_entries and not paths:
+            return
+        try:
+            count = self.browser.db_trash.remove(None if all_entries else paths)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            self.browser.show_notification(str(exc), error=True)
+            return
+        remaining = self.browser.db_trash.records()
+        self.records = dict(sorted(remaining.items(),
+            key=lambda item: (item[1]['trashed_at'], item[0]), reverse=True))
+        self.marked.intersection_update(self.records)
+        self.expanded = {key: value for key, value in self.expanded.items() if key in self.records}
+        self.browser.trashed_roots = self.browser.db_trash.roots()
+        for scanner in self.browser.scanners:
+            scanner.controls.trashed_paths = self.browser.trashed_roots
+        self.rows_revision += 1
+        self.rows()
+        self.table.index = max(0, min(self.table.index, len(self.items) - 1))
+        self.invalidate()
+        self.browser.show_notification(f'Removed {count} entries from D; disk files kept')
 
     def header(self):
         self.rows()
@@ -4921,6 +5110,7 @@ class DBTrashView(PTScreen):
 
     def escape(self):
         if self.browser.app.layout.has_focus(self.search):
+            self.search.text = ''
             self.browser.app.layout.focus(self.table)
         else:
             self.close()
@@ -4988,7 +5178,7 @@ class DBTrashView(PTScreen):
                 row += highlighted(fit(path[6:], max(0, available)), self.search.text, 'class:literal')
             else:
                 row += highlighted(fit(path, path_width), self.search.text,
-                                   'class:literal' if duplicate else 'class:literal fg:#ff5555')
+                                   'class:literal' if duplicate else ('class:literal fg:#ffd700' if target in self.marked else 'class:literal fg:#ff5555'))
             row.append(('', '  ' + str(digest).rjust(hash_width)))
             self.cached_rows.append(row)
         self.rows_key = key
@@ -5533,11 +5723,11 @@ class HelpView(PTScreen):
         self.bind(['enter'], self.apply_selected, filter=browsing, eager=True)
         self.search.buffer.on_text_changed += lambda _: self.filter_entries()
         self.container = HSplit([
-            Window(FormattedTextControl(title + ' · arrows browse · / search · Esc close'), height=1, style='class:header'),
+            Window(FormattedTextControl(title + ' · / search · Esc close'), height=1, style='class:header'),
             self.window,
             Frame(self.text, title='Description', style='class:info-pane'),
             self.search,
-            VSplit([Window(FormattedTextControl(lambda: f'{len(self.filtered)}/{len(self.entries)} entries · Enter: run · PgUp/PgDn: column top/bottom · Home/End: first/last · Esc: close'), height=1),
+            VSplit([Window(FormattedTextControl(lambda: f'{len(self.filtered)}/{len(self.entries)} entries · Enter: run · Esc: close'), height=1),
                     Button('Close', width=7, handler=self.close)], height=1),
         ], key_bindings=self.keys)
         self.preview()

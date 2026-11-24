@@ -226,7 +226,7 @@ class ScanStore:
         if isinstance(db, SQLiteDBAdapter):
             if db.conn.execute('SELECT 1 FROM scan_state WHERE kind=? AND key=?', (kind, key)).fetchone() is None:
                 return False
-            with db.conn:
+            with db.write_transaction():
                 result = db.conn.execute('DELETE FROM scan_state WHERE kind=? AND key=?', (kind, key))
             return bool(result.rowcount)
         if hasattr(db, 'client'):
@@ -1014,7 +1014,28 @@ class DriveScanner:
                     roots.update(row[0] for row in db.conn.execute('SELECT DISTINCT root FROM D'))
             else:
                 roots.update(record['root'] for record in self.store.items('trashed').values())
-            self.controls.trashed_paths = tuple(roots)
+            # Older Ctrl+D archived paths that still exist. Drop their stale
+            # verification/checkpoint state when the active catalog is absent.
+            present = tuple(root for root in roots if os.path.exists(get_real_path(root)))
+            reset = False
+            if present:
+                for key in self.store.items('entry').keys() | self.store.items('checksum').keys():
+                    if not any(key == root or key.startswith(root.rstrip('/') + '/') for root in present):
+                        continue
+                    node = db.get_root()
+                    for part in key.strip('/').split('/'):
+                        node = db.get_child(node, part) if node else None
+                    if node is None:
+                        self.store.delete('entry', key)
+                        self.store.delete('checksum', key)
+                        self.entries.pop(key, None)
+                        reset = True
+                if reset:
+                    self.store.delete('position', self.storage_path)
+                    self.checkpoints = None
+                    self.checksum_cache.clear()
+            self.controls.trashed_paths = tuple(root for root in roots
+                if not os.path.exists(get_real_path(root)))
             self.trash_loaded = True
         if self.checkpoints is None:
             self.report_activity("Loading resume positions", self.storage_path, force=True)

@@ -26,12 +26,12 @@ class HelpIndexTests(unittest.IsolatedAsyncioTestCase):
     def test_trash_section_describes_current_controls(self):
         entries = help_entries(tui.main_help(0), tui.plain_markup)
         trash = [entry for entry in entries if entry.section == 'Trash']
-        self.assertEqual({entry.key for entry in trash}, {'Ctrl+D', 'D'})
-        description = next(entry.description for entry in trash if entry.key == 'D')
+        self.assertEqual({entry.key for entry in trash}, {'Ctrl+D', 'd'})
+        description = next(entry.description for entry in trash if entry.key == 'd')
         for detail in ('yyyy-mm-dd hh:mm:ss', 'last six hash', 'case-insensitive',
                        'bold black on yellow', 'expands/collapses', 'jumps', 'Esc'):
             self.assertIn(detail, description)
-        self.assertEqual(sum(entry.key == 'D' for entry in entries), 1)
+        self.assertEqual(sum(entry.key == 'd' for entry in entries), 1)
 
     async def test_enter_runs_main_search_scanner_and_local_help_actions(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe, \
@@ -69,15 +69,15 @@ class HelpIndexTests(unittest.IsolatedAsyncioTestCase):
                 pipe.send_text('h')
                 await until(lambda: bool(browser.screen_stack))
                 view = browser.screen_stack[-1][0]
-                choose(view, 'PageDown', local=True)
+                choose(view, 'Tab', local=True)
                 selected = view.filtered[view.index]
                 _, positions = view.grid.layout_rows()
                 column = positions[view.index][1]
                 column_ids = [index for index, (_, col) in positions.items() if col == column]
                 pipe.send_text('\r')
-                await until(lambda: view.index == column_ids[-1])
+                await until(lambda: browser.clipboard_notice == f'Applied key Tab: {selected.short}')
                 self.assertIs(browser.screen_stack[-1][0], view)
-                await until(lambda: browser.clipboard_notice == f'Applied key PageDown: {selected.short}')
+                self.assertFalse(any(entry.key in {'Up', 'Down', 'Left', 'Right', 'PageUp', 'PageDown', 'Home', 'End'} for entry in view.entries))
                 view.search_focus()
                 pipe.send_text('\x1b[5~')
                 await until(lambda: view.index == column_ids[0])
@@ -483,7 +483,11 @@ class HelpBindingCoverageTests(unittest.TestCase):
             return label.lower() if len(label) > 1 else label
         def bound_keys(bindings):
             return {key.value if hasattr(key, 'value') else key
-                    for binding in bindings.bindings for key in binding.keys}
+                    for binding in bindings.bindings
+                    if binding.handler.__name__ != 'unknown_key'
+                    for key in binding.keys
+                    if (key.value if hasattr(key, 'value') else key) not in
+                    {'up', 'down', 'left', 'right', 'pageup', 'pagedown', 'home', 'end'}}
         def documented(lines):
             return {normalized(entry.key) for entry in help_entries(lines, tui.plain_markup)}
         with tempfile.TemporaryDirectory() as directory:

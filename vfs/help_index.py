@@ -72,7 +72,7 @@ def help_entries(lines, strip):
         # explanation available in the description panel.
         scanner = any(strip(line) == 'Scanning' for line in lines)
         short_names = {'b': 'Bookmark on/off', 'j': 'Open bookmarks', 'u': 'Expand/collapse',
-                       'o': 'One/all levels', 'Ctrl+D': 'Trash DB entry', 'D': 'Database trash',
+                       'o': 'One/all levels', 'Ctrl+D': 'Trash DB entry', 'd': 'Database trash',
                        'Ctrl+P': 'Pause/resume scan', 'Ctrl+K': 'Stop scanning',
                        'Ctrl+E': 'Convert video', 'Q': 'Conversion queue',
                        'Space': 'Mark folder', 'Insert': 'Mark and move', '*': 'Invert marks',
@@ -136,7 +136,8 @@ def help_entries(lines, strip):
                 entry.section = 'Help'
             groups.setdefault(entry.section, []).append(entry)
         entries = [entry for group in groups.values() for entry in group]
-    return entries
+    return [entry for entry in entries if entry.key.lower() not in {
+        'up', 'down', 'left', 'right', 'pageup', 'pagedown', 'pgup', 'pgdown', 'home', 'end'}]
 
 
 def highlighted(text, query, style=''):

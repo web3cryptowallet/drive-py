@@ -137,12 +137,12 @@ Windows/WSL, or a built-in X11/XWayland owner (python-xlib) when Linux utilities
 are missing. Terminal OSC 52 is the final fallback; Ubuntu Terminal may ignore it.
 
 
-Mark folders for scanning with **Space** (toggle without moving) or **Insert**
-(toggle and move down). **\*** inverts marks on all listed folders; **-** clears
-all marks. Marked folder names are gold, including under the cursor. **s** scans
-marked folders, or the current directory when none are marked. Entering another
-directory clears marks. Files and `..` cannot be marked. Marks are session-only;
-scoped maps/resume positions are saved separately for each folder set.
+Mark files and folders for scanning or database removal with **Space** (toggle without moving) or **Insert**
+(toggle and move down). **\*** inverts marks on all listed files/folders; **-** clears
+all marks. Marked item names are gold, including under the cursor. **s** scans
+marked files/folders, or the current directory when none are marked. Entering another
+directory clears marks. `..` cannot be marked. Marks are session-only;
+scoped maps/resume positions are saved separately for each selected path set.
 Thumbnail height uses **+** / **_** (Shift+-).
 
 Press **q** from any view (including help, Actions and scanner inputs) to quit
@@ -403,12 +403,12 @@ automatically update the directory summaries. Directories containing the current
 active scan path temporarily show a rotating `\ | / -` marker in the same
 circle color; pause/idle restores their saved symbol.
 
-`s` starts scanning marked folders (or the current directory) and toggles the scan
+`s` starts scanning marked files/folders (or the current directory) and toggles the scan
 view. Closing it with `s` or Esc keeps scanning in the background while you browse
 and play videos. While running or paused, press `s` again to return to the
 same scan, even after navigating to another folder. If the scan has finished,
 reopening with `s` starts a fresh 1 → 2 → 3 scan of the current directory
-(or its marked folders), including when reopening the same directory. The bottom row shows state, paths processed, throughput and the
+(or its marked files/folders), including when reopening the same directory. The bottom row shows state, paths processed, throughput and the
 current/last path. **Ctrl+P** pauses/resumes enabled scan modes; **Ctrl+K** stops and
 saves the scan. Pause switches the startup sequence to manual mode control.
 After stopping, `s` starts a session for the current folder/marks. Quitting saves
@@ -476,7 +476,7 @@ blacklist, and `L` lists it. **Ctrl+B** independently shows/hides blacklisted
 entries in Files without changing scan exclusions.
 
 **Ctrl+D** moves the selected file/folder's database records into the **D** trash
-table, leaving disk contents untouched. **D** opens that archive. Active scans are
+table, leaving disk contents untouched. **d** opens that archive. Active scans are
 stopped first, and trashed paths stay excluded from later scans so they are not
 immediately re-added. Restore/purge UI is deferred; metadata is retained.
 `Delete` / `Shift+Delete` still add filesystem-removal actions to the Actions queue.
@@ -580,7 +580,7 @@ sizes, excluding the filesystem directory-entry size.
 ### Trash
 
 **Ctrl+D** moves the selected database entry/subtree to Trash, keeping disk files.
-**D** opens Trash. Active scans stop before removal; trashed paths stay excluded
+**d** opens Trash. Active scans stop before removal; trashed paths stay excluded
 from scanning. Restore/purge is not available.
 
 In D (database Trash), deletion time is the first column in UTC
@@ -627,3 +627,143 @@ use arrows to select duplicates and Enter/Right to jump. Tab also focuses Info.
 
 Double-click a Quick View duplicate to jump to its location, just like Enter.
 Single-click selects it.
+
+Space/Insert marks also target **Ctrl+D**. It opens **Remove data from db?**
+for the marked paths, or the cursor item if there are no marks. Cancel/Esc/n
+keeps them; select Remove or press y to confirm. Folders include their subtree.
+Disk files stay in place and metadata moves to D; scans exclude trashed paths.
+
+Database removal uses a small centered red popup: “Remove data from db?” with
+Remove first, Cancel second. Left/Right/Tab switches buttons; Enter activates
+the focused button. Esc/n cancels; y confirms.
+
+Database removal confirmation centers its question and buttons in a padded red
+window. Removed database entries still present on disk remain visible in Files
+as orange/unscanned. D shows newest deletions first; its retained roots still
+exclude automatic scan reimport.
+
+Ctrl+D on items still present on disk now **resets their scan information**,
+removing catalog/hash/checksum/verification state without adding them to D.
+Select the files or their folder and press s to rescan. Only missing paths move
+to D. Legacy D entries no longer exclude paths that exist on disk; stale saved
+verification is discarded when their active catalog records are absent. This
+supersedes the earlier automatic exclusion guidance for present disk paths.
+
+In D, press **h** outside search for quick help; **Esc**, **Enter** or **h**
+closes it. Restore is not implemented. Archive removal controls are listed below. In search, h types normally.
+
+In **D**, **Insert** toggles a gold mark and advances; **-** deselects all.
+**Delete** permanently removes marked archive rows, or the cursor archive row
+when unmarked. **Ctrl+Delete** immediately clears all D records, including those
+hidden by search. These affect archive metadata only, keeping disk files and
+active duplicates. Folder archive rows are independent of descendant rows.
+**h** opens quick help with orange highlighted keys. Commands require table
+focus; search keeps normal editing. Restore remains unavailable.
+
+D search: **Esc** clears the search and focuses the full list. **Enter** keeps
+the filter and focuses the filtered list. From the list, Esc closes D and Enter
+expands/collapses duplicates or jumps. Archive marks are unchanged by search.
+
+The Files removal question reads **Remove N items from db?**. It counts marked
+items in the current list, each folder once, without counting descendants.
+Without marks it counts the cursor item as one.
+
+Quick View duplicate paths default to **real-path filtering**, collapsing file
+and directory symlink aliases. The exact selected path is excluded from both modes. Aliases resolving to it
+are hidden only in filtered mode and remain visible in all mode. **f** while Info has
+focus switches **filtered/all**. The heading shows **shown/total** paths excluding the exact selected path.
+For another file plus a symlink to the selected file, it shows **1/2 filtered**
+and **2/2 all**. The toggle reuses
+the current preview snapshot; reopen it to refresh filesystem changes.
+
+**d** opens/closes the D archive list (outside search); **Ctrl+D** retains its
+Files reset/removal behavior. **f** toggles Quick View filtered/all duplicates
+from either Files or Info focus. Help omits ordinary arrow/PageUp/PageDown/
+Home/End shortcut entries while retaining their working navigation bindings.
+Shift filename-scrolling shortcuts remain listed.
+
+
+
+
+
+Trash caches formatted rows during cursor movement; search, expansion, width
+and path-display changes rebuild the view.
+
+Trash duplicate rows show a green `●` for files present on disk and red `●` for
+missing/inaccessible files. Collapse and expand again to refresh status; cursor
+movement uses cached status. Green indicates presence, not checksum verification.
+
+Quick View duplicate navigation: Tab to Info, then Up/Down selects duplicates,
+PageUp/PageDown moves ten, Home/End selects first/last, Right/Enter jumps to the
+file, and Left returns focus to Files. Without duplicates, vertical keys move
+through text.
+
+Click a Quick View row to focus the pane and select that row immediately; then
+use arrows to select duplicates and Enter/Right to jump. Tab also focuses Info.
+
+Double-click a Quick View duplicate to jump to its location, just like Enter.
+Single-click selects it.
+
+SQLite catalogs use WAL journaling so scanner readers can remain open while
+navigation saves commit. SQLite manages accompanying `-wal`/`-shm` files; competing
+writers still use the existing lock timeout. See
+[the navigation locking fix](FEATURE-startup-directory.md#2026-11-24--navigation-commits-while-scanner-readers-remain-open).
+
+Folder-loading and expansion feedback use the normal notification color, clearing
+any preceding error's red background. Red notification styling is reserved for
+error feedback.
+
+Space/Insert marks files and folders (Insert also advances); * inverts marks.
+`s` scans marked items, or the current directory when unmarked. Ctrl+D opens
+“Remove data from db?” for marks, falling back to the cursor item. Remove is
+first and focused by default; Esc/n cancels, y or Remove confirms. Metadata moves to D;
+disk files stay intact. See [database removal](FEATURE-database-trash.md).
+
+Database removal uses a small centered red popup: “Remove data from db?” with
+Remove first, Cancel second. Left/Right/Tab switches buttons; Enter activates
+the focused button. Esc/n cancels; y confirms.
+
+Database removal confirmation centers its question and buttons in a padded red
+window. Removed database entries still present on disk remain visible in Files
+as orange/unscanned. D shows newest deletions first; its retained roots still
+exclude automatic scan reimport.
+
+Ctrl+D on items still present on disk now **resets their scan information**,
+removing catalog/hash/checksum/verification state without adding them to D.
+Select the files or their folder and press s to rescan. Only missing paths move
+to D. Legacy D entries no longer exclude paths that exist on disk; stale saved
+verification is discarded when their active catalog records are absent. This
+supersedes the earlier automatic exclusion guidance for present disk paths.
+
+In D, press **h** outside search for quick help; **Esc**, **Enter** or **h**
+closes it. Restore is not implemented. Archive removal controls are listed below. In search, h types normally.
+
+In **D**, **Insert** toggles a gold mark and advances; **-** deselects all.
+**Delete** permanently removes marked archive rows, or the cursor archive row
+when unmarked. **Ctrl+Delete** immediately clears all D records, including those
+hidden by search. These affect archive metadata only, keeping disk files and
+active duplicates. Folder archive rows are independent of descendant rows.
+**h** opens quick help with orange highlighted keys. Commands require table
+focus; search keeps normal editing. Restore remains unavailable.
+
+D search: **Esc** clears the search and focuses the full list. **Enter** keeps
+the filter and focuses the filtered list. From the list, Esc closes D and Enter
+expands/collapses duplicates or jumps. Archive marks are unchanged by search.
+
+The Files removal question reads **Remove N items from db?**. It counts marked
+items in the current list, each folder once, without counting descendants.
+Without marks it counts the cursor item as one.
+
+Quick View duplicate paths default to **real-path filtering**, collapsing file
+and directory symlink aliases. The exact selected path is excluded from both modes. Aliases resolving to it
+are hidden only in filtered mode and remain visible in all mode. **f** while Info has
+focus switches **filtered/all**. The heading shows **shown/total** paths excluding the exact selected path.
+For another file plus a symlink to the selected file, it shows **1/2 filtered**
+and **2/2 all**. The toggle reuses
+the current preview snapshot; reopen it to refresh filesystem changes.
+
+**d** opens/closes the D archive list (outside search); **Ctrl+D** retains its
+Files reset/removal behavior. **f** toggles Quick View filtered/all duplicates
+from either Files or Info focus. Help omits ordinary arrow/PageUp/PageDown/
+Home/End shortcut entries while retaining their working navigation bindings.
+Shift filename-scrolling shortcuts remain listed.
