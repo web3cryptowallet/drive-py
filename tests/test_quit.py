@@ -40,6 +40,13 @@ class QuitTests(unittest.IsolatedAsyncioTestCase):
                 pipe.send_text('z')
                 await asyncio.sleep(.08)
                 self.assertEqual(browser.clipboard_notice_epoch, epoch)
+                notice = browser.begin_working('Working… loading folder')
+                self.assertIsNotNone(notice)
+                self.assertEqual(browser.clipboard_notice, 'Working… loading folder')
+                self.assertFalse(browser.clipboard_notice_error)
+                browser.end_working(notice)
+                browser.show_notification('Another error', error=True)
+                self.assertTrue(browser.clipboard_notice_error)
                 browser.show_notification('Normal notice')
                 self.assertFalse(browser.clipboard_notice_error)
             finally:

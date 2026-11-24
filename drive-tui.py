@@ -3870,6 +3870,7 @@ class DriveBrowser:
         if not hasattr(self, 'app') or not self.app.is_running:
             return None
         self.clipboard_notice = message
+        self.clipboard_notice_error = False
         self.clipboard_notice_epoch += 1
         epoch = self.clipboard_notice_epoch
         # Paint before synchronous filesystem checks can block the event loop.

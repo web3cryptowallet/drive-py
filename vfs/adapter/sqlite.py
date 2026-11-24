@@ -26,6 +26,10 @@ class SQLiteDBAdapter(BaseDBAdapter):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
+        # Scanner cursors may remain open while the UI saves navigation. WAL
+        # lets those readers retain their snapshot without blocking a commit.
+        # The setting persists for worker connections opened on this database.
+        self.conn.execute('PRAGMA journal_mode=WAL').fetchone()
         self.create_tables()
 
     @contextmanager

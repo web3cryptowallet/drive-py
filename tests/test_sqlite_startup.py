@@ -1,5 +1,6 @@
 """A fresh SQLite catalog supports navigation before any log import."""
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,35 @@ from vfs import VirtualFS
 
 
 class SQLiteStartupTests(unittest.TestCase):
+    def test_navigation_commit_with_active_scanner_reader(self):
+        from vfs.scanner import ScanStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            filename = str(Path(directory) / 'drivevfs')
+            fs = VirtualFS(None, 'sqlite', db_path=filename)
+            reader = sqlite3.connect(filename)
+            try:
+                store = ScanStore(fs.db)
+                store.put('entry', '/one', {'size': 1})
+                store.put('entry', '/two', {'size': 2})
+                # Keep a partially consumed scanner query alive through commit.
+                cursor = reader.execute('SELECT * FROM scan_state')
+                self.assertIsNotNone(cursor.fetchone())
+                fs.db.conn.execute('PRAGMA busy_timeout=0')
+                location = {'directory': directory, 'catalog_root': False}
+                store.put('ui', 'last_directory', location)
+                self.assertFalse(fs.db.conn.in_transaction)
+                self.assertIsNotNone(cursor.fetchone())
+                cursor.close()
+            finally:
+                reader.close()
+                fs.db.conn.close()
+            reopened = VirtualFS(None, 'sqlite', db_path=filename)
+            try:
+                self.assertEqual(ScanStore(reopened.db).get('ui', 'last_directory'), location)
+            finally:
+                reopened.db.conn.close()
+
     def test_empty_catalog_startup_build_and_reopen(self):
         for existing in (False, True):
             for fragmented in (False, True):

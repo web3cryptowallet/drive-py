@@ -276,3 +276,12 @@ use arrows to select duplicates and Enter/Right to jump. Tab also focuses Info.
 
 Double-click a Quick View duplicate to jump to its location, just like Enter.
 Single-click selects it.
+
+SQLite catalogs use WAL journaling so scanner readers can remain open while
+navigation saves commit. SQLite manages accompanying `-wal`/`-shm` files; competing
+writers still use the existing lock timeout. See
+[the navigation locking fix](FEATURE-startup-directory.md#2026-11-24--navigation-commits-while-scanner-readers-remain-open).
+
+Folder-loading and expansion feedback use the normal notification color, clearing
+any preceding error's red background. Red notification styling is reserved for
+error feedback.
