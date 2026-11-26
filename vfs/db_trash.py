@@ -137,12 +137,23 @@ class DBTrash:
                 raise ValueError('Database backend does not support trash')
             if not archive:
                 matches = lambda key: key == path or key.startswith(path.rstrip('/') + '/')
-                for kind in ('entry', 'checksum'):
-                    for key in self.store.items(kind):
-                        if matches(key):
-                            self.store.delete(kind, key)
+                if isinstance(db, SQLiteDBAdapter):
+                    # Do not decode the entire scan catalog (including large
+                    # saved maps) on the UI thread just to discard a subtree.
+                    prefix = path.rstrip('/') + '/'
+                    db.conn.execute("DELETE FROM scan_state WHERE kind IN ('entry','checksum') "
+                                    "AND (key=? OR (key>=? AND key<?))",
+                                    (path, prefix, prefix[:-1] + '0'))
+                else:
+                    for kind in ('entry', 'checksum'):
+                        for key in self.store.items(kind):
+                            if matches(key):
+                                self.store.delete(kind, key)
                 for kind in ('map', 'position'):
-                    for key in self.store.items(kind):
+                    keys = ([row[0] for row in db.conn.execute(
+                        'SELECT key FROM scan_state WHERE kind=?', (kind,))]
+                        if isinstance(db, SQLiteDBAdapter) else self.store.items(kind))
+                    for key in keys:
                         scope = key.partition('::selection:')[0].rstrip('/')
                         if matches(scope) or path.startswith(scope + '/'):
                             self.store.delete(kind, key)

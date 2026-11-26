@@ -273,6 +273,50 @@ class ExclusionInputTests(unittest.IsolatedAsyncioTestCase):
                         if backend == 'sqlite':
                             fs.db.conn.close()
 
+    def test_sqlite_reset_does_not_load_unrelated_scan_payloads(self):
+        from vfs.scanner import ScanStore
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / 'folder'
+            folder.mkdir()
+            file = folder / 'file'
+            file.write_bytes(b'rescan')
+            fs = VirtualFS(None, 'sqlite', db_path=str(root / 'catalog.sqlite'))
+            try:
+                fs.db.add_scanned_file(str(file), 'md5:old', 6)
+                trash = DBTrash(fs.db)
+                store = ScanStore(fs.db)
+                for kind in ('entry', 'checksum'):
+                    store.put(kind, str(file), {'state': 'verified'})
+                    store.put(kind, str(folder) + '2/file', {'keep': True})
+                selection = str(folder) + '::selection:["file"]'
+                for kind in ('map', 'position'):
+                    store.put(kind, directory, {'old': True})
+                    store.put(kind, selection, {'old': True})
+                    # Even an unreadable unrelated payload must not affect reset.
+                    fs.db.conn.execute('INSERT INTO scan_state VALUES (?,?,?)',
+                                       (kind, '/unrelated', 'invalid JSON'))
+                fs.db.conn.commit()
+                with patch.object(trash.store, 'items', side_effect=AssertionError('global payload load')):
+                    self.assertEqual(trash.move(str(folder), archive=False), 2)
+                for kind in ('entry', 'checksum'):
+                    self.assertIsNone(store.get(kind, str(file)))
+                    self.assertEqual(store.get(kind, str(folder) + '2/file'), {'keep': True})
+                for kind in ('map', 'position'):
+                    self.assertIsNone(store.get(kind, directory))
+                    self.assertIsNone(store.get(kind, selection))
+                    self.assertEqual(fs.db.conn.execute(
+                        'SELECT value FROM scan_state WHERE kind=? AND key=?',
+                        (kind, '/unrelated')).fetchone()[0], 'invalid JSON')
+                scanner = DriveScanner(fs.db, str(folder), Queue(), Event(),
+                                       controls=ScanControls(startup=True))
+                scanner.scan_once(fs.db)
+                self.assertEqual(scanner.entries[str(file)].state, 'verified')
+                self.assertEqual(file.read_bytes(), b'rescan')
+                self.assertFalse(trash.records())
+            finally:
+                fs.db.conn.close()
+
     async def test_multiple_marked_files_confirmation_cancel_and_remove(self):
         from prompt_toolkit.input import DummyInput
         with tempfile.TemporaryDirectory() as directory:

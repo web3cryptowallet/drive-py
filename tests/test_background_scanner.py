@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace as NS
 
-from prompt_toolkit.input import DummyInput
+from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from vfs import VirtualFS
 
@@ -17,6 +17,27 @@ spec.loader.exec_module(tui)
 
 
 class BackgroundScannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_f3_and_s_open_and_hide_scanner(self):
+        with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
+            browser = tui.DriveBrowser(VirtualFS({'files': {}}), path=directory,
+                                       input=pipe, output=DummyOutput())
+            task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
+            try:
+                await asyncio.sleep(.05)
+                with patch.object(tui.ScannerView, 'start'):
+                    for open_key, close_key in (('\x1bOR', '\x1bOR'), ('s', '\x1bOR'), ('\x1bOR', 's')):
+                        pipe.send_text(open_key)  # SS3 R = F3
+                        await asyncio.sleep(.05)
+                        scanner = browser.screen_stack[-1][0]
+                        self.assertIsInstance(scanner, tui.ScannerView)
+                        browser.app.layout.focus(scanner.limit)
+                        pipe.send_text(close_key)
+                        await asyncio.sleep(.05)
+                        self.assertFalse(browser.screen_stack)
+            finally:
+                browser.app.exit()
+                await task
+
     def test_status_line_keeps_stats_with_stage_rotation(self):
         browser = object.__new__(tui.DriveBrowser)
         scanner = NS(closing=False, paused_modes=None,

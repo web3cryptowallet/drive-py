@@ -487,7 +487,7 @@ Play and retains the setting for this session in Files, bookmarks and conversion
 preview. Conversion output audio is unaffected. Buttons now display plain labels
 without `<` / `>` decorations.
 
-The **O** (Shift+o) one/all-level expansion preference is saved in the database and restored
+The **o** one/all-level expansion preference is saved in the database and restored
 on launch (SQLite/Redis). Expanded folders themselves remain session-only.
 
 In **g graphics mode**, files **not found on disk** have red filenames, including
@@ -770,12 +770,12 @@ Shift filename-scrolling shortcuts remain listed.
 
 ## Loaded drive mappings
 
-Press **o** in Files to view loaded config.sh MAP DRIVES aliases, source prefixes,
-local paths and disabled roots. The view is read-only and scrollable; **Esc/o**
+Press **F7** in Files to view loaded config.sh MAP DRIVES aliases, source prefixes,
+local paths and disabled roots. The view is read-only and scrollable; **Esc/F7**
 closes it. ~: shows the startup directory. Edit config.sh and restart to apply
 changes. No disk availability checks or configuration reload occur on open.
 
-**o** opens drive mappings; **O** (Shift+o) toggles one/all expansion levels.
+**F7** opens drive mappings; **o** toggles one/all expansion levels.
 
 F6 opens all three modes' statistics from Files or the scanner, using the hidden
 scanner scope when present. Sizes scale through GB/TB/PB. The status row shows
@@ -790,9 +790,20 @@ targets or failed disk probes omit it.
 Info metadata uses separate lines for **Size**, **Disk free** (when available),
 **Dirs**, and **Files**. Counts follow the visible Files list and update in place.
 
-Press **o** in Files to inspect loaded drive mappings; **Esc/o** closes.
+Press **F7** in Files to inspect loaded drive mappings; **Esc/F7** closes.
 See [drive mapping controls](FEATURE-drive-mappings.md).
 
 F6 opens scan statistics. See [help.md](help.md) for adaptive size/rate units
 and mode progress/time estimates.
 
+## Function keys
+
+**F1** opens context Help (press again to close); **F10** quits through the usual
+save/cleanup path, including while typing in a search field. Existing h/q/Ctrl+C
+shortcuts remain. The bottom row lists assigned keys: Help (F1), Scan (F3), Status (F4), Refresh (F5),
+Stats (F6), Paths (F7) and Quit (F10); unused keys are hidden. Key names are white on black. Existing per-view key
+scopes remain. Labels shorten on narrow terminals. When the scan status line is
+present, it replaces the function-key hints; removing scan sessions restores them.
+
+**F3** works like **s**: open/resume Scan from Files, hide the map while scanning
+continues, or restart a finished scan for the current directory/marked paths.

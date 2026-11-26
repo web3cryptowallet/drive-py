@@ -1256,6 +1256,8 @@ class DriveBrowser:
         bindings.add('j', eager=True, filter=command_closed)(lambda event: self.push(BookmarksView(self)))
         bindings.add('q', eager=True, filter=command_closed)(lambda event: self.request_quit())
         bindings.add('c-c')(lambda event: self.request_quit())
+        bindings.add('f10', eager=True)(lambda event: self.request_quit())
+        bindings.add('f1', eager=True)(lambda event: self.show_context_help())
         bindings.add('c-p', eager=True)(lambda event: self.pause_scanner())
         bindings.add('c-k', eager=True)(lambda event: self.stop_scanner())
         bindings.add('f6', eager=True)(lambda event: self.show_scan_statistics())
@@ -1268,8 +1270,8 @@ class DriveBrowser:
         bind(['/'], lambda event: self.push(PathCommandView(self)), eager=True)
         bind(['l'], lambda event: self.push(HistoryView(self)))
         bind(['a'], lambda event: self.push(ActionsView(self)))
-        bind(['o'], lambda event: self.push(DriveMappingsView(self)))
-        bind(['s'], lambda event: self.toggle_scanner())
+        bind(['f7'], lambda event: self.push(DriveMappingsView(self)))
+        bind(['s', 'f3'], lambda event: self.toggle_scanner())
         bind(['c-e'], lambda event: self.edit_conversion())
         bind(['Q'], lambda event: self.push(ConversionQueueView(self)))
         bind([' '], lambda event: self.toggle_scan_selection(), filter=files_focused)
@@ -1310,7 +1312,7 @@ class DriveBrowser:
         bind(['c-d'], lambda event: self.trash_selected())
         bind(['d'], lambda event: self.push(DBTrashView(self)))
         bind(['u'], lambda event: self.expand_subdirs(), eager=True)
-        bind(['O'], lambda event: self.toggle_expansion_depth(), eager=True)
+        bind(['o'], lambda event: self.toggle_expansion_depth(), eager=True)
         bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
         bind(['f'], lambda event: self.toggle_duplicate_filter(from_files=files_focused()),
              filter=has_focus(self.info) | files_focused, eager=True)
@@ -1401,7 +1403,10 @@ class DriveBrowser:
             filter=Condition(lambda: bool(self.clipboard_notice)))
         content = HSplit([content, ConditionalContainer(
             Window(FormattedTextControl(self.scan_progress), height=1, style='class:header'),
-            filter=Condition(lambda: bool(self.scanners)))])
+            filter=Condition(lambda: bool(self.scanners))), ConditionalContainer(
+            Window(FormattedTextControl(self.function_keys), height=1, wrap_lines=False,
+                   style='class:header'),
+            filter=Condition(lambda: not self.scanners))])
         return NumberHighlight(FloatContainer(content, floats=[
             Float(content=notice, right=1, bottom=1,
                   width=lambda: min(len(self.clipboard_notice) + 4,
@@ -3692,6 +3697,30 @@ class DriveBrowser:
             self.app.layout.focus(self.control)
     # OPEN DUPLICATE FOR DRIVE BROWSER ]
     # OPEN A POPUP AND RETAIN THE CURRENT LAYOUT [
+    def show_context_help(self):
+        screen = self.screen_stack[-1][0] if self.screen_stack else None
+        if isinstance(screen, (HelpView, TrashHelpView)):
+            screen.close()
+        elif isinstance(screen, DBTrashView):
+            self.push(TrashHelpView(self))
+        elif isinstance(screen, ScannerView):
+            self.push(HelpView(self, 'Drive map help', SCANNER_HELP))
+        else:
+            self.push(HelpView(self, 'File manager help', main_help(self.display_mode)))
+
+    def function_keys(self):
+        labels = {1: 'Help', 3: 'Scan', 4: 'Status', 5: 'Refresh', 6: 'Stats', 7: 'Paths', 10: 'Quit'}
+        width = self.app.output.get_size().columns
+        result = []
+        for index, (number, label) in enumerate(labels.items()):
+            cells = width // len(labels) + (index < width % len(labels))
+            key = f'F{number}'
+            text = fit(key, min(len(key), cells))
+            result.append(('fg:#ffffff bg:#000000 bold', text))
+            if cells > len(text):
+                result.append(('class:header', fit(' ' + label, cells - len(text))))
+        return result
+
     def push(self, screen):
         self.files_scrollbar_dragging = False
         if not isinstance(screen, (ScanStatisticsView, StatusView)):
@@ -4095,12 +4124,12 @@ def main_help(display_mode):
         '[red]D[/red] Deleted',
         '', '[bold]Shortcuts[/bold]',
         '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths (all screens)',
-        '[#ff8800]o[/#ff8800]: View loaded config drive mappings (aliases, source prefixes, local paths, disabled roots)',
+        '[#ff8800]F7[/#ff8800]: View loaded config drive mappings (aliases, source prefixes, local paths, disabled roots)',
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
         '[#ff8800]f[/#ff8800] (Files or Quick View focus): Toggle real-path filtered/all duplicates; shown/total excludes selected path, all mode retains its aliases',
         'Quick View duplicates: click a row or Tab to info; Up/Down select duplicate rows, PageUp/PageDown move ten, Home/End select first/last; Right/Enter or double-click jumps to the duplicate, Left returns to Files. Without duplicates, text scrolls normally.',
-        '[#ff8800]h[/#ff8800]: Open help from Files; close when help is focused',
+        '[#ff8800]F1 / h[/#ff8800]: Open help from Files; close when help is focused',
         '[#ff8800]Esc[/#ff8800] (in help): Leave search, then close help',
         '[#ff8800]Enter[/#ff8800]: Open directory or view file info / ASCII image preview',
         'Media quick view: p toggles Play / Stop; seek bar click/wheel or focused Left/Right (5s)',
@@ -4112,7 +4141,7 @@ def main_help(display_mode):
         '[#ff8800]v[/#ff8800]: Cycle all / media (images, videos, audio) / image / videos',
         '[#ff8800].[/#ff8800]: Toggle dotfiles and hidden directories (shown by default)',
         '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; G page-priority generation order; k/K clear directory/all thumbnail caches; +/- display height (minimum 1 line), cache 128/256 pixels',
-        '[#ff8800]u / O[/#ff8800]: Table/graphics: show/hide selected subtree (..: all current subdirs) / toggle one or all levels',
+        '[#ff8800]u / o[/#ff8800]: Table/graphics: show/hide selected subtree (..: all current subdirs) / toggle one or all levels',
         '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
         '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
         '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
@@ -4126,7 +4155,7 @@ def main_help(display_mode):
         '[#ff8800]t[/#ff8800]: Cycle MC Default, MC Blue, Textual Dark and White themes',
         '[#ff8800]n[/#ff8800]: Cycle circles, colored names and monochrome display',
         '[#ff8800]Space / Insert / * / -[/#ff8800]: Toggle file/folder / toggle and down / invert items / clear marks',
-        '[#ff8800]s[/#ff8800]: Open/hide scan view; finished scans restart at current directory/marked items',
+        '[#ff8800]F3 / s[/#ff8800]: Open/hide scan view; finished scans restart at current directory/marked items',
         '[#ff8800]Ctrl+P / Ctrl+K[/#ff8800]: Pause/resume background scan / stop and save scan',
         '[#ff8800]F6[/#ff8800]: Scan statistics table; v switches current/total display',
         '[#ff8800]Ctrl+E / Q[/#ff8800]: Video conversion editor / persistent conversion queue',
@@ -4136,7 +4165,7 @@ def main_help(display_mode):
         '[#ff8800]F5 / Ctrl+R[/#ff8800]: Reload Files metadata and scan symbols',
         '[#ff8800]=[/#ff8800]: Grow thumbnails (same as +)',
         '[#ff8800]_[/#ff8800]: Shrink thumbnails; graphics - also shrinks, table - clears folder marks',
-        '[#ff8800]q / Ctrl+C[/#ff8800]: Quit',
+        '[#ff8800]F10 / q / Ctrl+C[/#ff8800]: Quit',
         '', '[bold]Trash[/bold]',
         '[#ff8800]Ctrl+D[/#ff8800]: Confirm removal of marked items (or cursor item) from db to Trash; disk files kept',
         'Stops active scans first; trashed paths remain excluded from scanning. Restore is not available; D supports Delete for marked/cursor archive entries and Ctrl+Delete to clear all.',
@@ -4166,6 +4195,9 @@ def main_help(display_mode):
 # DESCRIBE FILE MANAGER SHORTCUTS AND CURRENT MODE LEGEND ]
 # DOCUMENT LIVE SCANNER CONTROLS AND STATUS SYMBOLS [
 SCANNER_HELP = [
+    '[#ff8800]F3[/#ff8800]: Hide scan view; background scanning continues (same as s)',
+    '[#ff8800]F1[/#ff8800]: Open or close context help',
+    '[#ff8800]F10[/#ff8800]: Quit the app from any view',
     'Shift+Left / Right: pan one symbol; Shift+Home / End or Shift+PageUp / PageDown: filename beginning / end',
     '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths',
     '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks',
@@ -5042,11 +5074,11 @@ class DriveMappingsView(PTScreen):
         self.focus = self.table
         table_bindings(self, self.table)
         horizontal_keys(self, self.horizontal)
-        self.bind(['escape', 'o'], self.close, eager=True)
+        self.bind(['escape', 'f7'], self.close, eager=True)
         self.container = Frame(HSplit([
             Window(self.table, right_margins=[ScrollbarMargin()], wrap_lines=False),
             Window(self.horizontal, height=1),
-            Window(FormattedTextControl('o / Esc: close · read-only drive mappings'), height=1),
+            Window(FormattedTextControl('F7 / Esc: close · read-only drive mappings'), height=1),
         ]), title='Config · MAP DRIVES', key_bindings=self.keys)
 
 
@@ -6655,7 +6687,7 @@ class ScannerView(PTScreen):
             field.window.style = lambda field=field: ('class:text-area class:scan-input' +
                 (' class:scan-input-focused' if has_focus(field)() else ''))
         self.focus = self.grid
-        self.bind(['escape', 's'], self.close, eager=True)
+        self.bind(['escape', 's', 'f3'], self.close, eager=True)
         self.bind(['h'], lambda: browser.push(HelpView(browser, 'Drive map help', SCANNER_HELP)), eager=True)
         self.bind(['tab'], lambda: browser.app.layout.focus_next())
         self.bind(['s-tab'], lambda: browser.app.layout.focus_previous())

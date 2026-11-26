@@ -23,6 +23,16 @@ Multithreaded disk file comparison tool for verification and MD5 checksum report
 ## Run drive-tui.py
 
 From the project directory, run `./run.sh` to open the terminal file browser.
+
+**F1** opens context Help; **F3** opens/hides Scan (same as `s`); **F10** quits. The bottom shortcut bar shows assigned function keys and hides
+while the scan status line is shown. See [function keys](FEATURE-function-keys.md).
+
+F7 opens configured drive/path mappings; Esc or F7 closes. `o` toggles
+one/all expansion depth. See [mapping controls](FEATURE-drive-mappings.md).
+
+Ctrl+D resets scan information for selected files still on disk; they remain
+orange until rescanned with `s`. SQLite cleanup avoids decoding unrelated saved
+scan payloads. See [database reset details](FEATURE-database-trash.md).
 The launcher uses uv to install dependencies and starts with a SQLite catalog.
 Pass a directory to browse or `-d` to load scan logs:
 

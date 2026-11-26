@@ -17,6 +17,87 @@ spec.loader.exec_module(tui)
 # PREPARE TEST QUIT SHARED STATE ]
 # VERIFY QUIT BEHAVIOR [
 class QuitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_f1_context_help_and_f10_from_search(self):
+        with create_pipe_input() as pipe:
+            fs = VirtualFS({'files': {}})
+            with patch.object(fs, 'start_in_current_directory'):
+                browser = tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
+            task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
+            try:
+                await asyncio.sleep(.05)
+                pipe.send_text('\x1bOP')  # F1
+                await asyncio.sleep(.05)
+                self.assertIsInstance(browser.screen_stack[-1][0], tui.HelpView)
+                pipe.send_text('\x1bOP')
+                await asyncio.sleep(.05)
+                self.assertFalse(browser.screen_stack)
+                scanner = tui.ScannerView(browser, startup=False)
+                with patch.object(scanner, 'start'):
+                    browser.push(scanner)
+                pipe.send_text('\x1bOP')
+                await asyncio.sleep(.05)
+                view = browser.screen_stack[-1][0]
+                self.assertIsInstance(view, tui.HelpView)
+                self.assertEqual({entry.key for entry in view.entries},
+                                 {entry.key for entry in tui.help_entries(tui.SCANNER_HELP, tui.plain_markup)})
+                view.search_focus()
+                pipe.send_text('\x1b[21~')  # F10, even with editable search focus
+                await asyncio.wait_for(asyncio.shield(task), 2)
+                self.assertIn('Quitting', browser.clipboard_notice)
+            finally:
+                if not task.done():
+                    browser.app.exit()
+                await task
+
+    async def test_function_bar_replaced_by_scan_status(self):
+        from types import SimpleNamespace
+        from prompt_toolkit.utils import get_cwidth
+        with create_pipe_input() as pipe:
+            fs = VirtualFS({'files': {}})
+            with patch.object(fs, 'start_in_current_directory'), \
+                    patch.object(tui.DriveBrowser, 'scan_progress', return_value='SCAN STATUS'):
+                browser = tui.DriveBrowser(fs, input=pipe, output=DummyOutput())
+            task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
+            def rendered():
+                screen = browser.app.renderer.last_rendered_screen
+                return '\n'.join(''.join(cell.char for _, cell in sorted(row.items()))
+                                 for _, row in sorted(screen.data_buffer.items()))
+            try:
+                await asyncio.sleep(.05)
+                self.assertIn('F1', rendered())
+                self.assertIn('F10', rendered())
+                for key in ('F2', 'F8', 'F9', 'F11', 'F12'):
+                    self.assertNotIn(key, rendered())
+                self.assertNotIn('SCAN STATUS', rendered())
+                scanner = tui.ScannerView(browser, startup=False)
+                browser.scanners.append(scanner)
+                browser.app.invalidate()
+                await asyncio.sleep(.05)
+                self.assertIn('SCAN STATUS', rendered())
+                self.assertNotIn('F10', rendered())
+                browser.scanners.clear()
+                browser.app.invalidate()
+                await asyncio.sleep(.05)
+                self.assertIn('F10', rendered())
+                for width in (1, 24, 80, 120):
+                    with patch.object(browser.app.output, 'get_size', return_value=SimpleNamespace(columns=width)):
+                        text = ''.join(value for _, value in browser.function_keys())
+                        self.assertEqual(get_cwidth(text), width)
+                with patch.object(browser.app.output, 'get_size', return_value=SimpleNamespace(columns=160)):
+                    text = ''.join(value for _, value in browser.function_keys())
+                    for label in ('Help', 'Scan', 'Status', 'Refresh', 'Stats', 'Paths', 'Quit'):
+                        self.assertIn(label, text)
+                    key_fragments = [(style, value) for style, value in browser.function_keys()
+                                     if value.startswith('F')]
+                    self.assertEqual([value for _, value in key_fragments],
+                                     ['F1', 'F3', 'F4', 'F5', 'F6', 'F7', 'F10'])
+                    self.assertTrue(all('fg:#ffffff' in style and 'bg:#000000' in style
+                                        for style, _ in key_fragments))
+            finally:
+                browser.scanners.clear()
+                browser.app.exit()
+                await task
+
     async def test_unknown_key_notice_and_text_input(self):
         with create_pipe_input() as pipe:
             fs = VirtualFS({'files': {}})
@@ -29,9 +110,9 @@ class QuitTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.08)
                 self.assertEqual(browser.clipboard_notice, 'Unknown key z')
                 self.assertTrue(browser.clipboard_notice_error)
-                pipe.send_text('\x1bOP')
+                pipe.send_text('\x1bOQ')
                 await asyncio.sleep(.08)
-                self.assertEqual(browser.clipboard_notice, 'Unknown key f1')
+                self.assertEqual(browser.clipboard_notice, 'Unknown key f2')
                 epoch = browser.clipboard_notice_epoch
                 pipe.send_text('n')
                 await asyncio.sleep(.08)

@@ -16,7 +16,7 @@ spec.loader.exec_module(tui)
 
 
 class DriveMappingsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_o_opens_loaded_mappings_and_closes(self):
+    async def test_f7_opens_loaded_mappings_and_closes(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe, \
                 patch.dict(tui.aliases, {'disk': directory, 'offline': '0'}, clear=True), \
                 patch.dict(tui.prefixes, {'/source': {'alias': 'disk', 'local': directory}}, clear=True), \
@@ -28,7 +28,7 @@ class DriveMappingsTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
             try:
                 await asyncio.sleep(.04)
-                pipe.send_text('o')
+                pipe.send_text('\x1b[18~')
                 await asyncio.sleep(.04)
                 view = browser.screen_stack[-1][0]
                 self.assertIsInstance(view, tui.DriveMappingsView)
@@ -38,7 +38,7 @@ class DriveMappingsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('Disabled source prefix: /disabled', text)
                 self.assertIn(browser.startup_path, text)
                 self.assertEqual((dict(tui.aliases), dict(tui.prefixes), dict(tui.disabled_prefixes)), before)
-                pipe.send_text('o')
+                pipe.send_text('\x1b[18~')
                 await asyncio.sleep(.04)
                 self.assertFalse(browser.screen_stack)
             finally:
