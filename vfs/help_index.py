@@ -72,7 +72,7 @@ def help_entries(lines, strip):
         # explanation available in the description panel.
         scanner = any(strip(line) == 'Scanning' for line in lines)
         short_names = {'b': 'Bookmark on/off', 'j': 'Open bookmarks', 'u': 'Expand/collapse',
-                       'o': 'One/all levels', 'Ctrl+D': 'Trash DB entry', 'd': 'Database trash',
+                       'O': 'One/all levels', 'Ctrl+D': 'Trash DB entry', 'd': 'Database trash',
                        'Ctrl+P': 'Pause/resume scan', 'Ctrl+K': 'Stop scanning',
                        'Ctrl+E': 'Convert video', 'Q': 'Conversion queue',
                        'Space': 'Mark folder', 'Insert': 'Mark and move', '*': 'Invert marks',
@@ -123,7 +123,7 @@ def help_entries(lines, strip):
         groups = {}
         for entry in entries:
             if not scanner:
-                entry.section = ('Scan view' if entry.key in ('s', 'Ctrl+P', 'Ctrl+K', 'Ctrl+S', 'Shift+R') else
+                entry.section = ('Scan view' if entry.key in ('s', 'Ctrl+P', 'Ctrl+K', 'F6', 'Shift+R') else
                                  'Cache' if entry.key in ('k', 'K', 'G') else
                                  'Media' if entry.key in ('p', 'g', 'y', 'i', '+', '🔊/🔇') else
                                  'Conversion' if entry.key in ('Ctrl+E', 'Q') else

@@ -303,7 +303,7 @@ class GridTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await asyncio.sleep(.05)
                 browser.app.layout.focus(browser.info)
-                pipe.send_text('ou')
+                pipe.send_text('Ou')
                 for _ in range(100):
                     if any(row['name'] == 'one/two/file.txt' for row in browser.rows):
                         break

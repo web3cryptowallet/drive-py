@@ -253,4 +253,5 @@ TLjkoQfnu7aRRbVRkEYN1vZPzW7ntuM4tn
 - [livecomment](https://github.com/d08ble/livecomment) project
 - [bitchatX21](https://github.com/goldenwebb/bitchatX21) a better version of Bitchat for iOS
 
+*AI Assisted*
 *AI-Independet code. Created through human work*

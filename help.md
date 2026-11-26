@@ -435,7 +435,7 @@ default); ON repeats Lite → Medium → Heavy, and OFF stops after the current
 cycle. Enabling Loop while idle starts Lite. Loop is session-only.
 Lite still enumerates directories to find additions.
 
-**Ctrl+S** opens the live statistics table from Files or Scanner. It shows files,
+**F6** opens the live statistics table from Files or Scanner. It shows files,
 decimal MB and processing time for modes 1/2/3 across current scan, current session,
 last non-empty session and lifetime totals. **v** inside the table switches
 current/total ordering and scanner summary display; **Esc** closes it. In Files
@@ -487,7 +487,7 @@ Play and retains the setting for this session in Files, bookmarks and conversion
 preview. Conversion output audio is unaffected. Buttons now display plain labels
 without `<` / `>` decorations.
 
-The **o** one/all-level expansion preference is saved in the database and restored
+The **O** (Shift+o) one/all-level expansion preference is saved in the database and restored
 on launch (SQLite/Redis). Expanded folders themselves remain session-only.
 
 In **g graphics mode**, files **not found on disk** have red filenames, including
@@ -559,7 +559,7 @@ The main scan status line shows the mode's rotating indicator (purple for Medium
 gold for Lite/Heavy), scope file count/size/time, paths/s, MB/s and the current/last
 scanned path. Shortcut hints are hidden; long paths keep their beginning and end
 as `start...end` within the terminal width. Phase text is omitted. Paused/idle scans keep statistics without
-rotation. Open s, F4 or Ctrl+S for more detail.
+rotation. Open s, F4 or F6 for more detail.
 
 ### More
 
@@ -767,3 +767,32 @@ Files reset/removal behavior. **f** toggles Quick View filtered/all duplicates
 from either Files or Info focus. Help omits ordinary arrow/PageUp/PageDown/
 Home/End shortcut entries while retaining their working navigation bindings.
 Shift filename-scrolling shortcuts remain listed.
+
+## Loaded drive mappings
+
+Press **o** in Files to view loaded config.sh MAP DRIVES aliases, source prefixes,
+local paths and disabled roots. The view is read-only and scrollable; **Esc/o**
+closes it. ~: shows the startup directory. Edit config.sh and restart to apply
+changes. No disk availability checks or configuration reload occur on open.
+
+**o** opens drive mappings; **O** (Shift+o) toggles one/all expansion levels.
+
+F6 opens all three modes' statistics from Files or the scanner, using the hidden
+scanner scope when present. Sizes scale through GB/TB/PB. The status row shows
+active-mode bytes / largest mode bytes and elapsed / estimated total processing
+time (— until bytes are observed). Slow path rates use paths/min or paths/h.
+Estimates use observed progress and exclude pauses; they are not disk inventories.
+
+Info shows **Disk free: free/total** on the next line after Size for connected preview targets,
+for example **12.0 GB / 512.0 GB**. Capacity refreshes when Info opens; unavailable
+targets or failed disk probes omit it.
+
+Info metadata uses separate lines for **Size**, **Disk free** (when available),
+**Dirs**, and **Files**. Counts follow the visible Files list and update in place.
+
+Press **o** in Files to inspect loaded drive mappings; **Esc/o** closes.
+See [drive mapping controls](FEATURE-drive-mappings.md).
+
+F6 opens scan statistics. See [help.md](help.md) for adaptive size/rate units
+and mode progress/time estimates.
+

@@ -413,6 +413,29 @@ def shutdown_step(label, callback):
         done.set()
         reporter.join()
 
+def scan_size(size):
+    value = max(0., float(size))
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB', 'PB'):
+        if value < 1000 or unit == 'PB':
+            return f'{value:.1f} {unit}'
+        value /= 1000
+
+
+def scan_path_rate(rate):
+    for multiplier, unit in ((1, 's'), (60, 'min'), (3600, 'h')):
+        value = max(0., rate) * multiplier
+        if value >= 1 or unit == 'h' or rate == 0:
+            return f'{value:.1f} paths/{unit}'
+
+
+def scan_mode_progress(rows, mode):
+    rows = rows or [[0, 0, 0.]]
+    files, size, seconds = rows[min(max((mode or 1) - 1, 0), len(rows) - 1)]
+    maximum = max(row[1] for row in rows)
+    estimate = format_elapsed(seconds * maximum / size) if size > 0 else '—'
+    return f'{files:,} files · {scan_size(size)}/{scan_size(maximum)} · {format_elapsed(seconds)}/{estimate}'
+
+
 def format_elapsed(seconds):
     seconds = max(0, int(seconds))
     hours, seconds = divmod(seconds, 3600)
@@ -916,7 +939,7 @@ class InfoLexer(Lexer):
                 return image_lines[index]
             if index in colors and text.startswith('●'):
                 return [('class:' + colors[index], text[:1]), ('class:literal', text[1:])]
-            generated = text.startswith(('Size:', 'Dirs:', 'Created:', 'Modified:',
+            generated = text.startswith(('Size:', 'Disk free:', 'Dirs:', 'Files:', 'Created:', 'Modified:',
                                          'Image:', 'Other Duplicates', 'Current disk size:'))
             return [('' if generated else 'class:literal', text)]
         # FORMAT ONE VISIBLE DISPLAY ROW ]
@@ -1235,7 +1258,7 @@ class DriveBrowser:
         bindings.add('c-c')(lambda event: self.request_quit())
         bindings.add('c-p', eager=True)(lambda event: self.pause_scanner())
         bindings.add('c-k', eager=True)(lambda event: self.stop_scanner())
-        bindings.add('c-s', eager=True)(lambda event: self.show_scan_statistics())
+        bindings.add('f6', eager=True)(lambda event: self.show_scan_statistics())
         bindings.add('f4', eager=True)(lambda event: self.show_status())
         bindings.add('p', filter=Condition(lambda: (not self.screen_stack or
             isinstance(self.screen_stack[-1][0], BookmarksView)) and bool(self.video_path) and
@@ -1245,6 +1268,7 @@ class DriveBrowser:
         bind(['/'], lambda event: self.push(PathCommandView(self)), eager=True)
         bind(['l'], lambda event: self.push(HistoryView(self)))
         bind(['a'], lambda event: self.push(ActionsView(self)))
+        bind(['o'], lambda event: self.push(DriveMappingsView(self)))
         bind(['s'], lambda event: self.toggle_scanner())
         bind(['c-e'], lambda event: self.edit_conversion())
         bind(['Q'], lambda event: self.push(ConversionQueueView(self)))
@@ -1286,7 +1310,7 @@ class DriveBrowser:
         bind(['c-d'], lambda event: self.trash_selected())
         bind(['d'], lambda event: self.push(DBTrashView(self)))
         bind(['u'], lambda event: self.expand_subdirs(), eager=True)
-        bind(['o'], lambda event: self.toggle_expansion_depth(), eager=True)
+        bind(['O'], lambda event: self.toggle_expansion_depth(), eager=True)
         bind(['enter'], lambda event: self.open_duplicate(), filter=has_focus(self.info), eager=True)
         bind(['f'], lambda event: self.toggle_duplicate_filter(from_files=files_focused()),
              filter=has_focus(self.info) | files_focused, eager=True)
@@ -3282,14 +3306,14 @@ class DriveBrowser:
         for area in (self.info, self.video_metadata):
             lines = area.text.split('\n')
             for index, line in enumerate(lines):
-                if line.startswith('Dirs: '):
-                    text = self.listing_stats()
+                if line.startswith(('Dirs: ', 'Files: ')):
+                    counts = self.listing_stats().split(' · ')
+                    text = counts[0] if line.startswith('Dirs: ') else counts[1]
                     if line != text:
                         cursor = area.buffer.cursor_position
                         lines[index] = text
                         area.text = '\n'.join(lines)
                         area.buffer.cursor_position = min(cursor, len(area.text))
-                    break
     # UPDATE LISTING STATS ]
     # SHOW INFO FOR DRIVE BROWSER [
     def show_info(self, directory=False, preview_node=None):
@@ -3371,9 +3395,18 @@ class DriveBrowser:
         self.preview_status_color = (
             'green' if info.get('exists') else 'red') if directory or preview_node is not None else row['indicator']
         size = format_size(node.size, 0).strip()
-        lines = [self.display_path(node.id or '/'), 'Size:   ' + size, self.listing_stats(),
+        disk_space = ''
+        if info.get('exists'):
+            try:
+                usage = shutil.disk_usage(get_real_path(node.id))
+                disk_space = f'Disk free: {scan_size(usage.free)} / {scan_size(usage.total)}'
+            except OSError:
+                pass
+        lines = [self.display_path(node.id or '/'), 'Size:   ' + size, *self.listing_stats().split(' · '),
                  'Created:  ' + timestamp('created'),
                  'Modified: ' + timestamp('modified')]
+        if disk_space:
+            lines.insert(2, disk_space)
         if not node.is_dir:
             if os.path.splitext(node.name)[1].lower() in VIDEO_SUFFIXES | AUDIO_SUFFIXES:
                 self.video_file_id = node.id
@@ -3821,7 +3854,10 @@ class DriveBrowser:
                         if isinstance(screen, ScannerView)), None)
         if scanner is not None and scanner.closing:
             scanner = None
+        if scanner is None:
+            scanner = next((item for item in reversed(self.scanners) if not item.closing), None)
         if scanner is not None:
+            scanner.update_statistics()
             path = scanner.storage_path
         else:
             path = self.vfs.pwd().rstrip('/') or '/'
@@ -3853,9 +3889,9 @@ class DriveBrowser:
             result.append(('fg:' + color, scan_activity_frame(scanner, time.monotonic()) + ' · '))
         scope = self.scan_statistics_scope
         rows = self.scan_statistics.record(scanner.storage_path)[scope]
-        files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
-        result.append(('', f'{scope}: {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
-                           f'{scanner.stats.paths_per_second:.0f} paths/s · {scanner.stats.mb_per_second:.1f} MB/s'))
+        progress = scan_mode_progress(rows, scan_activity_mode(scanner))
+        result.append(('', f'{scope}: {progress} · {scan_path_rate(scanner.stats.paths_per_second)} · '
+                           f'{scan_size(scanner.stats.mb_per_second * 1_000_000)}/s'))
         width = self.app.output.get_size().columns if hasattr(self, 'app') else 80
         available = width - sum(get_cwidth(text) for _, text in result) - 3
         path = safe_text(getattr(scanner.stats, 'path', '') or '')
@@ -4059,6 +4095,7 @@ def main_help(display_mode):
         '[red]D[/red] Deleted',
         '', '[bold]Shortcuts[/bold]',
         '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths (all screens)',
+        '[#ff8800]o[/#ff8800]: View loaded config drive mappings (aliases, source prefixes, local paths, disabled roots)',
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
         '[#ff8800]f[/#ff8800] (Files or Quick View focus): Toggle real-path filtered/all duplicates; shown/total excludes selected path, all mode retains its aliases',
@@ -4075,7 +4112,7 @@ def main_help(display_mode):
         '[#ff8800]v[/#ff8800]: Cycle all / media (images, videos, audio) / image / videos',
         '[#ff8800].[/#ff8800]: Toggle dotfiles and hidden directories (shown by default)',
         '[#ff8800]g[/#ff8800]: Toggle thumbnail grid; G page-priority generation order; k/K clear directory/all thumbnail caches; +/- display height (minimum 1 line), cache 128/256 pixels',
-        '[#ff8800]u / o[/#ff8800]: Table/graphics: show/hide selected subtree (..: all current subdirs) / toggle one or all levels',
+        '[#ff8800]u / O[/#ff8800]: Table/graphics: show/hide selected subtree (..: all current subdirs) / toggle one or all levels',
         '[#ff8800]y[/#ff8800]: Toggle automatic quick view on file selection (default off)',
         '[#ff8800]i[/#ff8800]: Toggle image previews, including the logo (default on)',
         '[#ff8800]Esc / Backspace[/#ff8800] (main view): Go to parent directory',
@@ -4091,7 +4128,7 @@ def main_help(display_mode):
         '[#ff8800]Space / Insert / * / -[/#ff8800]: Toggle file/folder / toggle and down / invert items / clear marks',
         '[#ff8800]s[/#ff8800]: Open/hide scan view; finished scans restart at current directory/marked items',
         '[#ff8800]Ctrl+P / Ctrl+K[/#ff8800]: Pause/resume background scan / stop and save scan',
-        '[#ff8800]Ctrl+S[/#ff8800]: Scan statistics table; v switches current/total display',
+        '[#ff8800]F6[/#ff8800]: Scan statistics table; v switches current/total display',
         '[#ff8800]Ctrl+E / Q[/#ff8800]: Video conversion editor / persistent conversion queue',
         'Convert / Queue +/- / Queue buttons: edit, toggle selected video/folder, manage queue',
         '[#ff8800]Shift+R[/#ff8800]: Clear saved map and resume positions for the current directory',
@@ -4154,7 +4191,7 @@ SCANNER_HELP = [
     'Finite expert uses a pending-file pass; the continuous blue selector is not used for sequenced runs',
     'Default: finite expert pass, new then unknown, then stop; no verified-file checksum rereads',
     'Manual mode starts include old files; Heavy finishes and stops unless L Loop is ON',
-    'Ctrl+S: live per-path statistics table; v switches current/total display',
+    '[#ff8800]F6[/#ff8800]: live per-path statistics table; v switches current/total display',
     '', '[bold]Symbols[/bold]',
     '[white]D[/white] Directory',
     '[green]·[/green] Empty directory (confirmed by discovery)',
@@ -4768,17 +4805,17 @@ class ScanStatisticsView(PTScreen):
         if separator:
             label += ' · folders: ' + ', '.join(safe_text(self.browser.display_path(path))
                                                for path in json.loads(selection))
-        lines = [label, f'View: {primary} · decimal MB · processing time (pauses excluded)',
-                 '', f'{"Scope / mode":<24} {"Files":>12} {"MB":>14} {"Time":>12}']
+        lines = [label, f'View: {primary} · adaptive size units · processing time (pauses excluded)',
+                 '', f'{"Scope / mode":<24} {"Files":>12} {"Size":>14} {"Time":>12}']
         labels = {'current': 'Current scan', 'session': 'Current session',
                   'last': 'Last session', 'total': 'Total scans'}
         for scope in scopes:
             rows = record[scope]
             for mode, (files, size, seconds) in enumerate(rows, 1):
                 label = f'{labels[scope]} / {mode}'
-                lines.append(f'{label:<24} {files:>12,d} {size / 1_000_000:>14,.3f} {format_elapsed(seconds):>12}')
+                lines.append(f'{label:<24} {files:>12,d} {scan_size(size):>14} {format_elapsed(seconds):>12}')
             files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
-            lines.append(f'{"All modes":<24} {files:>12,d} {size / 1_000_000:>14,.3f} {format_elapsed(seconds):>12}')
+            lines.append(f'{"All modes":<24} {files:>12,d} {scan_size(size):>14} {format_elapsed(seconds):>12}')
             lines.append('')
         text = '\n'.join(lines)
         if text != self.table.text:
@@ -4978,6 +5015,39 @@ class RemoveDBConfirmView(PTScreen):
             return
         self.close()
         self.browser.trash_paths(self.paths)
+
+
+class DriveMappingsView(PTScreen):
+    """Inspect effective loaded drive mappings without reloading configuration."""
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.lines = [[('class:header', 'Alias · source prefix → local path · state')]]
+        represented = set()
+        for source, mapping in sorted(prefixes.items()):
+            alias, local = mapping['alias'], mapping['local']
+            represented.add(alias)
+            self.lines.append([('class:literal', f'{alias} · {source} → {local} · enabled')])
+        for alias, local in sorted(aliases.items()):
+            if alias not in represented:
+                self.lines.append([('class:red' if local == '0' else 'class:literal',
+                    f'{alias} · — → {local} · {"disabled" if local == "0" else "enabled"}')])
+        for source in sorted(disabled_prefixes):
+            self.lines.append([('class:red class:literal', f'Disabled source prefix: {source}')])
+        if len(self.lines) == 1:
+            self.lines.append([('', 'No drive mappings loaded from config.sh.')])
+        self.lines += [[('', '')], [('class:literal', f'~: startup directory → {browser.startup_path}')],
+                       [('', 'Read-only loaded configuration. Edit config.sh and restart to change mappings.')]]
+        self.table = RowsControl(lambda: self.lines, cache=True)
+        self.horizontal = HorizontalBar(self.table)
+        self.focus = self.table
+        table_bindings(self, self.table)
+        horizontal_keys(self, self.horizontal)
+        self.bind(['escape', 'o'], self.close, eager=True)
+        self.container = Frame(HSplit([
+            Window(self.table, right_margins=[ScrollbarMargin()], wrap_lines=False),
+            Window(self.horizontal, height=1),
+            Window(FormattedTextControl('o / Esc: close · read-only drive mappings'), height=1),
+        ]), title='Config · MAP DRIVES', key_bindings=self.keys)
 
 
 class TrashHelpView(PTScreen):
@@ -7426,8 +7496,8 @@ class ScannerView(PTScreen):
         scope = self.browser.scan_statistics_scope
         rows = self.browser.scan_statistics.record(self.storage_path)[scope]
         files, size, seconds = (sum(row[column] for row in rows) for column in range(3))
-        return (f'{self.stats.paths_per_second:.1f} paths/s · {rate:.2f} {unit} · '
-                f'{scope.title()} {files:,} files / {size / 1_000_000:.3f} MB / {format_elapsed(seconds)} · '
+        return (f'{scan_path_rate(self.stats.paths_per_second)} · {rate:.2f} {unit} · '
+                f'{scope.title()} {files:,} files / {scan_size(size)} / {format_elapsed(seconds)} · '
                 f'bucket {first}/{len(self.model.buckets)}\n'
                 f'{"Scanning" if self.stats.active else "Last path"}: {safe_text(self.stats.path)}')
     # STATS TEXT FOR SCANNER VIEW ]

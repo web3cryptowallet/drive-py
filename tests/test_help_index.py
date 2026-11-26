@@ -498,7 +498,7 @@ class HelpBindingCoverageTests(unittest.TestCase):
             scanner = tui.ScannerView(browser, startup=False)
             scan_keys = documented(tui.SCANNER_HELP)
             self.assertEqual(bound_keys(scanner.keys) - scan_keys, set())
-            shared = {'b', 'j', 'q', 'c-c', 'c-p', 'c-k', 'c-s',
+            shared = {'b', 'j', 'q', 'c-c', 'c-p', 'c-k', 'f6',
                       's-left', 's-right', 's-home', 's-end', 's-pageup', 's-pagedown'}
             self.assertEqual(shared - scan_keys, set())
             for lines in (tui.main_help(0), tui.SCANNER_HELP):

@@ -203,6 +203,17 @@ class StatisticsStorageTests(unittest.TestCase):
 
 
 class StatisticsViewTests(unittest.IsolatedAsyncioTestCase):
+    def test_adaptive_progress_units_rates_and_estimate(self):
+        self.assertEqual(tui.scan_size(10_000_000_000), '10.0 GB')
+        self.assertEqual(tui.scan_size(2_000_000_000_000_000), '2.0 PB')
+        self.assertEqual(tui.scan_path_rate(.5), '30.0 paths/min')
+        self.assertEqual(tui.scan_path_rate(.001), '3.6 paths/h')
+        progress = tui.scan_mode_progress([[100, 100_000_000_000, 600],
+                                           [10, 10_000_000_000, 60], [0, 0, 0]], 2)
+        self.assertIn('10.0 GB/100.0 GB', progress)
+        self.assertIn('1:00/10:00', progress)
+        self.assertIn('/—', tui.scan_mode_progress([[0, 0, 0]], 1))
+
     async def test_keyboard_table_in_files_and_scan_switch_and_live_counts(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             (Path(directory) / 'file').write_bytes(b'content')
@@ -211,7 +222,7 @@ class StatisticsViewTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
             try:
                 await asyncio.sleep(.05)
-                pipe.send_text('\x13')
+                pipe.send_text('\x1b[17~')
                 await asyncio.sleep(.05)
                 view = browser.screen_stack[-1][0]
                 self.assertIsInstance(view, tui.ScanStatisticsView)
@@ -227,13 +238,22 @@ class StatisticsViewTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(.02)
                 await asyncio.sleep(.15)
-                pipe.send_text('\x13')
+                pipe.send_text('\x1b[17~')
                 await asyncio.sleep(.05)
                 self.assertIsInstance(browser.screen_stack[-1][0], tui.ScanStatisticsView)
                 rows = browser.scan_statistics.record(scanner.storage_path)['current']
                 self.assertEqual([row[0] for row in rows], [1, 1, 1])
                 self.assertEqual([row[1] for row in rows], [7, 7, 7])
                 browser.screen_stack[-1][0].close()
+                scanner.close()  # Keep the scanner alive but open F6 from Files.
+                self.assertFalse(browser.screen_stack)
+                pipe.send_text('\x1b[17~')
+                await asyncio.sleep(.05)
+                hidden_view = browser.screen_stack[-1][0]
+                self.assertEqual(hidden_view.path, scanner.storage_path)
+                self.assertIn('7.0 B', hidden_view.table.text)
+                hidden_view.close()
+                browser.push(scanner)
                 browser.app.layout.focus(scanner.grid)
                 pipe.send_text('L')
                 await asyncio.sleep(.04)
