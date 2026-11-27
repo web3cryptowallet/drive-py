@@ -1,5 +1,6 @@
 """Global disk navigation reuses tracked nodes instead of creating orange copies."""
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,6 +15,36 @@ spec.loader.exec_module(tui)
 
 
 class GlobalPathIdentityTests(unittest.TestCase):
+    def test_home_fallback_never_recurses_into_full_path_lookup(self):
+        for backend in ('memory', 'sqlite'):
+            for alias in (None, 'root', '~0:/'):
+                with self.subTest(backend=backend, alias=alias), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    home = root / 'home' / 'lucky'
+                    home.mkdir(parents=True)
+                    (home / 'src').mkdir()
+                    with patch.dict(os.environ, {'HOME': str(home)}), patch.dict(aliases, {} if alias is None else {alias: str(home)}, clear=True):
+                        fs = VirtualFS({'files': {}}, backend,
+                            **({'db_path': str(root / 'db.sqlite')} if backend == 'sqlite' else {}))
+                        try:
+                            # Child fallback must never re-enter get_from_path.
+                            parent = fs.get_from_path('/:' + str(home.parent))
+                            with patch.object(fs, 'get_from_path', side_effect=AssertionError('recursive path lookup')):
+                                node = fs._child(parent, 'lucky')
+                            self.assertIsNotNone(node)
+                            self.assertEqual(get_real_path(node.id), str(home))
+                            for path in (str(home), '/:' + str(home), '/~0:'):
+                                fs.cwd = fs.get_from_path(path)
+                                self.assertIsNotNone(fs.cwd)
+                                self.assertEqual(get_real_path(fs.pwd()), str(home))
+                                self.assertIn('src', [entry.name for entry in fs.list_nodes()])
+                            fs.cwd = fs.get_from_path('/:' + str(home))
+                            fs.enter('..')
+                            self.assertEqual(get_real_path(fs.pwd()), str(home.parent))
+                        finally:
+                            if backend == 'sqlite':
+                                fs.db.conn.close()
+
     def test_root_browser_reuses_catalog_metadata_and_green_status(self):
         for backend in ('memory', 'sqlite'):
             for spelling in ('absolute', 'global', 'alias'):

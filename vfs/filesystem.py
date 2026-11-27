@@ -112,7 +112,7 @@ class VirtualFS:
         roots = [(key, os.path.normpath(os.path.expanduser(value)))
                  for key, value in aliases.items() if value != '0']
         key = next((key for key, root in roots if root == home), '~0:')
-        return '/' + key + local[len(home):]
+        return os.path.normpath('/' + key + local[len(home):])
 
     @staticmethod
     def _with_navigation_path(node, path):
@@ -136,7 +136,7 @@ class VirtualFS:
         local = os.path.normpath(get_real_path(path))
         if local == '/':
             return None
-        candidates = [local, '/:' + local]
+        candidates = [local, '/:' + local, self._home_identity(path)]
         for alias, root in sorted(aliases.items(), key=lambda item: len(item[1]), reverse=True):
             if root == '0':
                 continue
@@ -170,9 +170,13 @@ class VirtualFS:
             return catalog
         canonical = self._home_identity(path)
         if canonical != path:
-            node = self.get_from_path(canonical)
+            # Catalog candidates were already checked without filesystem fallback.
+            # Never restart tree traversal here: an intermediate alias component
+            # can canonicalize back to the very path being traversed.
+            if os.path.normpath(get_real_path(canonical)) != os.path.normpath(get_real_path(path)):
+                canonical = path
+            node = self._local_node(canonical, canonical.rpartition('/')[0])
             if node is not None:
-                # Keep the disk entry's visible name while sharing catalog identity.
                 from copy import copy
                 node = copy(node)
                 node.name = name
