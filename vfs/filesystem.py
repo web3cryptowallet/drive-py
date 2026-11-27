@@ -129,6 +129,35 @@ class VirtualFS:
             node = self._with_navigation_path(node, route.rstrip('/') + '/' + name)
         return node
 
+    def _catalog_for_local_path(self, path):
+        """Reuse a catalog node by lexical disk path, without resolving symlinks."""
+        if path.startswith(('/~:', '/@:')):
+            return None
+        local = os.path.normpath(get_real_path(path))
+        if local == '/':
+            return None
+        candidates = [local, '/:' + local]
+        for alias, root in sorted(aliases.items(), key=lambda item: len(item[1]), reverse=True):
+            if root == '0':
+                continue
+            root = os.path.abspath(os.path.expanduser(root)).rstrip('/') or '/'
+            if local == root or local.startswith(root.rstrip('/') + '/'):
+                candidates.append('/' + alias + '/' + local[len(root):].lstrip('/'))
+        for candidate in candidates:
+            _, parts = normalize_path(candidate)
+            node = self.db.get_root()
+            for part in parts:
+                node = self.db.get_child(node, part)
+                if node is None:
+                    break
+            if node is not None and os.path.normpath(get_real_path(node.id)) == local:
+                from copy import copy
+                node = copy(node)
+                node.name = path.rsplit('/', 1)[-1]
+                node.info = dict(node.info)
+                return node
+        return None
+
     def _lookup_child(self, parent, name):
         if parent.id == '' and name in ('/', ':') and os.name == 'posix':
             return VFSNode('/:', '/', True, parent_id='', info={'path': ':/', 'status': 'new', '_navigation_path': '/:'})
@@ -136,6 +165,9 @@ class VirtualFS:
         if node is not None:
             return node
         path = parent.id + '/' + name
+        catalog = self._catalog_for_local_path(path)
+        if catalog is not None:
+            return catalog
         canonical = self._home_identity(path)
         if canonical != path:
             node = self.get_from_path(canonical)

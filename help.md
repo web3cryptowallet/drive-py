@@ -859,3 +859,7 @@ the current selection. Ctrl+S/Down/Up still cycle matches.
 Restart preserves saved symlink routes such as `~0:/src` instead of switching
 to their physical target. If an older run already saved /mnt/src, navigate to
 `~0:/src` once to save the intended route again.
+
+Browsing a tracked location through the OS-root `/` entry reuses its catalog
+metadata: tracked files retain green circles through global and mapped routes;
+files absent from the catalog remain orange.
