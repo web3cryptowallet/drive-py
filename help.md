@@ -807,3 +807,55 @@ present, it replaces the function-key hints; removing scan sessions restores the
 
 **F3** works like **s**: open/resume Scan from Files, hide the map while scanning
 continues, or restart a finished scan for the current directory/marked paths.
+
+Home paths: `~/media` uses `~0:/media` (current user's home).
+F7 lists home `~0:/`, startup `~:`, global `:/`, and configured mappings.
+
+On Linux/macOS, the top-level drive list starts with `/`: Enter browses
+the real OS filesystem root; `..` returns to the drive list.
+
+Home reached via its configured alias, `~0:/`, or the OS root browser
+shares one catalog identity. F7 colors existing paths green, missing paths
+red, and highlights `~0:/` in bold cyan.
+
+Startup paths now display as `@:` (legacy `~:` input remains accepted).
+F7 highlights all aliases/prefixes uniformly; `~0:/` stays one color.
+Going up from home (~0:/ or its configured alias) returns to the top-level / drive list. Lookup-only cached
+OS directories are excluded from the top-level drive list.
+
+`@:` applies only to relative paths: `test0/t0` → `@:test0/t0`.
+Home, absolute and mapped paths keep their own prefixes even inside cwd.
+
+Parent navigation follows the entry route: OS `/home/vboxuser` goes up
+to `/home`; home alias `~0:/` or configured `root` goes up to the drive
+list. OS paths retain this behavior with or without a home mapping.
+
+Files: Ctrl+S starts incremental filename prefix search. Type to select;
+Ctrl+S/Down finds next, Up previous; Enter refreshes and opens the best match; Esc finishes. Matching ignores case
+and searches visible file/directory names without filtering the listing.
+
+Quick View reserves room for three duplicate rows below media on normal-sized
+terminals. Duplicate paths use single lines; focus/click Info and use arrows,
+PageUp/PageDown, End or its scrollbar to reach further entries.
+
+## AI documentation rule
+
+Never add new feature details after
+`*AI-Independet code. Created through human work*` in README.md. Keep that
+attribution as the final nonempty line. Add feature details to the appropriate
+existing README section above it, or to help.md and the relevant FEATURE-*.md.
+Verify the boundary after every README edit.
+
+Filename search (Ctrl+S) replaces the Files panel's bottom horizontal scrollbar
+with one line. Enter refreshes the listing and selects the first best filename
+match (exact, prefix, then substring), then opens it. No match keeps search
+active. Esc restores the
+scrollbar. Quick View remains visible; no-match feedback stays inline.
+
+Interactive filename search always selects the first prefix match on each
+edit: m → media, mn → mnt, Backspace to m → media. Clearing the query keeps
+the current selection. Ctrl+S/Down/Up still cycle matches.
+
+Restart preserves saved symlink routes such as `~0:/src` instead of switching
+to their physical target. If an older run already saved /mnt/src, navigate to
+`~0:/src` once to save the intended route again.

@@ -28,7 +28,12 @@ class PathPrefixTests(unittest.IsolatedAsyncioTestCase):
             browser.startup_path = '/home/start'
             self.assertFalse(browser.show_path_prefixes)
             browser.toggle_path_prefixes()
-            self.assertEqual(browser.display_path('/home/start/a'), '~:a')
+            self.assertEqual(browser.display_path('/home/start/a'), ':/home/start/a')
+            self.assertEqual(browser.display_path('test0/t0'), '@:test0/t0')
+            self.assertEqual(browser.display_path('/~:/test0/t0'), '@:test0/t0')
+            self.assertEqual(browser.display_path('@:test0/t0'), '@:test0/t0')
+            self.assertEqual(browser.display_path('/'), ':/')
+            self.assertEqual(browser.display_path('~/media'), '~0:/media')
             self.assertEqual(browser.display_path('/home/starting/a'), ':/home/starting/a')
             self.assertEqual(browser.display_path('/m1/f.txt'), 'm1:/f.txt')
             self.assertEqual(browser.parse_display_path('m1:/f.txt'), '/m1/f.txt')
@@ -71,7 +76,7 @@ class PathPrefixTests(unittest.IsolatedAsyncioTestCase):
                 scanner.stats = ScanStats(path='/m1/f.txt')
                 browser.startup_path = '/media/drive'
                 scanner.scope_path = '/m1'
-                self.assertIn('~:f.txt', ''.join(text for _, text in scanner.detail_rows()[0]))
+                self.assertIn('m1:/f.txt', ''.join(text for _, text in scanner.detail_rows()[0]))
                 browser.startup_path = '/home/start'
                 scanner.scope_path = None
                 with patch.object(scanner, 'start'):

@@ -155,7 +155,7 @@ class ImagePreviewTests(unittest.TestCase):
                     patch.object(tui, 'ascii_image_preview', wraps=tui.ascii_image_preview) as decode:
                 browser.show_info()
                 browser.move(1)
-            self.assertEqual(decode.call_args.args[2], browser.app.output.get_size().rows - 20)
+            self.assertEqual(decode.call_args.args[2], browser.app.output.get_size().rows - 22)
             self.assertGreater(decode.call_args.args[2], 3)
             self.assertIn('portrait.png', browser.info.text)
     # VERIFY AUTO LANDSCAPE TO PORTRAIT USES OUTER VIEWPORT ]

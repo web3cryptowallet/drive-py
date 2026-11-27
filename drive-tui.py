@@ -268,7 +268,7 @@ try:
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.key_binding.key_processor import KeyPress
     from prompt_toolkit.lexers import Lexer
-    from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
+    from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.output import ColorDepth
     from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
@@ -993,6 +993,12 @@ def terminal_color_depth():
 # USE CONFIGURED VFS IDENTITY FOR ALIASES, MOUNT PATHS AND REPORT PREFIXES [
 def normalize_bookmark_path(path):
     """Use configured VFS identity for aliases, mount paths and report prefixes."""
+    if path == '~' or path.startswith('~/'):
+        return '/~0:/' + path[2:] if path != '~' else '/~0:'
+    if path.startswith('~0:/'):
+        return '/' + path
+    if path.startswith('/~0:'):
+        return path
     path = os.path.normpath(os.path.expanduser(path))
     if not path.startswith('/'):
         return path
@@ -1009,6 +1015,9 @@ def normalize_bookmark_path(path):
         prefix = prefix.rstrip('/')
         if path == prefix or path.startswith(prefix + '/'):
             return '/' + alias.strip('/') + path[len(prefix):]
+    home = os.path.expanduser('~').rstrip('/')
+    if path == home or path.startswith(home + '/'):
+        return '/~0:' + path[len(home):]
     return path
 # USE CONFIGURED VFS IDENTITY FOR ALIASES, MOUNT PATHS AND REPORT PREFIXES ]
 # BROWSE FILES AND COORDINATE QUICK VIEW AND POPUPS [
@@ -1166,8 +1175,11 @@ class DriveBrowser:
         self.files = FilesWindow(self, self.control, right_margins=[PreviewMapMargin(self), ScrollbarMargin()],
                             wrap_lines=False, always_hide_cursor=True)
         self.filename_slider = HorizontalBar(FilenameViewport(self))
+        self.filename_search = None
+        self.filename_slider_window = Window(self.filename_slider, height=1)
         self.info_lexer = InfoLexer()
-        self.info = TextArea(read_only=True, scrollbar=True, wrap_lines=True,
+        self.info = TextArea(read_only=True, scrollbar=True,
+                             wrap_lines=Condition(lambda: not bool(self.info_paths)),
                              lexer=self.info_lexer, focus_on_click=True)
         info_mouse_handler = self.info.control.mouse_handler
         info_click = {'last': None, 'time': 0., 'down': None}
@@ -1193,7 +1205,7 @@ class DriveBrowser:
                 info_click['down'] = None
             return result
         self.info.control.mouse_handler = focus_info_row
-        self.info.window.height = lambda: Dimension(min=4 if self.video_path and
+        self.info.window.height = lambda: Dimension(min=6 if self.video_path and
             hasattr(self, 'app') and self.app.output.get_size().rows >= 18 else 1)
         self.info.window.right_margins = [ScrollbarMargin()]
         self.info.window.cursorline = has_focus(self.info)
@@ -1210,8 +1222,18 @@ class DriveBrowser:
                 self.vfs.cwd = self.vfs.db.get_root()
             else:
                 try:
-                    self.vfs.start_in_current_directory(directory if isinstance(directory, str)
-                        and os.path.isabs(directory) and os.path.isdir(directory) else None)
+                    valid = (isinstance(directory, str) and os.path.isabs(directory)
+                             and os.path.isdir(directory))
+                    # Restore the logical spelling before physical mount matching can
+                    # replace a symlink route with its target.
+                    route = saved_directory.get('vfs_path', directory)
+                    restored = None
+                    if valid and isinstance(route, str) and self.original_path(route) == os.path.normpath(directory):
+                        restored = self.vfs.get_from_path(route)
+                    if restored is not None and restored.is_dir:
+                        self.vfs.cwd = restored
+                    else:
+                        self.vfs.start_in_current_directory(directory if valid else None)
                 except (ValueError, OSError):
                     self.vfs.start_in_current_directory()
             if self.is_trashed(self.vfs.pwd()):
@@ -1251,7 +1273,7 @@ class DriveBrowser:
             bindings.add(key, eager=True, filter=Condition(self.can_pan_filename))(lambda event, action=action: self.pan_filename(action))
 
         bindings.add('x', eager=True, filter=Condition(lambda: not self.screen_stack))(lambda event: self.toggle_path_prefixes())
-        command_closed = Condition(lambda: not self.screen_stack or (not isinstance(self.screen_stack[-1][0], (PathCommandView, ConversionView)) and not self.help_search_focused()))
+        command_closed = Condition(lambda: not self.screen_stack or (not isinstance(self.screen_stack[-1][0], (PathCommandView, ConversionView, FilenameSearchView)) and not self.help_search_focused()))
         bindings.add('b', eager=True, filter=command_closed)(lambda event: self.toggle_bookmark())
         bindings.add('j', eager=True, filter=command_closed)(lambda event: self.push(BookmarksView(self)))
         bindings.add('q', eager=True, filter=command_closed)(lambda event: self.request_quit())
@@ -1268,6 +1290,7 @@ class DriveBrowser:
                                        self.app.layout.has_focus(self.screen_stack[-1][0].number)))))(lambda event: self.toggle_playback())
         bind(['~'], lambda event: self.go_path(os.path.expanduser('~')), eager=True)
         bind(['/'], lambda event: self.push(PathCommandView(self)), eager=True)
+        bind(['c-s'], lambda event: self.push(FilenameSearchView(self)), filter=files_focused, eager=True)
         bind(['l'], lambda event: self.push(HistoryView(self)))
         bind(['a'], lambda event: self.push(ActionsView(self)))
         bind(['f7'], lambda event: self.push(DriveMappingsView(self)))
@@ -1343,7 +1366,8 @@ class DriveBrowser:
                                style='class:table-header',
                                right_margins=[ScrollbarMargin()], always_hide_cursor=True),
                         self.files,
-                        Window(self.filename_slider, height=1),
+                        DynamicContainer(lambda: self.filename_search.field if self.filename_search
+                                         else self.filename_slider_window),
                     ]),
                 ]), style='class:files-pane',
                       width=lambda: Dimension.exact(get_app().output.get_size().columns // 2)),
@@ -1424,24 +1448,36 @@ class DriveBrowser:
         if self.show_path_prefixes:
             mappings = [(key, os.path.abspath(os.path.expanduser(value)))
                         for key, value in aliases.items() if value != '0']
-            mappings.insert(0, ('~', self.startup_path))
+            mappings.insert(0, ('~0', os.path.expanduser('~')))
+
             result = ':' + local
             for key, root in sorted(mappings, key=lambda item: len(item[1]), reverse=True):
                 root = root.rstrip('/') or '/'
                 if local == root or local.startswith(root.rstrip('/') + '/'):
-                    result = key + (':' if key == '~' else ':/') + local[len(root):].lstrip('/')
+                    result = key + ':/' + local[len(root):].lstrip('/')
                     break
+            # Relativity comes from the source namespace, never directory containment.
+            source = os.fspath(path)
+            if source.startswith(('/~:', '/@:', '~:', '@:')):
+                relative = source.lstrip('/')[2:].lstrip('/')
+                result = '@:' + relative
+            elif (not os.path.isabs(source) and not source.startswith('~')
+                  and ':/' not in source and source.split('/', 1)[0] not in aliases):
+                relative = os.path.normpath(source)
+                result = '@:' + ('' if relative == '.' else relative)
         self.displayed_paths[path] = result
         return result
     # FORMAT STARTUP DRIVE AND GLOBAL PATH PREFIXES ]
     # CONVERT DISPLAYED PREFIXES BACK TO STORED VFS IDENTITIES [
     def parse_display_path(self, path):
-        if path.startswith('~:'):
+        if path.startswith(('@:', '~:')):
             return '/~:/' + path[2:].lstrip('/')
         key, separator, rest = path.partition(':/')
-        if separator and (key in aliases or key in ('', '~')):
+        if separator and (key in aliases or key in ('', '~', '~0')):
             if key == '~':
                 return '/~:/' + rest
+            if key == '~0':
+                return '/~0:/' + rest
             root = aliases.get(key, '/')
             path = os.path.join(root, rest)
         return normalize_bookmark_path(path)
@@ -1519,9 +1555,9 @@ class DriveBrowser:
 
     # VIDEO FRAME HEIGHT [
     def video_frame_height(self):
-        # Keep controls, hashes, duplicate heading and its first row below frames.
+        # Keep controls, hash, duplicate heading and three duplicate rows below frames.
         rows = self.app.output.get_size().rows if hasattr(self, 'app') else 27
-        return max(1, min(self.video_dimensions[1], rows - 18))
+        return max(1, min(self.video_dimensions[1], rows - 20))
     # VIDEO FRAME HEIGHT ]
     # AUDIO SELECTED FOR DRIVE BROWSER [
     def audio_selected(self):
@@ -2746,7 +2782,9 @@ class DriveBrowser:
             result = self.refresh_rows(target, update_info=update_info, _entries=_entries, _infos=_infos)
             if changing_directory:
                 self.navigation_store.put('ui', 'last_directory',
-                    dict(directory=self.original_path(self.vfs.pwd()), catalog_root=self.vfs.pwd() == '/'))
+                    dict(directory=self.original_path(self.vfs.pwd()),
+                         vfs_path=self.vfs.cwd.info.get('_navigation_path', self.vfs.pwd()),
+                         catalog_root=self.vfs.pwd() == '/'))
             return result
         finally:
             self.end_working(notice)
@@ -3440,8 +3478,8 @@ class DriveBrowser:
                 render = self.info.window.render_info
                 self.image_preview_geometry = (size.columns, size.rows, render.window_width if render else 37)
                 width = max(1, render.window_width - 1) if render else 36
-                # Reserve bottom metadata and the first duplicate as well as chrome.
-                height = max(1, self.app.output.get_size().rows - 20) if hasattr(self, 'app') else 14
+                # Reserve bottom metadata and three duplicate rows as well as chrome.
+                height = max(1, self.app.output.get_size().rows - 22) if hasattr(self, 'app') else 12
                 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
                 lines.append('')
                 # INSTALL A NATIVE TERMINAL IMAGE PREVIEW [
@@ -3606,9 +3644,9 @@ class DriveBrowser:
         text = text.strip()
         if text.startswith('cd '):
             text = text[3:].strip()
-        if text.startswith('~') and not text.startswith('~:'):
+        if text.startswith('~') and not text.startswith(('~:', '~0:', '~/')) and text != '~':
             text = os.path.expanduser(text)
-        path = self.parse_display_path(text) if text else '/'
+        path = (text if text.startswith('/') else self.parse_display_path(text)) if text else '/'
         if not path.startswith('/'):
             path = os.path.normpath(self.vfs.pwd().rstrip('/') + '/' + path)
         node = self.vfs.get_from_path(path)
@@ -4124,6 +4162,7 @@ def main_help(display_mode):
         '[red]D[/red] Deleted',
         '', '[bold]Shortcuts[/bold]',
         '[#ff8800]x[/#ff8800]: Toggle prefixed / original filesystem paths (all screens)',
+        '[#ff8800]Ctrl+S[/#ff8800] (Files): Quick filename prefix search; type to select, Ctrl+S/Down next, Up previous, Enter open best match · Esc finish',
         '[#ff8800]F7[/#ff8800]: View loaded config drive mappings (aliases, source prefixes, local paths, disabled roots)',
         '[#ff8800]b / j[/#ff8800]: Toggle selected file/directory bookmark / editable bookmarks (all screens)',
         '[#ff8800]Ctrl+O[/#ff8800]: Open selected file/directory with the system default app',
@@ -5049,25 +5088,106 @@ class RemoveDBConfirmView(PTScreen):
         self.browser.trash_paths(self.paths)
 
 
+class FilenameSearchView(PTScreen):
+    """Incremental name search over the visible Files rows."""
+    def __init__(self, browser):
+        super().__init__(browser)
+        # All printable characters belong to the query, including normal shortcuts.
+        self.keys = KeyBindings()
+        self.search = TextArea(height=1, multiline=False,
+                               prompt=lambda: 'No match: ' if self.status else 'Search: ',
+                               style='class:literal')
+        self.status = ''
+        self.search.buffer.on_text_changed += lambda _: self.find()
+        self.bind(['escape'], self.close, eager=True)
+        self.bind(['enter'], self.apply, eager=True)
+        self.bind(['c-s', 'down'], lambda: self.find(1), eager=True)
+        self.bind(['up'], lambda: self.find(-1), eager=True)
+        self.focus = self.search
+        self.field = HSplit([self.search], key_bindings=self.keys, modal=True)
+        browser.filename_search = self
+        self.container = browser.app.layout.container
+
+    def close(self):
+        self.browser.filename_search = None
+        super().close()
+        self.browser.app.layout.focus(self.browser.control)
+
+    def apply(self):
+        query = self.search.text.casefold()
+        browser = self.browser
+        previous = browser.current_name()
+        browser.refresh(previous, update_info=False)
+        candidates = []
+        for index, row in enumerate(browser.rows):
+            name = row['node'].name.casefold()
+            if row['name'] == '..' or not query or query not in name:
+                continue
+            rank = 0 if name == query else 1 if name.startswith(query) else 2
+            candidates.append((rank, index))
+        if candidates:
+            browser.select(min(candidates)[1])
+            self.status = ''
+        elif query:
+            self.status = 'No matching name'
+            browser.app.invalidate()
+            return
+        self.close()
+        browser.open()
+        browser.app.invalidate()
+
+    def find(self, step=0):
+        query = self.search.text.casefold()
+        if not query:
+            self.status = ''
+            self.browser.app.invalidate()
+            return
+        rows = self.browser.rows
+        count = len(rows)
+        direction = -1 if step < 0 else 1
+        start = self.browser.selected + direction if step else 0
+        for offset in range(count):
+            index = (start + direction * offset) % count
+            row = rows[index]
+            if row['name'] != '..' and row['node'].name.casefold().startswith(query):
+                self.browser.select(index)
+                self.status = ''
+                break
+        else:
+            self.status = 'No matching name'
+        self.browser.app.invalidate()
+
+
 class DriveMappingsView(PTScreen):
     """Inspect effective loaded drive mappings without reloading configuration."""
     def __init__(self, browser):
         super().__init__(browser)
         self.lines = [[('class:header', 'Alias · source prefix → local path · state')]]
+        def path_fragment(path):
+            return ('class:green class:literal' if path != '0' and os.path.exists(path)
+                    else 'class:red class:literal', path)
+        def mapping_row(alias, source, local):
+            return [('ansicyan bold class:literal', alias),
+                    ('', ' · '), path_fragment(source) if source != '—' else ('', source), ('', ' → '),
+                    path_fragment(local),
+                    ('', ' · disabled' if local == '0' else ' · enabled')]
         represented = set()
         for source, mapping in sorted(prefixes.items()):
             alias, local = mapping['alias'], mapping['local']
             represented.add(alias)
-            self.lines.append([('class:literal', f'{alias} · {source} → {local} · enabled')])
+            self.lines.append(mapping_row(alias, source, local))
         for alias, local in sorted(aliases.items()):
             if alias not in represented:
-                self.lines.append([('class:red' if local == '0' else 'class:literal',
-                    f'{alias} · — → {local} · {"disabled" if local == "0" else "enabled"}')])
+                self.lines.append(mapping_row(alias, '—', local))
         for source in sorted(disabled_prefixes):
             self.lines.append([('class:red class:literal', f'Disabled source prefix: {source}')])
         if len(self.lines) == 1:
             self.lines.append([('', 'No drive mappings loaded from config.sh.')])
-        self.lines += [[('', '')], [('class:literal', f'~: startup directory → {browser.startup_path}')],
+        self.lines += [[('', '')],
+                       [('ansicyan bold class:literal', '@:'), ('', ' relative paths / current directory → '), path_fragment(browser.startup_path)],
+                       [('ansicyan bold class:literal', '~0:/'), ('', ' → '),
+                        path_fragment(os.path.expanduser("~")), ('', ' · home directory')],
+                       [('ansicyan bold class:literal', ':/'), ('', ' → '), path_fragment('/'), ('', ' · global filesystem root')],
                        [('', 'Read-only loaded configuration. Edit config.sh and restart to change mappings.')]]
         self.table = RowsControl(lambda: self.lines, cache=True)
         self.horizontal = HorizontalBar(self.table)
@@ -5652,8 +5772,8 @@ class CommandPathCompleter(Completer):
             text = text[3:].lstrip()
         directory, _, partial = text.rpartition('/')
         parent = directory + '/' if '/' in text else ''
-        if not parent and text.startswith('~:'):
-            parent, partial = '~:/', text[2:]
+        if not parent and text.startswith(('@:', '~:')):
+            parent, partial = '@:/', text[2:]
         if parent.startswith('~') and not parent.startswith('~:'):
             parent = os.path.expanduser(parent)
         path = self.browser.parse_display_path(parent) if parent else self.browser.vfs.pwd()

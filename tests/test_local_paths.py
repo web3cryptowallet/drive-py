@@ -15,6 +15,25 @@ spec.loader.exec_module(tui)
 
 
 class LocalPathTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'POSIX filesystem root')
+    def test_real_root_entry_first_and_navigation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'root-navigation.txt'
+            target.write_text('hello')
+            fs = VirtualFS({'files': {'/catalog/file': {'hash:1'}}})
+            before = [node.id for node in fs.db.get_children(fs.db.get_root())]
+            self.assertEqual(fs.list_nodes()[0].name, '/')
+            self.assertEqual(fs.list_nodes()[0].id, '/:')
+            fs.enter('/')
+            self.assertEqual(get_real_path(fs.pwd()), '/')
+            self.assertIn('tmp', [node.name for node in fs.list_nodes()])
+            node = fs.get_from_path('/:' + str(target))
+            self.assertEqual(get_real_path(node.id), str(target))
+            self.assertEqual(fs.get_full_info(node)['size'], 5)
+            fs.enter('..')
+            self.assertEqual(fs.pwd(), '/')
+            self.assertEqual(before, [node.id for node in fs.db.get_children(fs.db.get_root())])
+
     def test_relative_absolute_and_explicit_disk_prefixes(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(aliases, {'disk': folder, 'relative': 'test0'}, clear=True):
             target = Path(folder) / 'a.txt'

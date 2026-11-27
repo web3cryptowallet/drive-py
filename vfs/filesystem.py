@@ -96,13 +96,56 @@ class VirtualFS:
     def _parent(self, node):
         if node.parent_id is None:
             return None
+        route = node.info.get('_navigation_path')
+        if route and route != '/:':
+            return self.get_from_path(route.rsplit('/', 1)[0] or '/:')
         return self.get_from_path(node.parent_id)
 
+    def _home_identity(self, path):
+        """Unify home namespace, mapped home aliases and explicit disk paths."""
+        if path.startswith(('/~:', '~:')):
+            return path
+        local = os.path.normpath(get_real_path(path))
+        home = os.path.normpath(os.path.expanduser('~'))
+        if local != home and not local.startswith(home.rstrip('/') + '/'):
+            return path
+        roots = [(key, os.path.normpath(os.path.expanduser(value)))
+                 for key, value in aliases.items() if value != '0']
+        key = next((key for key, root in roots if root == home), '~0:')
+        return '/' + key + local[len(home):]
+
+    @staticmethod
+    def _with_navigation_path(node, path):
+        from copy import copy
+        node = copy(node)
+        node.info = dict(node.info)
+        node.info['_navigation_path'] = path
+        return node
+
     def _child(self, parent, name):
+        node = self._lookup_child(parent, name)
+        route = parent.info.get('_navigation_path')
+        if node is not None and route:
+            node = self._with_navigation_path(node, route.rstrip('/') + '/' + name)
+        return node
+
+    def _lookup_child(self, parent, name):
+        if parent.id == '' and name in ('/', ':') and os.name == 'posix':
+            return VFSNode('/:', '/', True, parent_id='', info={'path': ':/', 'status': 'new', '_navigation_path': '/:'})
         node = self.db.get_child(parent, name)
         if node is not None:
             return node
-        return self._local_node(parent.id + '/' + name, parent.id)
+        path = parent.id + '/' + name
+        canonical = self._home_identity(path)
+        if canonical != path:
+            node = self.get_from_path(canonical)
+            if node is not None:
+                # Keep the disk entry's visible name while sharing catalog identity.
+                from copy import copy
+                node = copy(node)
+                node.name = name
+                return node
+        return self._local_node(path, parent.id)
 
     def _local_node(self, path, parent_id):
         real = get_real_path(path)
@@ -127,20 +170,29 @@ class VirtualFS:
                 with os.scandir(get_real_path(node.id)) as entries:
                     for entry in entries:
                         if entry.name not in children:
-                            child = self._local_node(node.id + '/' + entry.name, node.id)
+                            child = self._child(node, entry.name)
                             if child:
                                 children[entry.name] = child
             except OSError:
                 pass
         else:
             for child in self._local_nodes.values():
-                if child.parent_id == '' and child.name not in children:
+                if (child.parent_id == '' and child.name not in children
+                        and child.name in (*aliases, '~:', '~0:')):
                     children[child.name] = child
+        if not node.id and os.name == 'posix':
+            # A navigation entry, never a catalog insertion. Explicit : bypasses aliases.
+            children.pop(':', None)
+            children['/'] = self._child(node, '/')
+        route = node.info.get('_navigation_path')
+        if route:
+            children = {name: self._with_navigation_path(child, route.rstrip('/') + '/' + name)
+                        for name, child in children.items()}
         for child in children.values():
             if child.info.get('status') != 'new':
                 child.info['status'] = ('tracked' if os.path.exists(get_real_path(child.id))
                                         else 'deleted')
-        return sorted(children.values(), key=lambda child: (not child.is_dir, child.name))
+        return sorted(children.values(), key=lambda child: (child.id != '/:', not child.is_dir, child.name))
 
     def listdir(self, node = None):
         if node is None:
@@ -225,14 +277,22 @@ class VirtualFS:
     def get_from_path(self, fullpath):
         if not fullpath or fullpath == "/":
             return self.db.get_root()
+        original = fullpath
         if not fullpath.startswith('/'):
             fullpath = self.decode_source_path(fullpath)
+        fullpath = self._home_identity(fullpath)
         path, parts = normalize_path(fullpath)
         node = self.db.get_root()
         for p in parts:
             node = self._child(node, p)
             if node is None:
                 break
+        first = original.lstrip('/').split('/', 1)[0]
+        if node is not None and (original.startswith(('/:', ':/')) or
+                                 (original.startswith('/') and first not in aliases
+                                  and first not in ('~:', '~0:', '@:'))):
+            local = os.path.normpath(get_real_path(original))
+            node = self._with_navigation_path(node, '/:' + (local if local != '/' else ''))
         return node
 
     # LOOK UP A NODE BY VIRTUAL PATH ]

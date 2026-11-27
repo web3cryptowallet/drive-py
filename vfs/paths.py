@@ -28,6 +28,8 @@ def check_disabled_prefixes(prefix):
 # REPLACE DRIVE PREFIXES WITH ALIASES [
 
 def path_update_prefix(path):
+    if path == '~' or path.startswith('~/'):
+        return '~0:/' + path[2:] if path != '~' else '~0:/'
     for prefix in prefixes:
         new_prefix = prefixes[prefix]['local']
         new_prefix = prefixes[prefix]['alias']
@@ -41,6 +43,10 @@ def path_update_prefix(path):
 def catalog_source_path(path):
     """Store a source path, retaining relative versus absolute spelling."""
     path = os.fspath(path)
+    if path.startswith('/@:'):
+        path = '/~:' + path[3:]
+    elif path.startswith('@:'):
+        path = '~:' + path[2:]
     if path.startswith('/~:'):
         path = path[1:]
     if path.startswith('~:'):
@@ -58,6 +64,8 @@ def catalog_source_path(path):
 def catalog_identity_path(path):
     """Decode raw source spelling into the virtual tree's startup namespace."""
     source = catalog_source_path(path)
+    if source.startswith('~0:/'):
+        return source
     if source.lstrip('/').split('/')[0] in aliases or os.path.isabs(source):
         return source
     return '~:' + ('' if source == '.' else source)
@@ -77,6 +85,16 @@ def catalog_source_data(data):
 
 def get_real_path(path):
     path = os.fspath(path)
+    if path.startswith('/@:'):
+        path = '/~:' + path[3:]
+    elif path.startswith('@:'):
+        path = '~:' + path[2:]
+    if path.startswith('/~0:'):
+        path = path[1:]
+    if path in ('~0', '~0:'):
+        return os.path.expanduser('~')
+    if path.startswith('~0:/'):
+        return os.path.join(os.path.expanduser('~'), path[4:])
     # Explicit global paths bypass aliases, including the catalog's /: node.
     if path.startswith('/~:'):
         path = path[1:]

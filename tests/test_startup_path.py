@@ -51,7 +51,8 @@ class StartupPathTests(unittest.TestCase):
                     with self.subTest(path=path), create_pipe_input() as pipe:
                         fs = VirtualFS({'files': {}})
                         browser = tui.DriveBrowser(fs, path=path, input=pipe, output=DummyOutput())
-                        self.assertEqual(fs.pwd(), str(target))
+                        self.assertEqual(fs.pwd(), '/~0:/my path')
+                        self.assertEqual(browser.original_path(fs.pwd()), str(target))
                         self.assertIn('file.txt', [row['name'] for row in browser.rows])
                         self.assertEqual(os.getcwd(), cwd)
                 with patch.dict(aliases, {'disk': directory}):

@@ -19,3 +19,13 @@ feature prompt, implementation details, update history, and transplit guidance.
 
 The live drive scanner and map are documented in
 [FEATURE-realtime-drive-scanner.md](FEATURE-realtime-drive-scanner.md).
+
+
+## README attribution boundary
+
+Never append new feature details, controls, update notes, or other documentation
+after `*AI-Independet code. Created through human work*` in README.md.
+Keep that attribution as the final nonempty line. Put feature details in the
+appropriate existing README section above the attribution, or in help.md and
+the relevant FEATURE-*.md document. Before finishing a README edit, verify
+that no content follows the attribution.

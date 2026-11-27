@@ -58,6 +58,40 @@ class StartupRestoreTests(unittest.TestCase):
             self.assertEqual(fs.pwd(), '/')
             fs.db.conn.close()
 
+    def test_restore_home_symlink_preserves_logical_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / 'home'
+            home.mkdir()
+            target = root / 'mnt' / 'src'
+            target.mkdir(parents=True)
+            (target / 'file.txt').write_text('content')
+            (home / 'src').symlink_to(target, target_is_directory=True)
+            database = str(root / 'catalog.sqlite')
+            with patch.dict(os.environ, {'HOME': str(home)}), patch.dict(tui.aliases, {'root': str(home)}, clear=True), patch.object(tui, 'HISTORY_PATH', root / 'history.llog'):
+                fs = VirtualFS(None, 'sqlite', db_path=database)
+                browser = tui.DriveBrowser(fs, path=str(home), input=DummyInput(), output=DummyOutput())
+                self.assertTrue(browser.go_path('~0:/src'))
+                self.assertEqual(browser.original_path(fs.pwd()), str(home / 'src'))
+                saved = ScanStore(fs.db).get('ui', 'last_directory')
+                self.assertEqual(saved['vfs_path'], '/root/src')
+                fs.db.conn.close()
+                fs = VirtualFS(None, 'sqlite', db_path=database)
+                browser = tui.DriveBrowser(fs, input=DummyInput(), output=DummyOutput())
+                self.assertEqual(fs.pwd(), '/root/src')
+                self.assertEqual(browser.original_path(fs.pwd()), str(home / 'src'))
+                browser.show_path_prefixes = True
+                self.assertEqual(browser.display_path(fs.pwd()), '~0:/src')
+                self.assertIn('file.txt', [row['name'] for row in browser.rows])
+                # Existing state without the added key also keeps its saved spelling.
+                ScanStore(fs.db).put('ui', 'last_directory',
+                    {'directory': str(home / 'src'), 'catalog_root': False})
+                fs.db.conn.close()
+                fs = VirtualFS(None, 'sqlite', db_path=database)
+                browser = tui.DriveBrowser(fs, input=DummyInput(), output=DummyOutput())
+                self.assertEqual(browser.original_path(fs.pwd()), str(home / 'src'))
+                fs.db.conn.close()
+
     def test_cli_accepts_empty_startup_argument(self):
         with patch('sys.argv', ['drive-tui.py', '']), patch.object(tui, 'load_config', return_value={}), \
                 patch.object(tui, 'load_vfs') as load, patch.object(tui, 'DriveBrowser') as browser:

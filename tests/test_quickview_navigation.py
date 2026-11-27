@@ -19,6 +19,42 @@ spec.loader.exec_module(tui)
 
 
 class QuickViewNavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_media_reserves_three_duplicate_rows_and_scrolls(self):
+        from prompt_toolkit.data_structures import Size
+        class Output(DummyOutput):
+            def get_size(self):
+                return Size(rows=27, columns=120)
+        with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
+            root = Path(directory)
+            fs = VirtualFS({'files': {}})
+            for number in range(8):
+                path = root / f'clip{number}.mp4'
+                path.write_text('same')
+                fs.db.add_scanned_file(str(path), 'md5:' + 'a' * 32, 4)
+            with patch.object(tui, 'HISTORY_PATH', root / 'history.llog'):
+                browser = tui.DriveBrowser(fs, path=directory, input=pipe, output=Output())
+            browser.image_previews = False
+            browser.show_info(preview_node=fs.get_from_path(str(root / 'clip0.mp4')))
+            browser.video_dimensions = (40, 100)
+            task = asyncio.create_task(browser.app.run_async(set_exception_handler=False))
+            try:
+                await asyncio.sleep(.15)
+                render = browser.info.window.render_info
+                self.assertGreaterEqual(render.window_height, 6)
+                first_three = sorted(browser.info_paths)[:3]
+                self.assertTrue(set(first_three).issubset(render.displayed_lines),
+                                (first_three, render.displayed_lines))
+                browser.app.layout.focus(browser.info)
+                pipe.send_text('\x1b[F')
+                await asyncio.sleep(.1)
+                last = max(browser.info_paths)
+                self.assertEqual(browser.info.buffer.document.cursor_position_row, last)
+                self.assertIn(last, browser.info.window.render_info.displayed_lines)
+                self.assertGreater(browser.info.window.vertical_scroll, 0)
+            finally:
+                browser.app.exit()
+                await task
+
     async def test_real_path_filter_excludes_selected_aliases_and_toggle(self):
         with tempfile.TemporaryDirectory() as directory, create_pipe_input() as pipe:
             root = Path(directory)
