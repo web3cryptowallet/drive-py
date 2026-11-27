@@ -246,8 +246,10 @@ class CacheTests(unittest.TestCase):
         with patch.object(browser, 'icon_dimensions', return_value=(8, 4)):
             content = browser.grid_content(44, 20)
         self.assertEqual([browser.grid_positions[i][0] for i in range(3)], [0, 9, 18])
-        fragments = content.get_line(2)
-        self.assertTrue(any('class:audio-play' in style and '▶' in text for style, text in fragments))
+        text = ''.join(part[1] for line in range(content.line_count) for part in content.get_line(line))
+        self.assertEqual(text.count('♫'), 1)
+        self.assertIn('♫ ', text)
+        self.assertNotIn('▶', text)
         for line in range(content.line_count):
             text = ''.join(text for _, text in content.get_line(line))
             self.assertEqual(text[8], ' ')

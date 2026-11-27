@@ -11,18 +11,27 @@ import time
 
 from .thumbnails import AUDIO_SUFFIXES
 # IMPORT VIDEO PREVIEW DEPENDENCIES ]
-def audio_only_container(path):
-    """Recognize audio-only media even when its filename has a video suffix."""
-    if os.path.splitext(path)[1].lower() in AUDIO_SUFFIXES:
-        return True
+def probe_media_type(path):
+    """Return the detected stream type, or None when probing is inconclusive."""
     try:
         result = subprocess.run(
             ['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type',
              '-of', 'json', path], capture_output=True, text=True, timeout=10, check=True)
         kinds = {stream.get('codec_type') for stream in json.loads(result.stdout).get('streams', [])}
-        return 'audio' in kinds and 'video' not in kinds
+        if 'video' in kinds:
+            return 'video'
+        if 'audio' in kinds:
+            return 'audio'
     except (OSError, ValueError, subprocess.SubprocessError):
-        return False
+        pass
+    return None
+
+
+def audio_only_container(path):
+    """Recognize audio-only media even when its filename has a video suffix."""
+    if os.path.splitext(path)[1].lower() in AUDIO_SUFFIXES:
+        return True
+    return probe_media_type(path) == 'audio'
 
 # READ THE DISPLAY MATRIX WITHOUT LIBMPVS FAILING SOFTWARE AUTO-ROTATION [
 def video_rotation_filter(path):

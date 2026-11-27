@@ -284,7 +284,7 @@ except ImportError as exc:
 # IMPORT DRIVE-TUI DEPENDENCIES [
 from drive import load_log
 from vfs import VirtualFS, aliases, disabled_prefixes, format_size, prefixes, get_stat_info
-from vfs.video_preview import VideoPreview
+from vfs.video_preview import VideoPreview, probe_media_type
 from vfs.paths import get_real_path
 from vfs.thumbnails import thumbnail, IMAGE_SUFFIXES, THUMBNAIL_SUFFIXES, MEDIA_SUFFIXES, VIDEO_SUFFIXES, AUDIO_SUFFIXES
 from vfs.scanner import (DriveScanner, FileMap, Pagination, ScanControls, ScanEntry,
@@ -763,10 +763,13 @@ class FilesControl(UIControl):
             if expanded and not selected:
                 base += ' class:expanded-dir'
             name_style = base + ' class:literal' + (' class:expanded-dir-name' if expanded else '') + browser.scan_row_style(row)
-            prefix = browser.scan_row_marker(row) + row['label'][1:4]
+            prefix = browser.scan_row_marker(row) + ' ' + browser.file_icon(row) + ' '
             excluded = row['name'] != '..' and row['node'].is_dir and row['node'].id in browser.blacklist
-            available = max(0, name_width - len(prefix) - (2 if browser.bookmark_path(row) in browser.bookmarks else 0) - (2 if excluded else 0))
-            label = prefix + browser.fit_name(browser.file_list_path(row), available, selected=selected)
+            available = max(0, name_width - get_cwidth(prefix) - (2 if browser.bookmark_path(row) in browser.bookmarks else 0) - (2 if excluded else 0))
+            path_label = browser.file_list_path(row)
+            if path_label.startswith(('♫ ', '▶ ')):
+                path_label = path_label[2:]
+            label = prefix + browser.fit_name(path_label, available, selected=selected)
             marked = browser.bookmark_path(row) in browser.bookmarks
             if marked:
                 label = label[:2] + 'B ' + label[2:]
@@ -1096,6 +1099,8 @@ class DriveBrowser:
         self.thumbnail_errors = 0
         self.vfs = vfs
         self.navigation_store = ScanStore(vfs.db)
+        self.media_type_cache = {}
+        self.media_type_legacy_keys = set()
         saved_depth = ScanStore(vfs.db).get('ui', 'expand_all_levels', False)
         self.expand_all_levels = saved_depth if isinstance(saved_depth, bool) else False
         self.selected = 0
@@ -1205,7 +1210,7 @@ class DriveBrowser:
                 info_click['down'] = None
             return result
         self.info.control.mouse_handler = focus_info_row
-        self.info.window.height = lambda: Dimension(min=6 if self.video_path and
+        self.info.window.height = lambda: Dimension(min=self.video_info_height() if self.video_path and
             hasattr(self, 'app') and self.app.output.get_size().rows >= 18 else 1)
         self.info.window.right_margins = [ScrollbarMargin()]
         self.info.window.cursorline = has_focus(self.info)
@@ -1555,9 +1560,19 @@ class DriveBrowser:
 
     # VIDEO FRAME HEIGHT [
     def video_frame_height(self):
-        # Keep controls, hash, duplicate heading and three duplicate rows below frames.
         rows = self.app.output.get_size().rows if hasattr(self, 'app') else 27
-        return max(1, min(self.video_dimensions[1], rows - 20))
+        return max(1, min(30, rows - 14 - self.video_info_height()))
+
+    def video_info_height(self):
+        # Hash, spacer, heading, then up to three visible duplicate rows.
+        return 3 + min(3, len(self.info_paths))
+
+    def video_poster_bounds(self):
+        render = self.video_area.window.render_info
+        if render is not None:
+            return (max(1, min(80, render.window_width - 1)),
+                    max(1, min(30, render.window_height)))
+        return self.video_dimensions[0], self.video_frame_height()
     # VIDEO FRAME HEIGHT ]
     # AUDIO SELECTED FOR DRIVE BROWSER [
     def audio_selected(self):
@@ -1589,6 +1604,57 @@ class DriveBrowser:
             self.video_player.seek(target)
         self.app.invalidate()
     # SEEK VIDEO FOR DRIVE BROWSER ]
+    def load_media_type(self, node, stat):
+        if node.is_dir or os.path.splitext(node.name)[1].lower() not in VIDEO_SUFFIXES | AUDIO_SUFFIXES:
+            return
+        logical = self.original_path(node.id)
+        key = os.path.realpath(logical)
+        if key not in self.media_type_cache:
+            try:
+                record = self.navigation_store.get('media_type', key, {})
+                if not record and logical != key:
+                    record = self.navigation_store.get('media_type', logical, {})
+                    if record:
+                        self.media_type_legacy_keys.add(key)
+                self.media_type_cache[key] = record
+            except (TypeError, ValueError):
+                self.media_type_cache[key] = {}
+        record = self.media_type_cache[key]
+        if (stat.get('exists') and isinstance(record, dict) and record.get('type') in ('audio', 'video')
+                and record.get('size') == stat.get('size')
+                and record.get('modified') == stat.get('modified')):
+            node.info['media_type'] = record['type']
+            if key in self.media_type_legacy_keys:
+                self.navigation_store.put('media_type', key, record)
+                self.media_type_legacy_keys.discard(key)
+        else:
+            node.info.pop('media_type', None)
+
+    def record_media_type(self, file_id, media_type):
+        if media_type not in ('audio', 'video'):
+            return
+        token = (self.video_epoch, file_id, media_type)
+        if getattr(self, '_recorded_stream_type', None) == token:
+            return
+        self._recorded_stream_type = token
+        key = os.path.realpath(self.original_path(file_id))
+        stat = get_stat_info(file_id)
+        if not stat.get('exists'):
+            return
+        record = {'type': media_type, 'size': stat.get('size'), 'modified': stat.get('modified')}
+        if self.media_type_cache.get(key) != record:
+            self.navigation_store.put('media_type', key, record)
+            self.media_type_cache[key] = record
+        for row in self.rows:
+            if os.path.realpath(self.original_path(row['node'].id)) == key:
+                row['node'].info['media_type'] = media_type
+                row['label'] = row['label'][0] + ' ' + self.file_icon(row) + ' ' + row['name']
+                row.pop('_display_label', None)
+                if media_type == 'audio':
+                    self.thumbnails.pop(row['node'].id, None)
+        self.grid_layout_key = None
+        self.app.invalidate()
+
     # LOAD VIDEO POSTER [
     async def load_video_poster(self, path, epoch):
         token = self.begin_quickview()
@@ -1600,11 +1666,25 @@ class DriveBrowser:
     async def _load_video_poster(self, path, epoch):
         file_id = self.video_file_id
         try:
+            media_type = await background_call(probe_media_type, path)
+            if self.video_epoch != epoch or self.video_player is not None:
+                return
+            if media_type is not None:
+                self.record_media_type(file_id, media_type)
+            if media_type == 'audio':
+                self.video_audio_only = True
+                self.native_preview = None
+                self.video_status = 'Audio only · Press Play'
+                self.app.invalidate()
+                return
             from term_image.utils import get_cell_size
             cell_width, cell_height = get_cell_size() or (8, 16)
+            bounds = self.video_poster_bounds()
+            self.video_poster_request = (epoch, bounds)
             item = await background_call(prepare_grid_thumbnail, path, file_id, 256,
-                                         self.video_dimensions, cell_width / cell_height)
-            if self.video_epoch != epoch or self.video_player is not None:
+                                         bounds, cell_width / cell_height)
+            if (self.video_epoch != epoch or self.video_player is not None
+                    or self.video_poster_request != (epoch, bounds)):
                 return
             ScanStore(self.vfs.db).put('thumbnail', f'256:{file_id}', item['record'])
             self.apply_video_frame(item)
@@ -1622,11 +1702,20 @@ class DriveBrowser:
             art, dimensions = value['native']
             # Grid serialization uses its own layer; posters belong to quick view.
             self.native_preview = (art.replace('z=732', 'z=731'), dimensions,
-                                   max(0, (self.video_dimensions[1] - dimensions[1]) // 2))
+                                   max(0, (self.video_frame_height() - dimensions[1]) // 2))
         else:
             self.native_preview = None
-            self.video_area.lexer.image_lines = dict(enumerate(value['lines']))
-            self.video_area.text = '\n'.join(''.join(text for _, text in row) for row in value['lines'])
+            width, height = self.video_poster_bounds()
+            lines = value['lines']
+            frame_width = max((sum(get_cwidth(text) for _, text in row)
+                               for row in lines), default=0)
+            left = max(0, (width - frame_width) // 2)
+            top = max(0, (height - len(lines)) // 2)
+            centered = [[('', '')] for _ in range(top)]
+            centered.extend([[('', ' ' * left), *row] for row in lines])
+            centered.extend([[('', '')] for _ in range(max(0, height - len(centered)))])
+            self.video_area.lexer.image_lines = dict(enumerate(centered))
+            self.video_area.text = '\n'.join(''.join(text for _, text in row) for row in centered)
     # APPLY VIDEO FRAME ]
     # PERSIST THE LAST KNOWN PLAYBACK POSITION [
     def update_play_history(self):
@@ -1748,11 +1837,13 @@ class DriveBrowser:
                     self.video_player = None
                     break
                 elif kind == 'progress':
+                    self.record_media_type(getattr(self, 'video_file_id', self.video_path), 'audio')
                     self.video_audio_only = True
                     self.native_preview = None
                     self.video_status = 'Playing'
                     self.video_position, self.video_duration = value
                 elif kind == 'frame':
+                    self.record_media_type(getattr(self, 'video_file_id', self.video_path), 'video')
                     self.video_status = 'Playing'
                     self.video_position = value.get('_position', self.video_position)
                     self.video_duration = value.get('_duration', self.video_duration)
@@ -2002,7 +2093,12 @@ class DriveBrowser:
         from types import SimpleNamespace
         snapshot = copy(self.vfs)
         children = list(self.vfs.db.get_children(node))
-        snapshot.db = SimpleNamespace(get_children=lambda _: children)
+        root = self.vfs.db.get_root()
+        child_index = {child.name: child for child in children}
+        snapshot.db = SimpleNamespace(
+            get_children=lambda _: children,
+            get_root=lambda: root,
+            get_child=lambda parent, name: child_index.get(name) if parent.id == node.id else None)
         nodes = await background_call(snapshot.list_nodes, node)
         self.expansion_listing_cache[node.id] = nodes
         previous = len(self.expansion_files) // 1000
@@ -2250,7 +2346,7 @@ class DriveBrowser:
                 if epoch != self.thumbnail_epoch or not self.graphics_mode or not self.image_previews:
                     break
                 node = row['node']
-                if node.is_dir or os.path.splitext(node.name)[1].lower() not in THUMBNAIL_SUFFIXES:
+                if node.is_dir or getattr(node, 'info', {}).get('media_type') == 'audio' or os.path.splitext(node.name)[1].lower() not in THUMBNAIL_SUFFIXES:
                     continue
                 started = time.monotonic()
                 try:
@@ -2364,7 +2460,7 @@ class DriveBrowser:
                 row = self.rows[entry]
                 style = 'class:selected' if entry == self.selected else 'class:' + row['color']
                 style += self.problem_file_style(row)
-                item = self.thumbnails.get(row['node'].id) if self.image_previews else None
+                item = self.thumbnails.get(row['node'].id) if self.image_previews and getattr(row['node'], 'info', {}).get('media_type') != 'audio' else None
                 if subrow == icon_height:
                     image_width = item['dimensions'][0] if item else 0
                     marked = self.bookmark_path(row) in self.bookmarks
@@ -2394,9 +2490,9 @@ class DriveBrowser:
                         eligible = (not row['node'].is_dir and
                                     os.path.splitext(row['name'])[1].lower() in THUMBNAIL_SUFFIXES)
                         pending = self.image_previews and eligible and item is None
-                        audio = os.path.splitext(row['name'])[1].lower() in AUDIO_SUFFIXES
-                        label = '▶' if audio and subrow == icon_height // 2 else ('.' if pending and subrow == icon_height // 2 else '')
-                        fragments.append((style + (' class:audio-play' if audio else ''), fit(label.center(tile_width), tile_width)))
+                        # The media icon belongs before the filename, once per file.
+                        label = '.' if pending and subrow == icon_height // 2 else ''
+                        fragments.append((style, fit(label.center(tile_width), tile_width)))
                 else:
                     fragments.append((style, ' ' * tile_width))
             return fragments or [('', '(empty)')]
@@ -2436,7 +2532,7 @@ class DriveBrowser:
         for index in sorted(visible_entries):
             row = self.rows[index]
             item = self.thumbnails.get(row['node'].id)
-            if not item or not item['native']:
+            if not item or not item['native'] or getattr(row['node'], 'info', {}).get('media_type') == 'audio':
                 continue
             art, (width, height) = item['native']
             icon_height = self.grid_tile_height - 2
@@ -2474,19 +2570,26 @@ class DriveBrowser:
     # CLEAR NATIVE PREVIEW ]
     # MARGINS HAVE NO DEFAULT PT MOUSE HANDLER; BIND THE PAINTED COLUMN [
     def fit_name(self, text, width, graphics=False, selected=False):
+        prefix = text[:2] if text.startswith(('♫ ', '▶ ')) else ''
+        if prefix:
+            text = text[2:]
+        available = max(0, width - len(prefix))
         if selected:
-            self.filename_width = max(1, width)
+            self.filename_width = max(1, available)
         if self.filename_pan is None:
-            return fit_filename(text, width) if graphics else fit(text, width)
-        text = safe_text(text)
-        return fit(text[self.filename_pan:], width)
+            name = fit_filename(text, available) if graphics else fit(text, available)
+        else:
+            text = safe_text(text)
+            name = fit(text[self.filename_pan:], available)
+        return fit(prefix, min(width, len(prefix))) + name
 
     def filename_maximum(self):
         key = (id(self.rows), self.filename_width, self.show_path_prefixes)
         if getattr(self, '_filename_maximum_key', None) != key:
+            labels = [self.file_list_path(row) for row in self.rows]
             self._filename_maximum_value = max(
-                (filename_end(safe_text(self.file_list_path(row)) + ' ', self.filename_width)
-                 for row in self.rows), default=0)
+                (filename_end(safe_text(label[2:] if label.startswith(('♫ ', '▶ ')) else label) + ' ',
+                              self.filename_width) for label in labels), default=0)
             self._filename_maximum_key = key
         return self._filename_maximum_value
 
@@ -2654,6 +2757,14 @@ class DriveBrowser:
             scale = min(1., max(1, visible.window_width - 1) / width,
                         max(1, visible.window_height) / height)
             self.video_render_dimensions = (max(1, int(width * scale)), max(1, int(height * scale)))
+            if (getattr(self, 'image_previews', False) and self.video_player is None
+                    and not self.audio_selected()):
+                bounds = self.video_poster_bounds()
+                request = (self.video_epoch, bounds)
+                if getattr(self, 'video_poster_request', None) != request:
+                    self.video_poster_request = request
+                    app.create_background_task(self.load_video_poster(self.video_path, self.video_epoch))
+
         if (getattr(self, 'video_path', None) and not self.video_panel_visible()
                 and any(app.layout.has_focus(control)
                         for control in (self.previous_button, self.play_button, self.stop_button, self.next_button, self.mute_button, self.seek_control))):
@@ -2730,11 +2841,26 @@ class DriveBrowser:
         return [('class:table-header', self.expansion_status() + fit(title, name) + ' ' + fit(' Size', size) + ' ' + fit(' Files', files) + ' ' + fit(' Dups', dups))]
     # RENDER FILE TABLE HEADERS FOR THE CURRENT PATH DISPLAY ]
     # FORMAT RELATIVE OR PREFIXED FILE LABELS WITHOUT CHANGING ROW IDENTITIES [
+    def file_icon(self, row):
+        if row['node'].is_dir:
+            return '📁'
+        kind = getattr(row['node'], 'info', {}).get('media_type')
+        if kind is None:
+            suffix = os.path.splitext(row['name'])[1].lower()
+            kind = 'audio' if suffix in AUDIO_SUFFIXES else 'video' if suffix in VIDEO_SUFFIXES else None
+        return {'audio': '♫', 'video': '▶'}.get(kind, '📄')
+
     def file_list_path(self, row):
         cached = row.get('_display_label')
         if cached is not None and cached[0] == self.show_path_prefixes:
             return cached[1]
         label = row['name'] if row['name'] == '..' or not self.show_path_prefixes else self.display_path(row['node'].id)
+        kind = getattr(row['node'], 'info', {}).get('media_type')
+        if not row['node'].is_dir and kind is None:
+            suffix = os.path.splitext(row['name'])[1].lower()
+            kind = 'audio' if suffix in AUDIO_SUFFIXES else 'video' if suffix in VIDEO_SUFFIXES else None
+        if row['name'] != '..' and kind in ('audio', 'video'):
+            label = ('♫ ' if kind == 'audio' else '▶ ') + label
         if row['name'] != '..' and os.path.islink(get_real_path(row['node'].id)):
             label += ' ↗'
         row['_display_label'] = (self.show_path_prefixes, label)
@@ -2830,7 +2956,12 @@ class DriveBrowser:
             if name != '..' and (not self.show_blacklisted and any(
                     node.id == root or node.id.startswith(root.rstrip('/') + '/') for root in self.blacklist)):
                 continue
-            media = not node.is_dir and os.path.splitext(name)[1].lower() in filter_suffixes
+            local_info = _infos[node.id] if _infos is not None else self.vfs.get_full_info(node, True)
+            self.load_media_type(node, local_info)
+            detected = node.info.get('media_type')
+            media = not node.is_dir and (self.media_filter in ('all', 'media') if detected == 'audio'
+                    else self.media_filter in ('all', 'media', 'videos') if detected == 'video'
+                    else os.path.splitext(name)[1].lower() in filter_suffixes)
             blacklisted = node.is_dir and normalize_bookmark_path(node.id) in self.blacklist
             if self.graphics_mode and node.is_dir and name != '..' and not blacklisted:
                 if not self.directory_has_media(node, image_directories, THUMBNAIL_SUFFIXES):
@@ -2842,7 +2973,6 @@ class DriveBrowser:
                 elif not node.is_dir and not media:
                     continue
             status = node.info.get('status', 'tracked') if name != '..' else 'tracked'
-            local_info = _infos[node.id] if _infos is not None else self.vfs.get_full_info(node, True)
             exists = local_info.get('exists', False)
             problem_file = not node.is_dir and not exists
             if problem_file and not self.show_problem_files:
@@ -2861,9 +2991,10 @@ class DriveBrowser:
                     pass
             count = (node.total_files if node.is_dir else
                      (len(self.vfs.get_hash_dups(node.info.get('hashinfo'))) if _entries is None else 0))
+            icon = self.file_icon({'name': name, 'node': node})
             self.rows.append(dict(name=name, node=node, color=color, indicator=indicator, problem_file=problem_file,
                                   listing_empty=listing_empty,
-                                  label=f'{marker} {"📁" if node.is_dir else "📄"} {name}',
+                                  label=f'{marker} {icon} {name}',
                                   size=('-' if node.is_dir else format_size(node.size, 1).strip()),
                                   dups=(previous_dups.get(node.id, '(?)') if _entries is not None and not node.is_dir
                                         else (f'({count})' if node.is_dir or node.info.get('hashinfo') else '(?)'))))
@@ -3423,6 +3554,8 @@ class DriveBrowser:
         node = preview_node if preview_node is not None else (self.vfs.get_cwd() if directory else row['node'])
         self.preview_bookmark_path = normalize_bookmark_path(node.id)
         info = self.vfs.get_full_info(node)
+        self.load_media_type(node, info)
+        self.video_audio_only = node.info.get('media_type') == 'audio'
         if not node.is_dir and os.path.splitext(node.name)[1].lower() not in IMAGE_SUFFIXES:
             self.action_history.add('view file', node.id, coalesce=True)
 

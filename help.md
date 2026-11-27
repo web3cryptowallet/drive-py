@@ -863,3 +863,26 @@ to their physical target. If an older run already saved /mnt/src, navigate to
 Browsing a tracked location through the OS-root `/` entry reuses its catalog
 metadata: tracked files retain green circles through global and mapped routes;
 files absent from the catalog remain orange.
+
+Video preview stills refit to the actual pane left by duplicate rows and resize
+when that viewport changes. Duplicate reservation shows up to three entries
+before scrolling; fewer duplicates leave more room for the video.
+
+A .mp4 filename may contain audio only. Quick View checks streams before
+requesting a still; audio-only content shows Audio only · Press Play and hides
+the video frame area. Press Play to listen; selection does not autoplay.
+
+Video stills and frames are centered horizontally and vertically inside their
+Quick View video area, above playback controls and duplicates.
+
+Detected stream type is saved in the database and overrides media filename
+extensions: file labels show one leading ♫ for audio or filled ▶ for video,
+including grid labels; no extra play icon is drawn in the thumbnail area. Audio-only .mp4 files use audio controls and are excluded from the
+Videos filter. Saved type is ignored when file size or modification time changes.
+
+Media icons stay before the filename while clipping or panning. Detected type
+is restored from the database across symlink and physical routes to the same
+file; valid older logical-path records are adopted when opened on that route.
+
+The Files table uses one type-icon slot: 📄 file, ♫ music/audio, ▶ video
+(or 📁 directory). Media icons replace the file icon; they are not added beside it.
